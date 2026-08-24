@@ -1,0 +1,20 @@
+# colcon
+build/
+install/
+log/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+
+# editors
+.vscode/
+.idea/
+*.swp
+
+# MAVProxy writes these into its CWD; the unit points it at
+# /var/lib/uav-mavproxy, but a hand-run leaves them here.
+*.tlog
+*.tlog.raw
+mav.parm

@@ -1,0 +1,43 @@
+# rx26_uav udev rules — stable device names + permissions.
+# Install with install_udev.sh.
+#
+# Only the devices ACTUALLY ABOARD get a rule. A symlink for hardware that is
+# not on the airframe is worse than no symlink: it makes a config file look
+# satisfied while pointing at whatever else happened to enumerate.
+#
+# !! NOT YET CONFIRMED ON THIS AIRFRAME. !!
+# The ASV's equivalent file carries a dated "confirmed aboard" line; this one
+# cannot until someone reads the real board's descriptors on the real Jetson.
+# The four Pixhawk rules below are a CANDIDATE LIST covering the boards we might
+# have, not a statement about the one we do. Confirm and prune it — a rule that
+# matches nothing is harmless, but four rules where one board is expected means
+# nobody has looked.
+#
+# Discover attrs for a plugged-in device (install_udev.sh prints these for every
+# attached serial device, which is the fast way):
+#   udevadm info -a -n /dev/ttyACM0 | grep -E 'idVendor|idProduct|serial' | head
+
+# --- Pixhawk (autopilot). Owned EXCLUSIVELY by MAVProxy; everything else uses
+#     the UDP rebroadcast on 14541/14540. The symlink exists so
+#     uav-mavproxy.service never chases ttyACM numbering.
+#
+#     26ac leads because the HAWK'S WORK board in Project.md is a Pixhawk 2.4.8
+#     clone and those usually enumerate as 3DR (26ac:0011). The rest cover a
+#     swap: 1209:5741/5740 ArduPilot/Holybro, 2dae CubePilot.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="26ac", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5741", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5740", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2dae", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
+
+# --- 915MHz telemetry radio (SiK, Silabs CP210x). OPTIONAL: the aircraft flies
+#     without it (the WiFi link carries telemetry), so install_udev.sh does not
+#     warn when it is absent.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="uav-telem", MODE="0660", GROUP="dialout"
+
+# --- NO RULE for the ELRS receiver. The RP3 talks CRSF to the Pixhawk's RC
+#     input, not USB to the Jetson — it never enumerates here. If something
+#     appears that looks like it, trace the cable before adding a rule.
+#
+# --- NO camera rule yet. There is no camera on this airframe; the ASV's OAK-D
+#     usbfs bump is deliberately not carried over. Add both together when one
+#     arrives.

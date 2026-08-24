@@ -1,0 +1,38 @@
+# /etc/systemd/system/uav-mavproxy.service  (Jetson host)
+#
+# TEMPLATE: __UAV_USER__ / __UAV_REPO__ are substituted by
+# setup/install_jetson_host.sh at install time (invoking user + repo path).
+# Do NOT `install` this file verbatim — the placeholders must be expanded.
+#
+# MAVProxy is the SOLE owner of the Pixhawk serial link. Everything else — ROS
+# nodes, QGC on a laptop, anything else — consumes its UDP rebroadcast on
+# 14541 (ROS) and 14540 (GCS). Nothing may open /dev/uav-pixhawk directly.
+[Unit]
+Description=UAV MAVProxy (sole Pixhawk owner)
+After=dev-uav\x2dpixhawk.device network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__UAV_USER__
+# MAVProxy writes mav.tlog / mav.parm into its CWD. systemd's default CWD is /,
+# which the service user cannot write — it errors on every start.
+# StateDirectory creates /var/lib/uav-mavproxy owned by User= on each start;
+# telemetry logs land there instead of in the repo.
+StateDirectory=uav-mavproxy
+WorkingDirectory=/var/lib/uav-mavproxy
+# UAV_BCAST_ADDR and GCS_IPS live in /etc/default/uav so a change of field
+# subnet needs no unit edit. UAV_BCAST_ADDR is the SUBNET BROADCAST ADDRESS
+# (e.g. 192.168.8.255), NOT a laptop IP. GCS_IPS is the escape hatch for
+# laptops broadcast does not reach — space-separated and QUOTED, since systemd
+# takes the rest of the line as one value:
+#     GCS_IPS="192.168.8.50 192.168.1.20"
+# Additive: broadcast stays on regardless. Unset is fine — the script carries
+# its own defaults.
+EnvironmentFile=-/etc/default/uav
+ExecStart=__UAV_REPO__/scripts/start_mavproxy.sh ${UAV_BCAST_ADDR}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,41 @@
+# /etc/systemd/system/uav-power.service  (Jetson host)
+#
+# TEMPLATE: __UAV_REPO__ is substituted by setup/install_jetson_host.sh.
+#
+# The one privileged piece behind the ground station's shutdown and reboot
+# buttons. Runs as root on the HOST, outside every container, and offers a Unix
+# socket with exactly two verbs.
+#
+# WHY THIS EXISTS rather than running the container --privileged: a container
+# shares the host's kernel but has no init of its own to ask, so `shutdown`
+# inside it either fails or does something worse than nothing. The usual
+# workaround buys one button by handing every process in that container root on
+# the Jetson, permanently. This buys the same button with a socket that accepts
+# two words.
+#
+# Ordered after nothing in the flight chain, on purpose. It shares no device
+# with MAVProxy, and coupling it would mean a fault there takes away the ability
+# to shut the machine down cleanly — which is exactly when you want it most.
+[Unit]
+Description=UAV power helper (shutdown/reboot socket for the ground station)
+After=local-fs.target
+
+[Service]
+Type=simple
+# root, deliberately and minimally: `systemctl poweroff` needs it, and this
+# program exists so that NOTHING ELSE does. It never interpolates client input
+# into a command — read the module docstring before editing.
+User=root
+# UAV_POWER_SOCKET / UAV_POWER_GROUP live in /etc/default/uav alongside the
+# other UAV_* settings, so moving the socket needs no unit edit.
+EnvironmentFile=-/etc/default/uav
+ExecStart=/usr/bin/python3 __UAV_REPO__/tools/scripts/uav_power_helper.py
+Restart=on-failure
+RestartSec=5
+# A helper that dies while the aircraft is out should come back, but a helper
+# crash-looping is a bug, not a condition to paper over.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

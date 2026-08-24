@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uav_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    Launch files and the params YAML. Ships no code; it is the build entry
+    point.
+
+    EVERY package must be an exec_depend below. `--packages-up-to uav_bringup`
+    walks this list, so a package missing from it silently stops being built and
+    the failure surfaces as an import error at node start.
+  </description>
+  <maintainer email="chase001cz@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_uav</url>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- core.launch.py imports these directly. -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+
+  <exec_depend>uav_msgs</exec_depend>
+  <exec_depend>uav_common</exec_depend>
+  <exec_depend>uav_fcu</exec_depend>
+  <exec_depend>uav_groundstation</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,224 @@
+# ============================================================================
+# rx26_uav — SINGLE SOURCE OF TRUTH for all ROS-side parameters.
+#
+# Standard ROS 2 parameter-file format: passed to launch via
+#     parameters=[os.path.join(pkg_share, "config", "uav_params.yaml")]
+# or per-node:  ros2 run ... --ros-args --params-file config/uav_params.yaml
+#
+# Node code loads THIS file for its declaration defaults (uav_common/config.py),
+# so a code default can never drift from the file the launch system loads.
+#
+# Parameter posture (enforced in code via ParameterDescriptor):
+#   [RO] read_only — safety/structural; `ros2 param set` is REJECTED; change
+#        here + restart the node (rebuild NOT required, params load at start).
+#   [DYN] dynamic — accepted at runtime via `ros2 param set`, range-validated.
+#
+# ---------------------------------------------------------------------------
+# TWO HARD FORMAT RULES — rcl's parser is stricter than PyYAML. Break either and
+# EVERY node in the launch dies at rclpy.init() with "Couldn't parse params
+# file", before a single line of node code runs (this grounded the whole ASV
+# stack on 2026-07-29):
+#
+#   1. NO YAML anchors/aliases (&name / *name). rcl_yaml_param_parser rejects
+#      them outright — it is a token-level parser, not a YAML document loader.
+#      Values that MUST stay equal across sections are therefore written out
+#      LITERALLY and pinned by tools/scripts/check_config.py instead. If you
+#      change one, change every copy the check names.
+#   2. EVERY top-level key must be a node name whose only child is
+#      `ros__parameters:`. A bare scalar at top level produces "Cannot have a
+#      value before ros__parameters". That is why the `shared` block below —
+#      which is documentation, not a real node — still carries a
+#      `ros__parameters:` level: no node is named `shared`, so rcl parses the
+#      section, matches it to nothing, and ignores it.
+#
+# Do not "tidy" this file back into anchors.
+# ============================================================================
+
+# Canonical values for anything duplicated below. NOT a real node (see rule 2).
+shared:
+  ros__parameters:
+    # Age at which a /uav/pose sample stops being usable. telemetry_bridge uses
+    # it to decide when to STOP republishing a dead MAVLink stream; ocs_client
+    # uses the same number to decide when to stop reporting. One value, because
+    # a consumer trusting a pose for longer than the bridge vouches for it is
+    # exactly the frozen-pose failure this guards against.
+    pose_timeout_s: 1.0
+
+    # The competition geofence, CLOSED (first point == last point).
+    #
+    # THIS MUST EQUAL `uav_geofence` IN THE OCS bridge.toml, vertex for vertex.
+    # The OCS declares this polygon to RoboNation and the autopilot enforces it;
+    # if the two disagree, we are flying a different box than we declared. It is
+    # duplicated into both node sections below (rcl forbids anchors) and
+    # tools/scripts/check_config.py pins all three copies together.
+    #
+    # RoboNation's test_server REJECTS a declaration outright when a vehicle id
+    # starts with "UAV" and the fence has fewer than 4 points, so a wrong fence
+    # here fails a RUN, not just a flight.
+    #
+    # PLACEHOLDER, but at the right venue: a ~200 m box around the Singapore
+    # course corners their test_server publishes (1.2803, 103.8557). NOT the
+    # competition geofence. Replace before the competition, in BOTH repos.
+    geofence:
+      - [1.28010, 103.85520]
+      - [1.28010, 103.85625]
+      - [1.28110, 103.85625]
+      - [1.28110, 103.85520]
+      - [1.28010, 103.85520]
+
+    # HAE = AMSL + this. GLOBAL_POSITION_INT.alt is height above MEAN SEA LEVEL;
+    # RoboNation's Heartbeat.altitude_hae_m wants height above the WGS84
+    # ELLIPSOID. The difference is the geoid separation: tens of metres, and
+    # venue-specific.
+    #
+    # -24.6 is SARASOTA (what rx26_ocs/fake_vehicle.py uses). Singapore is
+    # different. MUST BE CHECKED AGAINST THE ACTUAL COURSE before the
+    # competition — this is the kind of constant that is silently wrong by tens
+    # of metres and nothing downstream will complain.
+    geoid_separation_m: -24.6
+
+telemetry_bridge:
+  ros__parameters:
+    mav_endpoint: "udp:127.0.0.1:14541"    # [RO] MAVProxy rebroadcast, never
+                                           #      serial. 14541, NOT the ASV's
+                                           #      14551 — the two vehicles share
+                                           #      a subnet; see README ports.
+    mav_source_system: 200                 # [RO] our MAVLink sysid. MUST differ
+                                           #      from MAVProxy's 255 or the
+                                           #      geofence upload's
+                                           #      MISSION_REQUEST_INT replies
+                                           #      are ambiguous between us.
+    drop_channel: 7                        # [RO] autonomy-drop RC channel (1..18)
+    drop_threshold: 1700                   # [RO] us; crossing trips the latch
+    drop_invert: false                     # [RO]
+    rc_stale_timeout: 1.0                  # [RO] s without RC -> trip
+    stream_timeout_s: 1.0                  # [RO] = shared.pose_timeout_s; s
+                                           #      before a stale MAVLink stream
+                                           #      stops being republished
+    fence_timeout_s: 5.0                   # [RO] per-exchange timeout in the
+                                           #      fence mission dialog
+    geofence:                              # [RO] = shared.geofence (pinned by
+                                           #      check_config.py). CLOSED ring;
+                                           #      the closing point is stripped
+                                           #      on upload because ArduPilot
+                                           #      closes polygons implicitly.
+      - [1.28010, 103.85520]
+      - [1.28010, 103.85625]
+      - [1.28110, 103.85625]
+      - [1.28110, 103.85520]
+      - [1.28010, 103.85520]
+
+ocs_client:
+  ros__parameters:
+    ocs_host: "192.168.8.107"              # [RO] the OCS laptop on the TEAM
+                                           #      subnet, over WiFi. There is NO
+                                           #      discovery: give it a DHCP
+                                           #      reservation on the team router
+                                           #      and set this to match.
+                                           #      NOT 127.0.0.1 — that is this
+                                           #      Jetson, and the connect fails.
+    ocs_port: 37564                        # [RO] = [tcp] port in the OCS
+                                           #      bridge.toml. Clear of 8090
+                                           #      (ground_station).
+    vehicle_id: "UAV1"                     # [RO] MUST match a [[vehicle]] id in
+                                           #      the OCS bridge.toml, or the
+                                           #      OCS drops every frame with
+                                           #      "not a configured vehicle"
+    team_id: "ASTA"                        # [RO] = bridge.toml team_id
+    rate_hz: 2.0                           # [RO] the handbook mandates 2 Hz per
+                                           #      active vehicle; the OCS rate
+                                           #      governor reserves budget for it
+    fake_telemetry: false                  # [RO] true = invent a circle instead
+                                           #      of subscribing, for bench work
+                                           #      with no Pixhawk. Logs a warning
+                                           #      the whole time it is on. NEVER
+                                           #      leave true for a scored run.
+    geoid_separation_m: -24.6              # [RO] = shared.geoid_separation_m.
+                                           #      VENUE-SPECIFIC — see above.
+    airborne_alt_m: 1.0                    # [RO] fallback airborne threshold on
+                                           #      altitude_rel. Used ONLY when
+                                           #      EXTENDED_SYS_STATE is absent;
+                                           #      the autopilot's own landed
+                                           #      state wins whenever it is
+                                           #      fresh. Raise SR0_EXT_STAT
+                                           #      rather than tuning this.
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s; stale
+                                           #      -> NO heartbeat, rather than a
+                                           #      fabricated position
+    attitude_timeout_s: 1.0                # [RO] stale -> roll/pitch omitted,
+                                           #      the rest still goes
+    status_timeout_s: 1.0                  # [RO] stale -> no heartbeat at all,
+                                           #      since state cannot be known
+    flight_timeout_s: 1.0                  # [RO] stale -> fall back to
+                                           #      armed+altitude, loudly
+
+ground_station:
+  ros__parameters:
+    port: 8090                             # [RO] HTTP port
+    bind_host: "0.0.0.0"                   # [RO] must NOT be 127.0.0.1 or the
+                                           #      laptop cannot reach it
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s
+    attitude_timeout_s: 1.0                # [RO] stale -> attitude readout greys
+    status_timeout_s: 1.0                  # [RO] mode/armed readout. ALSO the
+                                           #      power interlock: an UNKNOWN
+                                           #      armed state locks power,
+                                           #      because a missing FcuStatus
+                                           #      usually means the bridge is
+                                           #      down, which is not evidence
+                                           #      the aircraft is safe to reboot.
+    flight_timeout_s: 1.0                  # [RO] stale -> landed-state greys
+    poll_period_s: 0.2                     # [RO] browser -> /state
+    graph_period_s: 1.0                    # [DYN] how often the ROS node graph
+                                           #       is scanned. Once per browser
+                                           #       poll per client would put
+                                           #       discovery traffic on the wire
+                                           #       in proportion to viewers.
+    trail_length: 600                      # [DYN] track points kept
+    trail_min_move_m: 0.5                  # [DYN] distance-gated, not
+                                           #       time-gated: a time gate
+                                           #       saturates the trail while the
+                                           #       aircraft sits still
+    log_capacity: 1500                     # [RO] /rosout lines kept in the ring.
+                                           #      Bounded because a node in a
+                                           #      failure loop emits thousands a
+                                           #      minute, and running the Jetson
+                                           #      out of memory during exactly
+                                           #      that failure helps nobody.
+    tools_dir: "/root/robotx_ws/src/rx26_uav/tools"   # [RO] where tools/*.py
+                                           #      live INSIDE the container
+    power_socket: "/run/uav-power.sock"    # [RO] host power helper socket,
+                                           #      bind-mounted into the
+                                           #      container. A container CANNOT
+                                           #      power off the Jetson on its
+                                           #      own; see uav_power_helper.py.
+    allow_power: false                     # [RO] master switch for the power
+                                           #      tab. FALSE by default: the
+                                           #      helper needs a host-side unit
+                                           #      installed first, and a button
+                                           #      that silently does nothing is
+                                           #      worse than one that is openly
+                                           #      off. Flip to true once
+                                           #      uav-power.service is running
+                                           #      and you have decided a browser
+                                           #      may halt this Jetson.
+    disk_path: "/"                         # [RO] filesystem reported as free.
+                                           #      Inside a container this is the
+                                           #      CONTAINER's view, so the tab
+                                           #      prints the path it measured.
+    workspace_path: "/root/robotx_ws"      # [RO] checked at startup for being a
+                                           #      BIND MOUNT. If it is not, a
+                                           #      `git pull` on the host is
+                                           #      invisible in here and a
+                                           #      rebuild silently changes
+                                           #      nothing — see the System tab.
+    geofence:                              # [RO] = shared.geofence (pinned by
+                                           #      check_config.py). Drawn on the
+                                           #      Map tab, so the operator sees
+                                           #      the polygon that was uploaded
+                                           #      rather than a second copy that
+                                           #      can drift.
+      - [1.28010, 103.85520]
+      - [1.28010, 103.85625]
+      - [1.28110, 103.85625]
+      - [1.28110, 103.85520]
+      - [1.28010, 103.85520]

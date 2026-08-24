@@ -1,0 +1,28 @@
+# /etc/systemd/system/uav-container.service  (Jetson host)
+#
+# TEMPLATE: __UAV_USER__ / __UAV_CONTAINER__ are substituted by
+# setup/install_jetson_host.sh at install time.
+#
+# Starts the ROS 2 Humble container AFTER MAVProxy owns the Pixhawk, so no node
+# ever races MAVProxy for the serial device.
+#
+# NOTE this is `docker start`, which CANNOT add or change bind mounts — those
+# are fixed when the container is CREATED. If the workspace mount is missing,
+# this unit cannot fix it; setup/install_jetson_host.sh checks and prints the
+# `docker run` line instead.
+[Unit]
+Description=UAV ROS 2 Humble container
+After=docker.service uav-mavproxy.service
+Requires=docker.service
+Wants=uav-mavproxy.service
+
+[Service]
+Type=simple
+User=__UAV_USER__
+ExecStart=/usr/bin/docker start -a __UAV_CONTAINER__
+ExecStop=/usr/bin/docker stop -t 10 __UAV_CONTAINER__
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

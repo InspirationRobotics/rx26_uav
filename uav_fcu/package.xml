@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uav_fcu</name>
+  <version>0.1.0</version>
+  <description>
+    The autopilot gateway. telemetry_bridge is the single ROS-side consumer of
+    the MAVProxy rebroadcast and the single sender back to it. Nothing else in
+    the workspace may open a MAVLink connection.
+
+    It carries NO disarm path, deliberately — see the module header.
+  </description>
+  <maintainer email="chase001cz@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_uav</url>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>uav_msgs</depend>
+  <depend>uav_common</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
