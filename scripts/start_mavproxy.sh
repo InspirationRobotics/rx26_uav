@@ -54,6 +54,28 @@ set -euo pipefail
 BCAST_ADDR="${1:-192.168.8.255}"         # override if the field subnet changes
 MASTER="${UAV_PIXHAWK_DEV:-/dev/uav-pixhawk}"
 
+# Checked BEFORE the device, because a missing interpreter is the failure that
+# explains itself worst. `exec mavproxy.py` when it is not installed exits 127
+# and systemd logs one ellipsized "command not found" line naming neither what
+# was missing nor where it should have come from.
+#
+# NOTE the PATH trap this also catches: `pip3 install --user MAVProxy` puts
+# mavproxy.py in ~/.local/bin, which is NOT on systemd's default PATH. It then
+# works perfectly when you type it in a shell and keeps failing here. Install it
+# with sudo so it lands in /usr/local/bin.
+if ! command -v mavproxy.py >/dev/null 2>&1; then
+  echo "ERROR: mavproxy.py is not on PATH." >&2
+  echo "  MAVProxy runs on the HOST (it owns the Pixhawk serial link); it is" >&2
+  echo "  deliberately NOT in the container. Install it system-wide:" >&2
+  echo "    sudo apt install -y python3-pip python3-dev python3-lxml" >&2
+  echo "    sudo pip3 install MAVProxy" >&2
+  echo "  NOT 'pip3 install --user' — that lands in ~/.local/bin, which is not" >&2
+  echo "  on systemd's PATH, so the service keeps failing while the command" >&2
+  echo "  works fine in your shell." >&2
+  echo "  Current PATH: $PATH" >&2
+  exit 1
+fi
+
 if [ ! -e "$MASTER" ]; then
   echo "ERROR: Pixhawk device $MASTER not found." >&2
   echo "  Check the udev symlink (sudo bash tools/udev/install_udev.sh) or set" >&2

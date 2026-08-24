@@ -6,16 +6,27 @@
 # unattended boot chain in dependency order:
 #
 #   [1] workspace layout      ~/robotx_ws/src/rx26_uav
-#   [2] udev rules            stable /dev/uav-pixhawk
-#   [3] systemd units         mavproxy -> container -> ground station + OCS client
-#   [4] container             created if absent; mounts CHECKED if present
-#   [5] sanity checks
+#   [2] executable bits       or systemd fails ExecStart with a bare 203/EXEC
+#   [3] host prerequisites    docker + MAVProxy, with the exact fix for each
+#   [4] udev rules + dialout  stable /dev/uav-pixhawk, and permission to OPEN it
+#   [5] systemd units         mavproxy -> container -> ground station + OCS client
+#   [6] power helper          started BEFORE the container, so its socket exists
+#   [7] container             created if absent; mounts CHECKED if present
 #
 # Usage:   sudo bash setup/install_jetson_host.sh
 #
 # Idempotent: safe to re-run. It never deletes a container and never moves a git
 # repo — both of those can destroy work, so where one is needed it prints the
 # command and stops.
+#
+# EVERY CHECK IN HERE EXISTS BECAUSE IT ACTUALLY BIT SOMEONE during the first
+# bring-up on Ekko (2026-08-24). In order: the params file used a nested list
+# that rcl cannot declare; rebuild.sh aborted because `set -u` met ROS's
+# setup.bash; systemd refused the scripts with 203/EXEC because git carried no
+# +x; MAVProxy was not installed and gave a bare 127; and the service user was
+# not in dialout, so MAVProxy imported for 1.4 s and then failed to open the
+# autopilot with status=1. None of those name their own cause. That is what the
+# steps below are for.
 # ============================================================================
 set -euo pipefail
 
@@ -52,7 +63,7 @@ UAV_CONTAINER="${UAV_CONTAINER:-uav}"
 UAV_IMAGE="${UAV_IMAGE:-uav}"
 POWER_SOCK="${UAV_POWER_SOCKET:-/run/uav-power.sock}"
 
-echo "== [1/5] workspace layout =="
+echo "== [1/7] workspace layout =="
 # The workspace is DERIVED FROM THE REPO, not from a constant, so a workspace
 # somewhere other than ~/robotx_ws keeps working.
 #   <WS>/src/rx26_uav  ->  WS is two levels up
@@ -99,10 +110,95 @@ echo "   user:       $UAV_USER  (home $USER_HOME)"
 other="$(find "$WS_HOST/src" -maxdepth 1 -mindepth 1 -type d ! -name rx26_uav -printf '%f ' 2>/dev/null || true)"
 [[ -n "$other" ]] && echo "   note: other sources in src/: $other (drop a COLCON_IGNORE in any you do not build)"
 
-echo "== [2/5] udev rules (stable /dev/uav-pixhawk) =="
+echo "== [2/7] executable bits =="
+# ---------------------------------------------------------------------------
+# Make the scripts systemd will exec DIRECTLY executable.
+#
+# systemd calls execve() on ExecStart=, so a script without +x fails with
+#   Main PID: ... (code=exited, status=203/EXEC)
+# which names no file and no reason. It is the single least informative failure
+# in the whole boot chain.
+#
+# Git records the mode bit, so a clone is fine — but these files also travel by
+# zip, scp, rsync -r and cloud sync, every one of which drops it. Re-asserting
+# it here costs nothing and removes a failure mode that is pure lost time.
+# ---------------------------------------------------------------------------
+for d in scripts setup tools/udev tools/scripts tools/bench; do
+  chmod +x "$UAV_REPO/$d"/*.sh "$UAV_REPO/$d"/*.py 2>/dev/null || true
+done
+# Named explicitly rather than trusted to the loop: these three are the ones
+# systemd execs, so if any of them is still not executable, say so now instead
+# of at the next boot.
+for s in scripts/start_mavproxy.sh scripts/run_in_container.sh; do
+  [[ -x "$UAV_REPO/$s" ]] || { echo "ERROR: $s is not executable and chmod did not fix it." >&2
+                               echo "       systemd will fail it with 203/EXEC." >&2
+                               ls -l "$UAV_REPO/$s" >&2; exit 1; }
+done
+echo "   scripts are executable"
+
+echo "== [3/7] host prerequisites =="
+# ---------------------------------------------------------------------------
+# Checked HERE, before any unit is enabled, because both of these fail at boot
+# with an error that names neither the missing thing nor where it comes from.
+# A WARN at the end of a long install scrolls past; a named fix does not.
+# ---------------------------------------------------------------------------
+missing_prereq=0
+
+if command -v mavproxy.py >/dev/null 2>&1; then
+  echo "   mavproxy.py: $(command -v mavproxy.py)"
+else
+  missing_prereq=1
+  echo "MISSING: mavproxy.py is not on PATH."
+  echo "   uav-mavproxy.service will fail with status=127 (command not found)."
+  echo "   MAVProxy runs on the HOST — it owns the Pixhawk serial link and is"
+  echo "   deliberately NOT in the container. Install it SYSTEM-WIDE:"
+  echo "     sudo apt install -y python3-pip python3-dev python3-lxml"
+  echo "     sudo pip3 install MAVProxy"
+  echo "   NOT 'pip3 install --user': that lands in ~/.local/bin, which is not"
+  echo "   on systemd's PATH, so it works in your shell and keeps failing here."
+fi
+
+if command -v docker >/dev/null 2>&1; then
+  echo "   docker:      $(command -v docker)"
+else
+  missing_prereq=1
+  echo "MISSING: docker is not installed — uav-container.service will fail."
+fi
+
+if (( missing_prereq )); then
+  echo
+  echo "   Continuing: the units below will be installed and enabled, but any"
+  echo "   service whose prerequisite is missing will fail until you fix it."
+  echo "   Re-run this script afterwards; it is idempotent."
+fi
+
+echo "== [4/7] udev rules + dialout (stable /dev/uav-pixhawk) =="
 bash tools/udev/install_udev.sh
 
-echo "== [3/5] systemd units =="
+# ---------------------------------------------------------------------------
+# The service user must be in `dialout`, or it cannot OPEN the autopilot.
+#
+# 99-uav.rules sets MODE="0660" GROUP="dialout" on the Pixhawk tty, and
+# uav-mavproxy.service runs as User=$UAV_USER. If that user is not in dialout,
+# MAVProxy starts, pays the full Python import cost, fails to open the device
+# and exits 1 — roughly 1.4 s of CPU for a permission error. The unit reports
+# `status=1/FAILURE` and nothing about permissions.
+#
+# Group membership only takes effect on a NEW session, which is why this is
+# worth doing here rather than leaving to the operator: systemd starts a fresh
+# process each time, so the service picks it up on the next start even though
+# the user's existing shell will not.
+# ---------------------------------------------------------------------------
+if id -nG "$UAV_USER" | tr ' ' '\n' | grep -qx dialout; then
+  echo "   $UAV_USER is already in dialout"
+else
+  usermod -aG dialout "$UAV_USER"
+  echo "   added $UAV_USER to dialout (needed to open /dev/uav-pixhawk)"
+  echo "   NOTE: your existing shell does not have it until you log out and"
+  echo "         back in; systemd services pick it up on their next start."
+fi
+
+echo "== [5/7] systemd units =="
 # The units are TEMPLATES: the service account, repo path and container name
 # differ per Jetson, and a hardcoded /home/<someone> fails silently at boot —
 # which you discover in the field.
@@ -152,7 +248,7 @@ systemctl enable "${UNITS[@]}" >/dev/null
 echo "   enabled all five; start now with:"
 echo "     systemctl start ${UNITS[*]}"
 
-echo "== [4/5] container =="
+echo "== [6/7] power helper, then [7/7] container =="
 # ---------------------------------------------------------------------------
 # THE POWER SOCKET MUST EXIST BEFORE THE CONTAINER IS CREATED.
 #
@@ -245,18 +341,68 @@ else
   echo "        docker build -t $UAV_IMAGE $UAV_REPO"
 fi
 
-echo "== [5/5] sanity checks =="
-command -v mavproxy.py >/dev/null \
-  || echo "WARN: mavproxy.py not on PATH — uav-mavproxy.service will fail."
-[[ -e /dev/uav-pixhawk ]] \
-  || echo "WARN: /dev/uav-pixhawk does not exist yet. Plug/replug the Pixhawk, or confirm its VID/PID (tools/udev/99-uav.rules says how)."
-python3 "$UAV_REPO/tools/scripts/check_config.py" >/dev/null 2>&1 \
-  || echo "WARN: check_config.py reports problems — run it directly to see them."
+echo "== verification =="
+# Prerequisites were checked in [3/7]; these are the things that can only be
+# judged AFTER the rules and units are in place.
+problems=0
+
+if [[ -e /dev/uav-pixhawk ]]; then
+  echo "   /dev/uav-pixhawk -> $(readlink -f /dev/uav-pixhawk)"
+  # The rule sets GROUP="dialout"; confirm the DEVICE agrees. A rule that
+  # matched with a different group leaves the service failing to open the
+  # autopilot with status=1 and no mention of permissions anywhere.
+  dev_grp="$(stat -c '%G' "$(readlink -f /dev/uav-pixhawk)" 2>/dev/null || echo '?')"
+  if [[ "$dev_grp" != "dialout" ]]; then
+    echo "WARN: it is group '$dev_grp', not dialout. $UAV_USER cannot open it,"
+    echo "      and uav-mavproxy will exit 1 without saying why."
+    echo "      Fix GROUP= in tools/udev/99-uav.rules, or add $UAV_USER to it."
+    problems=1
+  fi
+else
+  echo "WARN: /dev/uav-pixhawk does not exist yet."
+  echo "      Either the Pixhawk is unplugged, or its USB VID/PID is not in"
+  echo "      tools/udev/99-uav.rules — that file says its four Pixhawk lines"
+  echo "      are a CANDIDATE list, not a confirmed one. To find the real one:"
+  echo "        udevadm info -a -n /dev/ttyACM0 | grep -E 'idVendor|idProduct' | head -4"
+  problems=1
+fi
+
+if ! python3 "$UAV_REPO/tools/scripts/check_config.py" >/dev/null 2>&1; then
+  echo "WARN: check_config.py reports problems — the params file can ground the"
+  echo "      aircraft, so read them:  python3 tools/scripts/check_config.py"
+  problems=1
+fi
 
 echo
-echo "Done. Ports on this vehicle: 14541 -> ROS, 14540 -> GCS (the boat uses 1455x)."
-echo "  systemctl start ${UNITS[*]}"
-echo "  http://\$(hostname -I | awk '{print \$1}'):8090"
+echo "======================================================================"
+if (( problems || missing_prereq )); then
+  echo "Host install COMPLETE, with warnings above to clear first."
+else
+  echo "Host install COMPLETE."
+fi
+echo "Ports on this vehicle: 14541 -> ROS, 14540 -> GCS (the boat uses 1455x)."
+echo
+echo "NEXT, in order:"
+# Container first, matching step [7]'s own order: an existing container works
+# whether or not its image is still around, so advising a rebuild there would
+# send someone down a path they do not need.
+if docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
+  echo "  1. docker exec $UAV_CONTAINER bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh"
+  echo "  2. systemctl start ${UNITS[*]}"
+  echo "  3. open http://<this jetson>:8090"
+elif ! docker image inspect "$UAV_IMAGE" >/dev/null 2>&1; then
+  echo "  1. docker build -t $UAV_IMAGE $UAV_REPO      # ~10-20 min on an Orin"
+  echo "  2. sudo bash setup/install_jetson_host.sh   # re-run: creates the container"
+  echo "  3. docker exec $UAV_CONTAINER bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh"
+  echo "  4. systemctl start ${UNITS[*]}"
+else
+  echo "  1. sudo bash setup/install_jetson_host.sh   # re-run: creates the container"
+  echo "  2. docker exec $UAV_CONTAINER bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh"
+  echo "  3. systemctl start ${UNITS[*]}"
+fi
+echo
+echo "If a unit fails, README.md has a Troubleshooting table keyed by the exact"
+echo "status code systemd prints (203/EXEC, 127, 1/FAILURE, ...)."
 echo
 echo "Everyday loop after a code change:"
 echo "  cd $UAV_REPO && git pull"
@@ -264,3 +410,4 @@ echo "  docker exec $UAV_CONTAINER bash -lc '/root/robotx_ws/src/rx26_uav/tools/
 echo "  systemctl restart uav-groundstation uav-ocs-client"
 echo "A pull WITHOUT a rebuild changes nothing that is running — colcon installs"
 echo "into install/, and the node does not import from src/."
+echo "======================================================================"

@@ -1,0 +1,14 @@
+# Shell scripts and Python MUST be LF, whatever the checkout platform.
+#
+# A CRLF shebang becomes `#!/usr/bin/env bash\r`, the kernel looks for an
+# interpreter literally named "bash\r", and systemd reports 203/EXEC — a failure
+# that names neither the file nor the reason. This repo is edited on Windows and
+# run on a Jetson, so that path is live rather than theoretical.
+* text=auto eol=lf
+*.sh    text eol=lf
+*.py    text eol=lf
+*.bash  text eol=lf
+*.service text eol=lf
+*.rules text eol=lf
+*.yaml  text eol=lf
+Dockerfile text eol=lf
