@@ -75,7 +75,10 @@ Parameters:
   rc_stale_timeout   (float, 1.0)  s without RC_CHANNELS -> trip
   stream_timeout_s   (float, 1.0)  s without a frame before a stream stops being
                                    republished
-  geofence           (list)        [[lat, lon], ...] CLOSED; uploaded on request
+  geofence           (float[])     FLAT [lat, lon, lat, lon, ...], CLOSED;
+                                   uploaded on request. Flat because ROS
+                                   parameters cannot nest — see
+                                   fence_core.polygon_from_flat
   fence_timeout_s    (float, 5.0)  per-exchange timeout in the mission dialog
 """
 import queue
@@ -93,7 +96,7 @@ from uav_common import config as uav_config
 from uav_common import geo
 from uav_common.drop_latch import DropLatch
 from uav_common.fence_core import (FenceError, FenceProtocol, MavFenceTransport,
-                                   items_from_polygon)
+                                   items_from_polygon, polygon_from_flat)
 from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config
 from uav_common.stream_cache import StreamCache
@@ -117,8 +120,10 @@ PARAM_SPEC = {
     "stream_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
                              description="s without a MAVLink frame before "
                                          "that stream stops being republished"),
+    # FLAT [lat, lon, lat, lon, ...]: ROS parameters cannot nest. See
+    # fence_core.polygon_from_flat.
     "geofence": dict(read_only=True,
-                     description="[[lat, lon], ...] CLOSED ring; MUST equal "
+                     description="FLAT [lat,lon,...] CLOSED ring; MUST equal "
                                  "uav_geofence in the OCS bridge.toml"),
     "fence_timeout_s": dict(read_only=True, lo=1.0, hi=60.0,
                             description="per-exchange timeout, fence dialog"),
@@ -152,7 +157,7 @@ class TelemetryBridge(Node):
         # Validated at construction, not at the first service call. A malformed
         # geofence is a config error, and finding it when someone presses the
         # button — which will be on a flight line — is finding it too late.
-        self._fence_items = items_from_polygon(p["geofence"])
+        self._fence_items = items_from_polygon(polygon_from_flat(p["geofence"]))
         self.get_logger().info(
             "geofence: %d vertices, ready to upload on /uav/fence_upload"
             % len(self._fence_items))

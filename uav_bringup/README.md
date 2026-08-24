@@ -30,6 +30,22 @@ human reading the file does not catch them:
    including `shared`, which is documentation that no node loads. It carries that
    level only because rcl rejects a top-level scalar.
 
+**A third constraint, learned the hard way: parameters cannot nest.** rclpy
+accepts scalars and homogeneous *flat* arrays only. The geofence was originally
+`[[lat, lon], ...]`, which PyYAML and `check_config.py` both accepted and which
+killed `ground_station` at startup with
+
+```
+TypeError: The given value is not a list of one of the allowed types
+```
+
+It is now a flat `[lat, lon, lat, lon, ...]`, paired back up by
+`uav_common.fence_core.polygon_from_flat` — the one place that conversion lives.
+The OCS's `bridge.toml` still nests its copy, because TOML has no such
+restriction and that file is read by a plain Python program rather than by rcl.
+`check_config.py` compares across the two spellings, and fails if this one is
+ever re-nested.
+
 So values that must stay equal are written out **literally**, several times, and
 `tools/scripts/check_config.py` is the only thing that notices when one drifts.
 

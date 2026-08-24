@@ -153,6 +153,40 @@ echo "   enabled all five; start now with:"
 echo "     systemctl start ${UNITS[*]}"
 
 echo "== [4/5] container =="
+# ---------------------------------------------------------------------------
+# THE POWER SOCKET MUST EXIST BEFORE THE CONTAINER IS CREATED.
+#
+# `docker run -v /run/uav-power.sock:/run/uav-power.sock` when that path does
+# not exist makes Docker create a DIRECTORY there — on the host. Two things then
+# break, and neither is obvious:
+#   * the container mounts a directory where it expects a socket, so the System
+#     tab reports the helper unreachable forever;
+#   * uav_power_helper.py's os.unlink() of the stale socket fails with
+#     IsADirectoryError, so uav-power.service crash-loops at every boot.
+# Starting the helper first means the socket is a real socket when Docker binds
+# it. This is cheap and idempotent, so it runs unconditionally.
+if [[ -d "$POWER_SOCK" ]]; then
+  # Left by exactly the mistake described above, on an earlier run.
+  echo "   removing a DIRECTORY at $POWER_SOCK (Docker made it; it belongs to"
+  echo "   an earlier container created before the helper was running)"
+  systemctl stop uav-container 2>/dev/null || true
+  rmdir "$POWER_SOCK" 2>/dev/null || rm -rf "$POWER_SOCK"
+fi
+# The helper chowns the socket to this group. Without it the socket is
+# root-only and the helper logs a warning that reads like a failure — harmless
+# here (the container runs as root) but confusing.
+groupadd -f "${UAV_POWER_GROUP:-uav}" 2>/dev/null || true
+systemctl start uav-power || echo "WARN: uav-power did not start; the System tab will say so."
+for _ in 1 2 3 4 5; do [[ -S "$POWER_SOCK" ]] && break; sleep 1; done
+if [[ -S "$POWER_SOCK" ]]; then
+  echo "   power socket ready at $POWER_SOCK"
+else
+  echo "WARN: $POWER_SOCK is not a socket yet. The container will still be"
+  echo "      created, but bind-mounting a missing path makes Docker invent a"
+  echo "      directory — so the power tab will not work until you fix the"
+  echo "      helper (journalctl -u uav-power) and recreate the container."
+fi
+
 # `docker start` CANNOT add mounts — they are fixed when the container is
 # CREATED. So this step splits on a distinction that matters:
 #   absent  -> create it (nothing exists to lose)

@@ -111,11 +111,36 @@ def check_pinned(cfg):
                      % (csec, cname, canonical, sec, name, v))
 
 
+def _pairs(flat):
+    """Flat [lat, lon, ...] -> [(lat, lon), ...]. None if it cannot be paired.
+
+    Mirrors uav_common.fence_core.polygon_from_flat, deliberately: this script
+    runs with no ROS workspace sourced (CI, a laptop), so it cannot import from
+    the packages it checks. Six lines duplicated is the price of that.
+    """
+    if any(not isinstance(v, (int, float)) or isinstance(v, bool) for v in flat):
+        return None
+    if len(flat) % 2:
+        return None
+    return [(float(flat[i]), float(flat[i + 1])) for i in range(0, len(flat), 2)]
+
+
 def check_geofence(cfg):
     fence = get(cfg, "shared", "geofence")
     if not fence:
         return None
-    pts = [tuple(p) for p in fence]
+    if any(isinstance(v, (list, tuple)) for v in fence):
+        fail("geofence is NESTED. ROS 2 parameters cannot nest — rclpy rejects "
+             "a list of pairs at declare_parameter() and the node dies before "
+             "any of its code runs. Write it FLAT: [lat, lon, lat, lon, ...]. "
+             "uav_common.fence_core.polygon_from_flat pairs them back up.")
+        return None
+    pts = _pairs(fence)
+    if pts is None:
+        fail("geofence must be a FLAT list of an EVEN number of plain numbers "
+             "(lat, lon, lat, lon, ...); got %d entries. A dropped coordinate "
+             "shifts every pair after it." % len(fence))
+        return None
     if len(pts) < 2 or pts[0] != pts[-1]:
         fail("geofence is not CLOSED (first point must equal last). The OCS "
              "declaration requires a closed ring; the closing point is stripped "

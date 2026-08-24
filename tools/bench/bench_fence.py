@@ -18,16 +18,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
                                 "uav_common"))
 
 from uav_common.fence_core import (  # noqa: E402
-    ACK_ACCEPTED, FenceError, FenceProtocol, items_from_polygon)
+    ACK_ACCEPTED, FenceError, FenceProtocol, items_from_polygon,
+    polygon_from_flat)
 
-# The bench.toml fence from rx26_ocs, closed, as it appears in uav_params.yaml.
-FENCE = [
-    [1.28010, 103.85520],
-    [1.28010, 103.85625],
-    [1.28110, 103.85625],
-    [1.28110, 103.85520],
-    [1.28010, 103.85520],
+# Exactly as uav_params.yaml carries it: FLAT, because ROS parameters cannot
+# nest. Written this way on purpose so the bench exercises the same conversion
+# the node does rather than a tidier shape that never reaches production.
+FENCE_FLAT = [
+    1.28010, 103.85520,
+    1.28010, 103.85625,
+    1.28110, 103.85625,
+    1.28110, 103.85520,
+    1.28010, 103.85520,
 ]
+FENCE = polygon_from_flat(FENCE_FLAT)
 
 
 class FakeAutopilot:
@@ -122,8 +126,15 @@ def case(name, corrupt, expect_ok):
 
 
 def main():
-    print("geofence: %d closed points -> %d uploaded vertices\n"
-          % (len(FENCE), len(items_from_polygon(FENCE))))
+    print("geofence: %d flat values -> %d closed points -> %d uploaded vertices"
+          % (len(FENCE_FLAT), len(FENCE), len(items_from_polygon(FENCE))))
+    # An odd count is a dropped coordinate, which silently shifts every pair
+    # after it; prove it is refused rather than quietly mis-paired.
+    try:
+        polygon_from_flat(FENCE_FLAT[:-1])
+        print("odd flat list  FAIL  accepted a dropped coordinate\n")
+    except FenceError as e:
+        print("odd flat list  PASS  %s\n" % str(e).split("—")[0].strip()[:62])
     results = [
         case("happy path", None, True),
         case("reject", "reject", False),

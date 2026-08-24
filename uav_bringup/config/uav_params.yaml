@@ -44,7 +44,18 @@ shared:
     # exactly the frozen-pose failure this guards against.
     pose_timeout_s: 1.0
 
-    # The competition geofence, CLOSED (first point == last point).
+    # The competition geofence, CLOSED (last pair == first pair).
+    #
+    # FLAT [lat, lon, lat, lon, ...], NOT a list of pairs. ROS 2 parameters
+    # cannot nest: rclpy accepts scalars and homogeneous FLAT arrays only, and a
+    # list of pairs is rejected at declare_parameter() with "The given value is
+    # not a list of one of the allowed types" — which kills the node before any
+    # of its code runs. uav_common.fence_core.polygon_from_flat is the single
+    # place that pairs them back up. Do NOT re-nest this; it will not load.
+    #
+    # The OCS's bridge.toml nests its copy, because TOML has no such
+    # restriction and that file is read by a plain Python program rather than by
+    # rcl. Same polygon, two spellings; check_config.py compares across them.
     #
     # THIS MUST EQUAL `uav_geofence` IN THE OCS bridge.toml, vertex for vertex.
     # The OCS declares this polygon to RoboNation and the autopilot enforces it;
@@ -60,11 +71,17 @@ shared:
     # course corners their test_server publishes (1.2803, 103.8557). NOT the
     # competition geofence. Replace before the competition, in BOTH repos.
     geofence:
-      - [1.28010, 103.85520]
-      - [1.28010, 103.85625]
-      - [1.28110, 103.85625]
-      - [1.28110, 103.85520]
-      - [1.28010, 103.85520]
+      # lat,  lon,          lat,  lon,  ...  CLOSED (last pair == first)
+      - 1.28010
+      - 103.85520
+      - 1.28010
+      - 103.85625
+      - 1.28110
+      - 103.85625
+      - 1.28110
+      - 103.85520
+      - 1.28010
+      - 103.85520
 
     # HAE = AMSL + this. GLOBAL_POSITION_INT.alt is height above MEAN SEA LEVEL;
     # RoboNation's Heartbeat.altitude_hae_m wants height above the WGS84
@@ -102,11 +119,17 @@ telemetry_bridge:
                                            #      the closing point is stripped
                                            #      on upload because ArduPilot
                                            #      closes polygons implicitly.
-      - [1.28010, 103.85520]
-      - [1.28010, 103.85625]
-      - [1.28110, 103.85625]
-      - [1.28110, 103.85520]
-      - [1.28010, 103.85520]
+      # lat,  lon,          lat,  lon,  ...  CLOSED (last pair == first)
+      - 1.28010
+      - 103.85520
+      - 1.28010
+      - 103.85625
+      - 1.28110
+      - 103.85625
+      - 1.28110
+      - 103.85520
+      - 1.28010
+      - 103.85520
 
 ocs_client:
   ros__parameters:
@@ -217,8 +240,14 @@ ground_station:
                                            #      the polygon that was uploaded
                                            #      rather than a second copy that
                                            #      can drift.
-      - [1.28010, 103.85520]
-      - [1.28010, 103.85625]
-      - [1.28110, 103.85625]
-      - [1.28110, 103.85520]
-      - [1.28010, 103.85520]
+      # lat,  lon,          lat,  lon,  ...  CLOSED (last pair == first)
+      - 1.28010
+      - 103.85520
+      - 1.28010
+      - 103.85625
+      - 1.28110
+      - 103.85625
+      - 1.28110
+      - 103.85520
+      - 1.28010
+      - 103.85520

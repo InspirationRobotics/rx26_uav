@@ -47,6 +47,7 @@ from uav_msgs.msg import Attitude, FcuStatus, FlightState, GlobalPos
 
 from uav_common import config as uav_config
 from uav_common import geo
+from uav_common.fence_core import polygon_from_flat
 from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config, make_set_callback
 from uav_common.stream_cache import StreamCache
@@ -73,7 +74,8 @@ PARAM_SPEC = {
                                        "git-pull-then-rebuild loop is known to "
                                        "work rather than assumed"),
     "geofence": dict(read_only=True,
-                     description="= telemetry_bridge.geofence; drawn on the map"),
+                     description="FLAT [lat,lon,...]; = telemetry_bridge."
+                                 "geofence. Drawn on the map"),
     "pose_timeout_s": dict(read_only=True, lo=0.2, hi=10.0),
     "attitude_timeout_s": dict(read_only=True, lo=0.2, hi=10.0),
     "status_timeout_s": dict(read_only=True, lo=0.2, hi=10.0),
@@ -116,7 +118,9 @@ class GroundStation(Node):
         # The fence is the map's origin. Anchoring on it rather than on the
         # first fix means the polygon does not jump the moment GPS arrives, and
         # two sessions draw the same picture.
-        self._fence = [(float(a), float(b)) for a, b in p["geofence"]]
+        # Flat [lat, lon, ...] in the params because ROS parameters cannot
+        # nest; paired here by the one function that owns that conversion.
+        self._fence = polygon_from_flat(p["geofence"])
         self._origin = self._fence_centroid()
         self._fence_xy = [list(geo.latlon_to_xy(a, b, self._origin))
                           for a, b in self._fence]

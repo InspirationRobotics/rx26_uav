@@ -67,6 +67,33 @@ class FenceItem:
     vertex_count: int      # param1 — identical on every item of one polygon
 
 
+def polygon_from_flat(flat):
+    """[lat, lon, lat, lon, ...] -> [(lat, lon), ...].
+
+    THE GEOFENCE PARAMETER IS FLAT BECAUSE ROS 2 PARAMETERS CANNOT NEST.
+    rclpy accepts scalars and homogeneous FLAT arrays only; a list of pairs is
+    rejected at declare_parameter() with
+
+        TypeError: The given value is not a list of one of the allowed types
+
+    which kills the node before any of its code runs. So the params file stores
+    one flat array of doubles and this is the only place that pairs them up.
+    Do not "tidy" the YAML back into [[lat, lon], ...] — it will not load.
+
+    Note the OCS's bridge.toml DOES nest (`uav_geofence = [[lat, lon], ...]`):
+    TOML has no such restriction and that file is read by a plain Python program,
+    not by rcl. The two spellings describe the same polygon, and
+    tools/scripts/check_config.py compares them across that difference.
+    """
+    vals = [float(v) for v in flat]
+    if len(vals) % 2:
+        raise FenceError(
+            "geofence has %d numbers, which is odd — it is a FLAT list of "
+            "lat,lon pairs, so the count must be even. Check for a dropped "
+            "coordinate in uav_bringup/config/uav_params.yaml." % len(vals))
+    return [(vals[i], vals[i + 1]) for i in range(0, len(vals), 2)]
+
+
 def items_from_polygon(polygon):
     """[(lat, lon), ...] -> [FenceItem], stripping the closing duplicate.
 

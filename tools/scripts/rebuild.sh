@@ -21,8 +21,16 @@ ROS_SETUP="${UAV_ROS_SETUP:-/opt/ros/humble/setup.bash}"
 [[ -f "$ROS_SETUP" ]] || { echo "ERROR: no ROS at $ROS_SETUP — are you inside the container?" >&2; exit 1; }
 [[ -d "$WS/src/rx26_uav" ]] || { echo "ERROR: $WS/src/rx26_uav not found. Is the workspace bind-mounted?" >&2; exit 1; }
 
+# ROS 2's setup.bash reads variables it never sets (AMENT_TRACE_SETUP_FILES,
+# COLCON_TRACE, ...), so `set -u` aborts the moment it is sourced:
+#   /opt/ros/humble/setup.bash: line 8: AMENT_TRACE_SETUP_FILES: unbound variable
+# nounset is worth keeping for OUR code, so it is lifted only across the source
+# and restored immediately. Do not "simplify" this by dropping -u from the
+# script: a typo'd variable name here silently builds the wrong workspace.
+set +u
 # shellcheck disable=SC1090
 source "$ROS_SETUP"
+set -u
 cd "$WS"
 
 # Config first: it is the file that can ground the aircraft, it needs no build,

@@ -30,8 +30,17 @@ echo "== first build =="
 bash "$REPO/tools/scripts/rebuild.sh"
 
 echo "== smoke check =="
+# ROS 2's setup.bash reads variables it never sets (AMENT_TRACE_SETUP_FILES,
+# COLCON_TRACE, ...), so `set -u` aborts the moment it is sourced:
+#   /opt/ros/humble/setup.bash: line 8: AMENT_TRACE_SETUP_FILES: unbound variable
+# nounset is worth keeping for OUR code, so it is lifted only across the source
+# and restored immediately. Do not "simplify" this by dropping -u from the
+# script: a typo'd variable name here silently builds the wrong workspace.
+set +u
 # shellcheck disable=SC1090
-source "$ROS_SETUP"; source "$WS/install/setup.bash"
+source "$ROS_SETUP"
+source "$WS/install/setup.bash"
+set -u
 python3 - <<'PY'
 from uav_common import config, geo, fence_core
 from uav_groundstation import heartbeat_core, node_registry, ocs_link

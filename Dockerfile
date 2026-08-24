@@ -40,6 +40,21 @@ RUN python3 -m pip install --no-cache-dir pymavlink
 
 WORKDIR /root/robotx_ws
 
+# Source ROS in interactive shells.
+#
+# `docker exec` DOES NOT run the image's ENTRYPOINT, so /ros_entrypoint.sh never
+# fires for `docker exec -it uav bash` and you land in a shell with no ros2 on
+# PATH. That is the moment people reach for `docker attach` instead — which
+# attaches to PID 1 (`tail -f /dev/null`): silent, unresponsive, and on Ctrl+C
+# it kills PID 1 and takes the whole container down, along with every node
+# exec'd into it.
+#
+# The overlay is guarded because it does not exist until the first build, and an
+# unguarded source in .bashrc makes every shell open with an error on a fresh
+# container.
+RUN echo 'source /opt/ros/humble/setup.bash' >> /root/.bashrc \
+ && echo '[ -f /root/robotx_ws/install/setup.bash ] && source /root/robotx_ws/install/setup.bash' >> /root/.bashrc
+
 # The workspace is BIND-MOUNTED at runtime, not copied in:
 #   docker run -v ~/robotx_ws:/root/robotx_ws ...
 # so a `git pull` on the host is visible in here with no rebuild of the image.
