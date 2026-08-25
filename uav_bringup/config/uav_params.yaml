@@ -172,6 +172,11 @@ ocs_client:
                                            #      the rest still goes
     status_timeout_s: 1.0                  # [RO] stale -> no heartbeat at all,
                                            #      since state cannot be known
+    mission_timeout_s: 1.0                 # [RO] stale /uav/mission_state ->
+                                           #      no heartbeat at all. The
+                                           #      planner owns state and task;
+                                           #      without it there is nothing
+                                           #      truthful to report
     flight_timeout_s: 1.0                  # [RO] stale -> fall back to
                                            #      armed+altitude, loudly
 
@@ -257,3 +262,28 @@ ground_station:
       - 103.85520
       - 1.28010
       - 103.85520
+
+# ---- mission_planner: the one node that decides state and task ----
+# NOT PROVEN IN FLIGHT. Owns STATE_AUTO/STATE_MANUAL and the current task, and
+# is the only node allowed to decide them — ocs_client transmits its answer.
+# Publishes /uav/mission_state.
+#
+# Two ways to be autonomous here: a self-flying mode (GUIDED, RTL and variants),
+# or ANY mode while a mission is executing — which is the LOITER-under-CV case
+# the flight mode alone cannot express.
+#
+# It NEVER changes flight mode: an OCS standby-auto directive is logged and
+# ignored, and a pilot puts the aircraft into GUIDED. All [RO].
+mission_planner:
+  ros__parameters:
+    rate_hz: 4.0                           # [RO] must be >= the OCS heartbeat
+                                           #      rate (2 Hz) or ocs_client sees
+                                           #      mission_state as stale and
+                                           #      correctly stops reporting
+    status_timeout_s: 1.0                  # [RO] stale fcu_status -> publish
+                                           #      nothing rather than guess
+    bench_auto: false                      # [RO] true = report STATE_AUTO with
+                                           #      no autopilot, to produce
+                                           #      rc-test logs on the ground.
+                                           #      Logs a warning while on.
+                                           #      NEVER true for a scored flight.

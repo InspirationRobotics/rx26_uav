@@ -24,6 +24,9 @@ setup(
             # ground station, and because systemd starts both by name.
             "ground_station = uav_groundstation.gcs_node:main",
             "ocs_client = uav_groundstation.ocs_client_node:main",
+            # NOT PROVEN IN FLIGHT, and not in core.launch.py. It is an
+            # entry point because the state nobody can start is no state.
+            "mission_planner = uav_groundstation.mission_planner:main",
         ],
     },
 )

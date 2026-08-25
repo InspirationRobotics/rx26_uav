@@ -36,6 +36,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 from uav_msgs.msg import Attitude, FcuStatus, FlightState, GlobalPos
+from uav_msgs.msg import MissionState
 
 from uav_common import config as uav_config
 from uav_common.node_main import run_node
@@ -77,6 +78,10 @@ PARAM_SPEC = {
     "status_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
                              description="stale -> no heartbeat, since state "
                                          "cannot be known"),
+    "mission_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                              description="stale mission_state -> no "
+                                          "heartbeat; the planner owns "
+                                          "state and task"),
     "flight_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
                              description="stale -> fall back to armed+altitude, "
                                          "and say so"),
@@ -94,6 +99,9 @@ class OcsClient(Node):
         self._att = StreamCache(p["attitude_timeout_s"])
         self._status = StreamCache(p["status_timeout_s"])
         self._flight = StreamCache(p["flight_timeout_s"])
+        # state and task come from mission_planner. This node transmits;
+        # it does not decide -- see the module docstring.
+        self._mission = StreamCache(p["mission_timeout_s"])
         self._t0 = time.time()
         self._skipped = 0
         self._phase_source = None       # "autopilot" | "fallback" | None
@@ -105,6 +113,10 @@ class OcsClient(Node):
         # is better than growing without limit.
         self._inbox = deque(maxlen=32)
         self._cmd_pub = self.create_publisher(String, "/uav/ocs_command", 10)
+        # Directives are OURS, not RoboNation's: a separate topic so the
+        # mission planner can take advice from the OCS without also
+        # receiving every RxCommand relayed from the course.
+        self._dir_pub = self.create_publisher(String, "/uav/ocs_directive", 10)
 
         if p["fake_telemetry"]:
             self.get_logger().warning(
@@ -115,6 +127,8 @@ class OcsClient(Node):
             self.create_subscription(Attitude, "/uav/attitude", self._on_att, 10)
             self.create_subscription(FcuStatus, "/uav/fcu_status",
                                      self._on_status, 10)
+            self.create_subscription(MissionState, "/uav/mission_state",
+                                     self._on_mission, 10)
             self.create_subscription(FlightState, "/uav/flight_state",
                                      self._on_flight, 10)
 
@@ -167,9 +181,20 @@ class OcsClient(Node):
             return
         self.link.publish(report)
 
+    def _on_mission(self, msg):
+        self._mission.set(msg, time.monotonic())
+
     def _republish(self, cmd):
         """Hand an OCS command to whoever wants it. This node does not act."""
         self._cmd_pub.publish(String(data=json.dumps(cmd)))
+        if "ocs_directive" in cmd:
+            self._dir_pub.publish(String(data=json.dumps(cmd)))
+            d = cmd.get("ocs_directive") or {}
+            self.get_logger().info(
+                "OCS directive %r (declaration_seq=%s) -> "
+                "/uav/ocs_directive" % (d.get("action"),
+                                        d.get("declaration_seq")))
+            return
         self.get_logger().info("OCS command -> /uav/ocs_command: %s"
                                % sorted(cmd))
 
@@ -182,13 +207,27 @@ class OcsClient(Node):
         # values or None. A stale FlightState arrives as landed=None, which is
         # what sends it to the armed+altitude fallback.
         fs = self._flight.get(now)
+        mission = self._mission.get(now)
+        if mission is None:
+            # The planner owns state and task. Without it there is nothing
+            # truthful to claim, and guessing is the one thing this file
+            # exists to refuse.
+            self._skipped += 1
+            reason = "mission_state is stale — is mission_planner running?"
+            if reason != self._quiet_reason:
+                self._quiet_reason = reason
+                self.get_logger().warning(
+                    "no heartbeat: %s The OCS will show rising silence, "
+                    "which is the truth." % reason)
+            return None
         hb, info = heartbeat_core.build_heartbeat(
             pose=self._pose.get(now),
             status=self._status.get(now),
             attitude=self._att.get(now),
             landed=(fs.landed_state if fs is not None and fs.valid else None),
             geoid_separation_m=p["geoid_separation_m"],
-            airborne_alt_m=p["airborne_alt_m"])
+            airborne_alt_m=p["airborne_alt_m"],
+            state=mission.state, task=mission.task)
 
         if hb is None:
             self._skipped += 1
