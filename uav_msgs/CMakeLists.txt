@@ -12,7 +12,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Attitude.msg"
   "msg/FlightState.msg"
   "msg/FcuStatus.msg"
-  "msg/MissionState.msg"
   "msg/RcChannels.msg"
   DEPENDENCIES std_msgs
 )

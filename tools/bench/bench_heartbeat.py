@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
                                 "uav_groundstation"))
 
 from uav_groundstation import heartbeat_core as hc  # noqa: E402
-from uav_groundstation import mission_core as mc  # noqa: E402
 
 
 class Pose:
@@ -49,10 +48,6 @@ def build(**kw):
     kw.setdefault("status", Status())
     kw.setdefault("attitude", Att())
     kw.setdefault("landed", hc.LANDED_ON_GROUND)
-    # state and task now come from mission_planner; heartbeat_core only
-    # carries them. Defaults here keep these checks about flight phase.
-    kw.setdefault("state", "STATE_MANUAL")
-    kw.setdefault("task", "TASK_NONE")
     return hc.build_heartbeat(geoid_separation_m=GEOID, airborne_alt_m=1.0, **kw)
 
 
@@ -110,30 +105,15 @@ def main():
     for name, ok in r[-7:]:
         print("  %-34s %s" % (name, "PASS" if ok else "FAIL"))
 
-    print("\nstate (mission_core -- the rule moved out of heartbeat_core)")
-    # NOTE the first two cases INVERT the old expectations, deliberately.
-    # LOITER is the autopilot holding position for a human unless a mission
-    # is driving it; the old list called it autonomous unconditionally and
-    # so reported STATE_AUTO for a hand-flown aircraft.
-    rs = mc.robot_state
-    st = [("armed LOITER, no mission -> MANUAL",
-           rs("LOITER", True)[0] == "STATE_MANUAL"),
-          ("armed LOITER, mission running -> AUTO",
-           rs("LOITER", True, True)[0] == "STATE_AUTO"),
-          ("armed GUIDED -> AUTO regardless of mission",
-           rs("GUIDED", True)[0] == "STATE_AUTO"),
-          ("armed RTL -> AUTO",
-           rs("RTL", True)[0] == "STATE_AUTO"),
-          ("armed STABILIZE, no mission -> MANUAL",
-           rs("STABILIZE", True)[0] == "STATE_MANUAL"),
+    print("\nstate")
+    st = [("armed LOITER -> AUTO",
+           hc.robot_state("LOITER", True) == "STATE_AUTO"),
+          ("armed STABILIZE -> MANUAL",
+           hc.robot_state("STABILIZE", True) == "STATE_MANUAL"),
           ("disarmed GUIDED -> MANUAL",
-           rs("GUIDED", False)[0] == "STATE_MANUAL"),
-          ("disarmed with a mission running -> MANUAL",
-           rs("GUIDED", False, True)[0] == "STATE_MANUAL"),
-          ("stale fcu_status -> no state at all",
-           rs(None, None)[0] is None),
+           hc.robot_state("GUIDED", False) == "STATE_MANUAL"),
           ("never STATE_UNKNOWN",
-           rs("", False)[0] != "STATE_UNKNOWN")]
+           hc.robot_state("", False) != "STATE_UNKNOWN")]
     for name, ok in st:
         print("  %-34s %s" % (name, "PASS" if ok else "FAIL"))
 

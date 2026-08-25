@@ -46,15 +46,13 @@ _PHASE_BY_LANDED = {
     LANDED_LANDING: AIRBORNE,
 }
 
-#: SUPERSEDED by mission_core.SELF_FLYING_MODES. Kept only so an old caller
-#: fails loudly rather than silently importing a name that moved.
-#:
-#: This list counted LOITER, CIRCLE, LAND, FOLLOW and ZIGZAG as autonomous
-#: unconditionally, so a pilot hand-loitering the aircraft reported
-#: STATE_AUTO to RoboCommand and, through the Network Remote ID relay, to a
-#: regulator. Those modes are the autopilot holding a position for a HUMAN;
-#: they are autonomy only while a mission is driving them, which is a fact
-#: the mode cannot carry. mission_planner owns the decision now.
+#: Modes in which an armed ArduCopter is flying itself. Anything else — and
+#: anything at all while disarmed — reports STATE_MANUAL. STATE_UNKNOWN is the
+#: proto zero value and is never sent.
+AUTONOMOUS_MODES = frozenset({
+    "AUTO", "GUIDED", "GUIDED_NOGPS", "RTL", "SMART_RTL", "LAND", "LOITER",
+    "AUTO_RTL", "CIRCLE", "FOLLOW", "ZIGZAG",
+})
 
 
 def flight_phase(landed, *, armed=None, altitude_rel=None, airborne_alt_m=1.0):
@@ -85,8 +83,16 @@ def flight_phase(landed, *, armed=None, altitude_rel=None, airborne_alt_m=1.0):
     return (AIRBORNE if airborne else GROUNDED), "fallback"
 
 
+def robot_state(mode, armed):
+    """RobotState for the heartbeat. Never STATE_UNKNOWN (the zero value)."""
+    if not armed:
+        return "STATE_MANUAL"
+    return "STATE_AUTO" if (mode or "").upper() in AUTONOMOUS_MODES \
+        else "STATE_MANUAL"
+
+
 def build_heartbeat(*, pose, status, attitude, landed, geoid_separation_m,
-                    airborne_alt_m, state, task):
+                    airborne_alt_m):
     """The heartbeat body, or (None, reason) when it must not be sent.
 
     Returns (dict, source) on success and (None, reason) on suppression, so the
@@ -114,10 +120,7 @@ def build_heartbeat(*, pose, status, attitude, landed, geoid_separation_m,
                       "for Network Remote ID")
 
     hb = {
-        # From mission_planner, not decided here. The mode alone cannot
-        # tell you whether a mission is flying the aircraft in LOITER
-        # under CV control, which is autonomous; see mission_core.
-        "state": state,
+        "state": robot_state(status.mode, status.armed),
         "position": {"latitude": pose.latitude, "longitude": pose.longitude},
         "spd_mps": pose.ground_speed,
         # Passed through as-is, NaN and all. telemetry_bridge sets it NaN when
@@ -129,7 +132,10 @@ def build_heartbeat(*, pose, status, attitude, landed, geoid_separation_m,
         "altitude_hae_m": pose.altitude_amsl + geoid_separation_m,
         "depth_m": 0.0,
         "vehicle_type": "TYPE_UAV",
-        "current_task": task,
+        # No task-state source exists on the aircraft yet. TASK_NONE is the
+        # honest value and TASK_UNKNOWN is refused by the OCS, so this is not a
+        # placeholder that can silently rot.
+        "current_task": "TASK_NONE",
         "flight_phase": phase,
     }
     if attitude is not None:
