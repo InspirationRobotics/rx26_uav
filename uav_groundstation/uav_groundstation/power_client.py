@@ -1,7 +1,7 @@
 """power_client — ask the HOST to power down, from inside the container.
 
 WHY THIS IS NOT `subprocess.run(["sudo", "shutdown"])`. The ground station runs
-inside `uav`. A container shares the host's kernel but has no init of its own to
+inside `uav_ekko`. A container shares the host's kernel but has no init of its own to
 talk to, so `shutdown` and `systemctl poweroff` inside it either fail outright
 or, if the container is privileged enough, do something worse than nothing. The
 container genuinely cannot power off the machine, and no amount of sudo changes

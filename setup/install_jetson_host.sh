@@ -61,7 +61,7 @@ id -u "$UAV_USER" >/dev/null 2>&1 || {
   echo "       Run with sudo from that user's session, or set SUDO_USER." >&2
   exit 1; }
 USER_HOME="$(getent passwd "$UAV_USER" | cut -d: -f6)"
-UAV_CONTAINER="${UAV_CONTAINER:-uav}"
+UAV_CONTAINER="${UAV_CONTAINER:-uav_ekko}"
 UAV_IMAGE="${UAV_IMAGE:-uav}"
 
 echo "== [1/7] workspace layout =="
@@ -371,8 +371,21 @@ fi
 #   present -> CHECK the mounts and print the fix; NEVER `docker rm`
 if ! command -v docker >/dev/null; then
   echo "WARN: docker is not installed — uav-container.service will fail."
-elif docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
-  MOUNTS="$(docker inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$UAV_CONTAINER" 2>/dev/null || true)"
+# `docker container inspect`, NOT `docker inspect`. The bare form matches
+# containers AND images AND volumes AND networks alike.
+#
+# THIS COST THREE BRING-UP RUNS (2026-08-24). The container was then named `uav`
+# and so was the image. With no container present, `docker inspect uav` SUCCEEDS
+# against the IMAGE, whose .Mounts is empty — so this branch reported
+# "MISSING mounts: workspace" and never fell through to the create step. Every
+# run printed a plausible recreate recipe for a container that did not exist.
+#
+# The container is now `uav_ekko` and the image `uav`, so the names no longer
+# collide. Keep the explicit `container` anyway: the rename removes THIS
+# collision, the typed call removes the whole class of them, and someone will
+# eventually set UAV_CONTAINER=uav again.
+elif docker container inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
+  MOUNTS="$(docker container inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$UAV_CONTAINER" 2>/dev/null || true)"
   MISSING=""
   case "$MOUNTS" in *":/root/robotx_ws"*) ;; *) MISSING="$MISSING workspace" ;; esac
 
@@ -480,7 +493,7 @@ echo "NEXT, in order:"
 # Container first, matching step [7]'s own order: an existing container works
 # whether or not its image is still around, so advising a rebuild there would
 # send someone down a path they do not need.
-if docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
+if docker container inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
   echo "  1. docker exec $UAV_CONTAINER bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh"
   echo "  2. systemctl start ${STARTABLE[*]}"
   echo "  3. open http://<this jetson>:8090"

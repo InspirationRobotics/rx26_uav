@@ -70,7 +70,7 @@ container — where either is needed it prints the command.
 Then, inside the container:
 
 ```bash
-docker exec uav bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh
+docker exec uav_ekko bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh
 ```
 
 ### Confirm the Pixhawk symlink
@@ -136,12 +136,12 @@ Check, in order:
 sudo systemctl restart uav-groundstation
 ```
 ```bash
-docker exec uav pgrep -fc install/uav_groundstation/lib/uav_groundstation/ground_station
+docker exec uav_ekko pgrep -fc install/uav_groundstation/lib/uav_groundstation/ground_station
 ```
 
 Must print **`1`**. Repeat three times — the orphan case only appears once a stop
 has failed. Then force the bad case deliberately: suspend the node
-(`docker exec uav pkill -STOP -f .../ground_station`), restart the unit, and
+(`docker exec uav_ekko pkill -STOP -f .../ground_station`), restart the unit, and
 confirm the `ExecStartPre` sweep still leaves exactly one.
 
 Two means the sweep pattern is not matching; zero means the marker is wrong.
@@ -193,7 +193,7 @@ Refused, with the reason. Then:
 cd ~/robotx_ws/src/rx26_uav && git pull
 ```
 ```bash
-docker exec uav bash -lc '/root/robotx_ws/src/rx26_uav/tools/scripts/rebuild.sh'
+docker exec uav_ekko bash -lc '/root/robotx_ws/src/rx26_uav/tools/scripts/rebuild.sh'
 ```
 ```bash
 sudo systemctl restart uav-groundstation uav-ocs-client

@@ -12,7 +12,7 @@ container, so some of them WILL be missing on some machine. A dashboard that
 prints "—" for a value it cannot read is telling the truth; one that prints
 0 degrees is lying, and 0 is a plausible-looking number that nobody questions.
 
-CONTAINER CAVEAT, and it is not a small one: read from inside `uav`, /proc
+CONTAINER CAVEAT, and it is not a small one: read from inside `uav_ekko`, /proc
 belongs to the HOST (the container shares the host's kernel and, on this
 fleet, its PID namespace), so CPU, uptime and temperature are the Jetson's and
 are what you want. Disk usage is NOT: it reports the container's view of the

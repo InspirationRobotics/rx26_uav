@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Set the workspace up INSIDE the `uav` container. Run once per container.
+# Set the workspace up INSIDE the `uav_ekko` container. Run once per container.
 #
-#     docker exec uav bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh
+#     docker exec uav_ekko bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh
 #
 # The host half is setup/install_jetson_host.sh; this is the other half. They
 # are separate because they touch different machines' state: udev and systemd

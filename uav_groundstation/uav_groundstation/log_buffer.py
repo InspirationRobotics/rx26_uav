@@ -6,7 +6,7 @@ output goes somewhere the operator is not. Graey's GUI solves it with a Logs
 tab over journalctl, and the point stands — a dashboard you have to leave for a
 terminal the moment something misbehaves is not doing its job.
 
-WHY /rosout AND NOT journalctl. We are inside the `uav` container. The host's
+WHY /rosout AND NOT journalctl. We are inside the `uav_ekko` container. The host's
 journal is on the other side of that boundary: `journalctl -u uav-container`
 from in here reads nothing, and mounting /var/log/journal in to fix it would be
 a privilege grant made to read a log file.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# THE one blessed rebuild path. Run INSIDE the `uav` container.
+# THE one blessed rebuild path. Run INSIDE the `uav_ekko` container.
 #
-#     docker exec uav bash -lc '/root/robotx_ws/src/rx26_uav/tools/scripts/rebuild.sh'
+#     docker exec uav_ekko bash -lc '/root/robotx_ws/src/rx26_uav/tools/scripts/rebuild.sh'
 #
 # WHY THIS EXISTS RATHER THAN "just run colcon build". Two reasons, both of
 # which have cost people an afternoon on the ASV:

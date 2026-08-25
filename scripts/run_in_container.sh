@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run one ROS node inside the `uav` container, under systemd, without leaving a
+# Run one ROS node inside the `uav_ekko` container, under systemd, without leaving a
 # second copy behind on restart.
 #
 #     scripts/run_in_container.sh <package> <executable>
@@ -9,7 +9,7 @@
 #
 # `docker exec` DOES NOT PROPAGATE TERMINATION. Kill the exec client and the
 # process it started keeps running inside the container. So the obvious unit —
-# ExecStart=docker exec uav ros2 run ... — behaves like this:
+# ExecStart=docker exec uav_ekko ros2 run ... — behaves like this:
 #
 #     systemctl restart uav-groundstation
 #       -> systemd SIGTERMs the exec CLIENT, which dies
@@ -47,7 +47,7 @@ set -euo pipefail
 PKG="${1:?usage: run_in_container.sh <package> <executable>}"
 EXE="${2:?usage: run_in_container.sh <package> <executable>}"
 
-CONTAINER="${UAV_CONTAINER:-uav}"
+CONTAINER="${UAV_CONTAINER:-uav_ekko}"
 WS="${UAV_WS:-/root/robotx_ws}"
 ROS_DISTRO_SETUP="${UAV_ROS_SETUP:-/opt/ros/humble/setup.bash}"
 
@@ -64,7 +64,9 @@ log() { echo "[run_in_container] $*"; }
 # ready yet. Failing with a real message beats exec'ing into nothing and getting
 # docker's own "No such container", which reads like a misconfiguration.
 waited=0
-until [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; do
+# `container inspect`, not the bare form: the image is named `uav` too, and the
+# bare form would match it and return an empty .State forever.
+until [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; do
   if [ "$waited" -ge "$CONTAINER_WAIT_S" ]; then
     log "ERROR: container '$CONTAINER' is not running after ${CONTAINER_WAIT_S}s."
     log "       systemctl status uav-container   # is it up?"

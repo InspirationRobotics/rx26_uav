@@ -2,7 +2,7 @@
 
 Team Inspiration's codebase for the aircraft in the 2026 RobotX system-of-systems.
 A Pixhawk-based multirotor with a Jetson Orin Nano companion computer running
-ROS 2 Humble in the `uav` Docker container, reporting to the team's Operator
+ROS 2 Humble in the `uav_ekko` Docker container, reporting to the team's Operator
 Control Station over field WiFi.
 
 **What this is:** the minimum that makes the UAV a real member of the fleet —
@@ -108,7 +108,7 @@ also match neighbouring names and any editor left open in the container.
 Check it with `pgrep`, not with "the page loaded":
 
 ```bash
-systemctl restart uav-groundstation && docker exec uav pgrep -fc install/uav_groundstation/lib/uav_groundstation/ground_station
+systemctl restart uav-groundstation && docker exec uav_ekko pgrep -fc install/uav_groundstation/lib/uav_groundstation/ground_station
 ```
 
 must print `1`. Two means the sweep is not matching; zero means the marker is wrong.
@@ -129,7 +129,7 @@ HOST                                  CONTAINER
 cd ~/robotx_ws/src/rx26_uav && git pull
 ```
 ```bash
-docker exec uav bash -lc '/root/robotx_ws/src/rx26_uav/tools/scripts/rebuild.sh'
+docker exec uav_ekko bash -lc '/root/robotx_ws/src/rx26_uav/tools/scripts/rebuild.sh'
 ```
 ```bash
 sudo systemctl restart uav-groundstation uav-ocs-client
@@ -215,15 +215,16 @@ until you log out and back in.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `uav-container` loops on `status=1/FAILURE` after **milliseconds** | the service user is not in the `docker` group, so `docker start` cannot open `/var/run/docker.sock`. Works under `sudo`, fails as the unit — the installer creates the container as root | `sudo usermod -aG docker $USER && sudo systemctl restart uav-container`, or re-run the installer (step 3 does it) |
-| container is down at boot **despite** `--restart unless-stopped` | `uav-container`'s `ExecStop` runs `docker stop` on every failed restart cycle, and a manual stop clears Docker's auto-start flag | fix the `ExecStart` failure first, then `docker start uav` once to re-arm it |
-| `docker attach uav` hangs, shows nothing | you attached to PID 1, which is `tail -f /dev/null` — silent by design. **Ctrl+C there kills the container** and takes the nodes with it | `docker exec -it uav bash`. To escape an attach: **Ctrl+P Ctrl+Q** |
-| `docker exec -it uav bash` has no `ros2` | `docker exec` does **not** run the image ENTRYPOINT, so `/ros_entrypoint.sh` never fires | rebuild the image (it now sources ROS in `.bashrc`), or `source /opt/ros/humble/setup.bash` by hand |
-| `systemctl restart` leaves **two** copies | `docker exec` does not propagate termination; the old process survives and still holds `:8090` | the `ExecStartPre` sweep handles it. Verify with `docker exec uav pgrep -fc install/uav_groundstation/lib/uav_groundstation/ground_station` — must be `1` |
-| container `Exited (127)`, **`docker logs` completely empty** | almost never a missing command. `dockerd` stamps 127 on a container whose task never started, and a bind mount it cannot satisfy is the usual reason — the process never ran, so there is nothing to log. An image fault would leave the shell's own error in the log | treat it as a **start** failure, not a command failure: `docker start uav` once by hand and read the daemon's error. Confirm the image is fine with `docker run --rm --entrypoint /bin/bash uav -c 'command -v tail; ls -l /ros_entrypoint.sh'` |
+| container is down at boot **despite** `--restart unless-stopped` | `uav-container`'s `ExecStop` runs `docker stop` on every failed restart cycle, and a manual stop clears Docker's auto-start flag | fix the `ExecStart` failure first, then `docker start uav_ekko` once to re-arm it |
+| installer says `container 'uav' is MISSING mounts: workspace` but `docker ps -a` shows **no container at all** | `docker inspect NAME` matches images as well as containers. When the container and the image share a name, a missing container makes `docker inspect` succeed against the *image*, whose `.Mounts` is empty — so the installer reported missing mounts and never reached its create step | fixed two ways: the container is now `uav_ekko` while the image stays `uav`, and every call is `docker container inspect`. If you see this on an old checkout, `docker container inspect uav` is the honest test |
+| `docker attach uav_ekko` hangs, shows nothing | you attached to PID 1, which is `tail -f /dev/null` — silent by design. **Ctrl+C there kills the container** and takes the nodes with it | `docker exec -it uav_ekko bash`. To escape an attach: **Ctrl+P Ctrl+Q** |
+| `docker exec -it uav_ekko bash` has no `ros2` | `docker exec` does **not** run the image ENTRYPOINT, so `/ros_entrypoint.sh` never fires | rebuild the image (it now sources ROS in `.bashrc`), or `source /opt/ros/humble/setup.bash` by hand |
+| `systemctl restart` leaves **two** copies | `docker exec` does not propagate termination; the old process survives and still holds `:8090` | the `ExecStartPre` sweep handles it. Verify with `docker exec uav_ekko pgrep -fc install/uav_groundstation/lib/uav_groundstation/ground_station` — must be `1` |
+| container `Exited (127)`, **`docker logs` completely empty** | almost never a missing command. `dockerd` stamps 127 on a container whose task never started, and a bind mount it cannot satisfy is the usual reason — the process never ran, so there is nothing to log. An image fault would leave the shell's own error in the log | treat it as a **start** failure, not a command failure: `docker start uav_ekko` once by hand and read the daemon's error. Confirm the image is fine with `docker run --rm --entrypoint /bin/bash uav -c 'command -v tail; ls -l /ros_entrypoint.sh'` |
 | System tab: "power request directory … does not exist" | `<ws>/logs` is missing, or the workspace is not bind-mounted | re-run the installer (step 6 creates it); if the mount is the problem the System tab already says so separately |
 | power button reports the request was **withdrawn** after 5 s | the `.path` unit is not running, so nothing consumed the request file. The node takes it back rather than leaving a live request for the next boot to find | `systemctl status uav-shutdown.path uav-reboot.path` — `enable` is what arms them |
 | Jetson powers off again immediately after every boot | a `shutdown.request` outlived an interrupted shutdown, and `PathExists=` fires at unit start on a file that is already there | `/etc/tmpfiles.d/uav.conf` sweeps both request files at boot, before the `.path` units arm. Re-run the installer if it is missing |
-| container still mounts `/run/uav` or `/run/uav-power.sock` | left from the retired socket helper. Harmless as a directory, **fatal** as a file — `docker start` fails with "not a directory" | recreate it: `docker rm -f uav && sudo bash setup/install_jetson_host.sh`. The power request needs no mount of its own now |
+| container still mounts `/run/uav` or `/run/uav-power.sock` | left from the retired socket helper. Harmless as a directory, **fatal** as a file — `docker start` fails with "not a directory" | recreate it: `docker rm -f uav_ekko && sudo bash setup/install_jetson_host.sh`. The power request needs no mount of its own now |
 | `git pull` changed nothing | colcon installs into `install/`; the node does not import from `src/` | `rebuild.sh`, then restart the units |
 | Rebuild changed nothing either | the workspace is not actually bind-mounted | the System tab says so explicitly. Recreate with `-v ~/robotx_ws:/root/robotx_ws` |
 
@@ -365,7 +366,7 @@ USB VID/PID is not yet confirmed**, see `tools/udev/99-uav.rules`); RadioMaster
 Pocket + RP3 ELRS receiver (CRSF to the Pixhawk, not USB to the Jetson); WiFi to
 the team subnet.
 
-**Software:** ROS 2 Humble + pymavlink inside the `uav` container; MAVProxy on
+**Software:** ROS 2 Humble + pymavlink inside the `uav_ekko` container; MAVProxy on
 the **host**, never in the container. Python ≥3.10 + pyyaml for the off-board
 tools. No device SDKs, by design — there is no camera or LiDAR on this airframe.
 
