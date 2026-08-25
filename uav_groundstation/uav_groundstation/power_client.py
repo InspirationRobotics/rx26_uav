@@ -31,7 +31,7 @@ import json
 import os
 import socket
 
-DEFAULT_SOCKET = "/run/uav-power.sock"
+DEFAULT_SOCKET = "/run/uav/power.sock"
 VERBS = ("shutdown", "reboot")
 TIMEOUT_S = 5.0
 

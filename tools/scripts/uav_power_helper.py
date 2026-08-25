@@ -40,7 +40,22 @@ import sys
 import threading
 import time
 
-SOCKET_PATH = os.environ.get("UAV_POWER_SOCKET", "/run/uav-power.sock")
+# THE SOCKET LIVES IN A DIRECTORY OF ITS OWN, and that is not cosmetic.
+#
+# The container reaches this socket through a bind mount, and a bind mount of a
+# FILE pins the inode that existed when the container started. serve() below
+# unlinks and re-binds on every start, which makes a NEW inode — so with
+# `-v /run/uav-power.sock:/run/uav-power.sock`, one `systemctl restart
+# uav-power` leaves the container holding a deleted inode. The System tab then
+# reports the helper unreachable until the CONTAINER is restarted, and nothing
+# on either side logs a reason.
+#
+# Mounting the DIRECTORY instead (`-v /run/uav:/run/uav`) means the container
+# resolves the name on each connect and picks up the new socket immediately.
+# It also removes the older trap where Docker, asked to bind-mount a path that
+# does not exist yet, invents a DIRECTORY at it on the host: a directory is now
+# exactly what belongs there.
+SOCKET_PATH = os.environ.get("UAV_POWER_SOCKET", "/run/uav/power.sock")
 SOCKET_MODE = 0o660
 SOCKET_GROUP = os.environ.get("UAV_POWER_GROUP", "uav")
 
@@ -93,7 +108,7 @@ def handle(conn):
         reason = str(msg.get("reason", ""))[:200]
     except (ValueError, AttributeError):
         # Tolerate a bare word so the socket can be tested with a one-liner:
-        #   printf 'reboot' | socat - UNIX-CONNECT:/run/uav-power.sock
+        #   printf 'reboot' | socat - UNIX-CONNECT:/run/uav/power.sock
         verb = raw.split()[0] if raw.split() else None
 
     if verb not in ACTIONS:
@@ -118,6 +133,18 @@ def serve():
         log("WARNING: not running as root; systemctl poweroff will be refused "
             "by the system, and this helper exists precisely to be the one "
             "privileged piece. Run it from the systemd unit.")
+
+    # /run is tmpfs, so the parent is gone after every reboot. The unit's
+    # RuntimeDirectory=uav normally creates it, but this script is also run by
+    # hand while debugging, where bind() would otherwise fail with a bare
+    # FileNotFoundError naming the socket rather than the missing directory.
+    parent = os.path.dirname(SOCKET_PATH)
+    if parent:
+        try:
+            os.makedirs(parent, mode=0o755, exist_ok=True)
+        except OSError as e:
+            log(f"cannot create socket directory {parent}: {e}")
+            return 1
 
     # A socket left behind by an unclean exit blocks bind(); this is a
     # singleton service, so removing it is correct rather than presumptuous.

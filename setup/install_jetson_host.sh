@@ -7,7 +7,8 @@
 #
 #   [1] workspace layout      ~/robotx_ws/src/rx26_uav
 #   [2] executable bits       or systemd fails ExecStart with a bare 203/EXEC
-#   [3] host prerequisites    docker + MAVProxy, with the exact fix for each
+#   [3] host prerequisites    docker + MAVProxy + the docker group, with the
+#                             exact fix for each
 #   [4] udev rules + dialout  stable /dev/uav-pixhawk, and permission to OPEN it
 #   [5] systemd units         mavproxy -> container -> ground station + OCS client
 #   [6] power helper          started BEFORE the container, so its socket exists
@@ -61,7 +62,11 @@ id -u "$UAV_USER" >/dev/null 2>&1 || {
 USER_HOME="$(getent passwd "$UAV_USER" | cut -d: -f6)"
 UAV_CONTAINER="${UAV_CONTAINER:-uav}"
 UAV_IMAGE="${UAV_IMAGE:-uav}"
-POWER_SOCK="${UAV_POWER_SOCKET:-/run/uav-power.sock}"
+POWER_SOCK="${UAV_POWER_SOCKET:-/run/uav/power.sock}"
+# The container bind-mounts this DIRECTORY, never the socket file itself.
+# See step [6] for why that distinction is the whole ballgame.
+POWER_DIR="$(dirname "$POWER_SOCK")"
+POWER_SOCK_LEGACY=/run/uav-power.sock
 
 echo "== [1/7] workspace layout =="
 # The workspace is DERIVED FROM THE REPO, not from a constant, so a workspace
@@ -160,6 +165,32 @@ fi
 
 if command -v docker >/dev/null 2>&1; then
   echo "   docker:      $(command -v docker)"
+  # -------------------------------------------------------------------------
+  # The service user must be in `docker`, or uav-container.service cannot reach
+  # the daemon at all.
+  #
+  # This script runs as root, so the container it creates in step [7] works and
+  # `sudo docker ps` works — but uav-container.service runs as User=$UAV_USER,
+  # and /var/run/docker.sock is root:docker 0660. Without the group,
+  # `docker start -a` exits 1 after a few MILLISECONDS with "permission denied
+  # while trying to connect to the Docker daemon socket", and systemd reports a
+  # bare status=1/FAILURE that names neither Docker nor permissions. It reads
+  # exactly like a container that will not boot.
+  #
+  # It does not stay a one-unit problem either. uav-container's ExecStop runs
+  # `docker stop` on every failed restart cycle, and a manual stop clears the
+  # container's `--restart unless-stopped` flag — so Docker stops bringing it up
+  # at boot too, and now the container really is down for a second reason.
+  # -------------------------------------------------------------------------
+  if id -nG "$UAV_USER" | tr ' ' '\n' | grep -qx docker; then
+    echo "   $UAV_USER is already in the docker group"
+  else
+    groupadd -f docker
+    usermod -aG docker "$UAV_USER"
+    echo "   added $UAV_USER to the docker group (uav-container.service needs it)"
+    echo "   NOTE: your existing shell does not have it until you log out and"
+    echo "         back in; systemd services pick it up on their next start."
+  fi
 else
   missing_prereq=1
   echo "MISSING: docker is not installed — uav-container.service will fail."
@@ -235,9 +266,11 @@ UAV_BCAST_ADDR=192.168.8.255
 # rest of the line as one value. Additive: broadcast stays on regardless.
 #GCS_IPS="192.168.8.50 192.168.1.20"
 
-# Where the power helper listens. Must be bind-mounted into the container for
-# the ground station's System tab to reach it.
-UAV_POWER_SOCKET=/run/uav-power.sock
+# Where the power helper listens. Its PARENT DIRECTORY is what gets
+# bind-mounted into the container — never the socket file, which is a fresh
+# inode on every helper restart and would leave the container holding a deleted
+# one. Move this and you must recreate the container to match.
+UAV_POWER_SOCKET=/run/uav/power.sock
 UAV_POWER_GROUP=uav
 DEFAULTS
   echo "   seeded /etc/default/uav"
@@ -250,24 +283,41 @@ echo "     systemctl start ${UNITS[*]}"
 
 echo "== [6/7] power helper, then [7/7] container =="
 # ---------------------------------------------------------------------------
-# THE POWER SOCKET MUST EXIST BEFORE THE CONTAINER IS CREATED.
+# THE CONTAINER MOUNTS THE DIRECTORY /run/uav, NOT THE SOCKET FILE.
 #
-# `docker run -v /run/uav-power.sock:/run/uav-power.sock` when that path does
-# not exist makes Docker create a DIRECTORY there — on the host. Two things then
-# break, and neither is obvious:
-#   * the container mounts a directory where it expects a socket, so the System
-#     tab reports the helper unreachable forever;
-#   * uav_power_helper.py's os.unlink() of the stale socket fails with
-#     IsADirectoryError, so uav-power.service crash-loops at every boot.
-# Starting the helper first means the socket is a real socket when Docker binds
-# it. This is cheap and idempotent, so it runs unconditionally.
-if [[ -d "$POWER_SOCK" ]]; then
-  # Left by exactly the mistake described above, on an earlier run.
-  echo "   removing a DIRECTORY at $POWER_SOCK (Docker made it; it belongs to"
-  echo "   an earlier container created before the helper was running)"
-  systemctl stop uav-container 2>/dev/null || true
-  rmdir "$POWER_SOCK" 2>/dev/null || rm -rf "$POWER_SOCK"
+# It used to mount the socket itself, and that is a trap with two jaws:
+#
+#   * A bind mount of a FILE pins an INODE. uav_power_helper.py unlinks and
+#     re-binds its socket on every start, so one `systemctl restart uav-power`
+#     leaves the container holding a deleted inode. Connections fail, the
+#     System tab says "unreachable", and only a CONTAINER restart fixes it —
+#     nothing on either side logs why.
+#   * Docker, told to bind-mount a path that does not exist yet, INVENTS A
+#     DIRECTORY at it on the host. The container then has a directory where it
+#     wants a socket, and the helper's os.unlink() hits IsADirectoryError and
+#     crash-loops. Worse, the container's own rootfs keeps that directory, so
+#     once the host path IS a real socket, `docker start` dies with
+#     "not a directory: Are you trying to mount a directory onto a file" and
+#     the container cannot be started AT ALL until it is recreated.
+#
+# Mounting the parent directory removes both: a directory is what Docker would
+# create anyway, and the container resolves the socket name on each connect, so
+# a helper restart is invisible to it.
+#
+# uav-power.service creates /run/uav via RuntimeDirectory=uav (with
+# RuntimeDirectoryPreserve=yes so a restart does not delete it out from under
+# the running container). We create it here too, because the container may be
+# created before that unit has ever started.
+install -d -m 0755 "$POWER_DIR"
+
+# MIGRATION off the old layout. Both forms of the old path are removed: the
+# socket file left by a previous helper, and the directory Docker invented.
+if [[ -e "$POWER_SOCK_LEGACY" ]]; then
+  echo "   removing legacy $POWER_SOCK_LEGACY ($(stat -c '%F' "$POWER_SOCK_LEGACY"))"
+  echo "   the socket now lives at $POWER_SOCK, inside a mounted directory"
+  rm -rf "$POWER_SOCK_LEGACY"
 fi
+
 # The helper chowns the socket to this group. Without it the socket is
 # root-only and the helper logs a warning that reads like a failure — harmless
 # here (the container runs as root) but confusing.
@@ -275,12 +325,12 @@ groupadd -f "${UAV_POWER_GROUP:-uav}" 2>/dev/null || true
 systemctl start uav-power || echo "WARN: uav-power did not start; the System tab will say so."
 for _ in 1 2 3 4 5; do [[ -S "$POWER_SOCK" ]] && break; sleep 1; done
 if [[ -S "$POWER_SOCK" ]]; then
-  echo "   power socket ready at $POWER_SOCK"
+  echo "   power socket ready at $POWER_SOCK (mounting $POWER_DIR)"
 else
   echo "WARN: $POWER_SOCK is not a socket yet. The container will still be"
-  echo "      created, but bind-mounting a missing path makes Docker invent a"
-  echo "      directory — so the power tab will not work until you fix the"
-  echo "      helper (journalctl -u uav-power) and recreate the container."
+  echo "      created and $POWER_DIR is a real directory, so this is now"
+  echo "      recoverable WITHOUT recreating the container — fix the helper"
+  echo "      (journalctl -u uav-power) and it will appear in there."
 fi
 
 # `docker start` CANNOT add mounts — they are fixed when the container is
@@ -293,7 +343,9 @@ elif docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
   MOUNTS="$(docker inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$UAV_CONTAINER" 2>/dev/null || true)"
   MISSING=""
   case "$MOUNTS" in *":/root/robotx_ws"*) ;; *) MISSING="$MISSING workspace" ;; esac
-  case "$MOUNTS" in *"$POWER_SOCK"*) ;; *) MISSING="$MISSING power-socket" ;; esac
+  # The DIRECTORY, specifically. A container carrying the old socket-file
+  # mount matches neither, and is reported below as needing a recreate.
+  case "$MOUNTS" in *"$POWER_DIR:$POWER_DIR"*) ;; *) MISSING="$MISSING power-socket" ;; esac
   if [[ -n "$MISSING" ]]; then
     echo "WARN: container '$UAV_CONTAINER' is MISSING mounts:$MISSING"
     # Only the missing ones. Listing both consequences whatever is absent reads
@@ -308,6 +360,16 @@ elif docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
       echo "        power-socket -> the System tab cannot power the Jetson down;"
       echo "                        it will say so. Everything else works." ;;
     esac
+    # Name the case they are almost certainly in, because its symptom is not
+    # "the button is missing" — it is a container that will not start at all.
+    case "$MOUNTS" in *"$POWER_SOCK_LEGACY"*)
+      echo
+      echo "      THIS CONTAINER HAS THE OLD SOCKET-FILE MOUNT"
+      echo "        ($POWER_SOCK_LEGACY, bind-mounted as a file)."
+      echo "      It will fail to start with 'not a directory: Are you trying"
+      echo "      to mount a directory onto a file'. It CANNOT be repaired in"
+      echo "      place — mounts are fixed at CREATE time. Recreate it." ;;
+    esac
     echo "      Mounts are fixed at CREATE time, so this cannot be fixed by a"
     echo "      restart. Recreating is YOUR call — 'docker rm' throws away"
     echo "      anything living only inside the container:"
@@ -316,7 +378,7 @@ elif docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
     echo "        docker run -d --name $UAV_CONTAINER \\"
     echo "          --restart unless-stopped --network host --privileged \\"
     echo "          -v $WS_HOST:/root/robotx_ws \\"
-    echo "          -v $POWER_SOCK:$POWER_SOCK \\"
+    echo "          -v $POWER_DIR:$POWER_DIR \\"
     echo "          -v /dev:/dev \\"
     echo "          $UAV_IMAGE tail -f /dev/null"
     echo
@@ -330,7 +392,7 @@ elif docker image inspect "$UAV_IMAGE" >/dev/null 2>&1; then
   docker run -d --name "$UAV_CONTAINER" \
     --restart unless-stopped --network host --privileged \
     -v "$WS_HOST":/root/robotx_ws \
-    -v "$POWER_SOCK":"$POWER_SOCK" \
+    -v "$POWER_DIR":"$POWER_DIR" \
     -v /dev:/dev \
     "$UAV_IMAGE" tail -f /dev/null >/dev/null
   echo "   created. Build the workspace inside it:"

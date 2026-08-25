@@ -12,9 +12,14 @@
 # `docker run` line instead.
 [Unit]
 Description=UAV ROS 2 Humble container
-After=docker.service uav-mavproxy.service
+# uav-power BEFORE the container, not merely alongside it: the container
+# bind-mounts /run/uav, which uav-power.service creates via RuntimeDirectory.
+# Start the container first and Docker invents its own /run/uav on the host,
+# which the helper then has to live with. Wants=, not Requires=, because a dead
+# power helper should cost you the shutdown button and nothing else.
+After=docker.service uav-mavproxy.service uav-power.service
 Requires=docker.service
-Wants=uav-mavproxy.service
+Wants=uav-mavproxy.service uav-power.service
 
 [Service]
 Type=simple

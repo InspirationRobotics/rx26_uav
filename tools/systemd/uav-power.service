@@ -29,6 +29,17 @@ User=root
 # UAV_POWER_SOCKET / UAV_POWER_GROUP live in /etc/default/uav alongside the
 # other UAV_* settings, so moving the socket needs no unit edit.
 EnvironmentFile=-/etc/default/uav
+# /run is tmpfs: /run/uav does not survive a reboot, and the CONTAINER
+# bind-mounts that directory. RuntimeDirectory recreates it (0755 root) before
+# ExecStart on every boot.
+RuntimeDirectory=uav
+RuntimeDirectoryMode=0755
+# PRESERVE IT. Without this, systemd DELETES /run/uav when the unit stops — and
+# `systemctl restart uav-power` is a stop. The running container's bind mount
+# would then point at a removed directory, so the System tab reports the helper
+# unreachable until the container itself is restarted. That is precisely the
+# failure this whole directory-instead-of-file arrangement exists to prevent.
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/bin/python3 __UAV_REPO__/tools/scripts/uav_power_helper.py
 Restart=on-failure
 RestartSec=5
