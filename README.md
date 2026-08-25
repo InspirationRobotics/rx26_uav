@@ -68,15 +68,23 @@ reporting link cannot take the telemetry gateway down with it.
 
 ## Boot chain
 
-`sudo bash setup/install_jetson_host.sh` installs all five units, in order:
+`sudo bash setup/install_jetson_host.sh` installs the units, in order:
 
 ```
 uav-mavproxy      host    sole Pixhawk owner; 14541 -> ROS, 14540 -> GCS
 uav-container     host    docker start; ROS 2 Humble
 uav-groundstation host    docker exec -> ground_station     (unproven)
 uav-ocs-client    host    docker exec -> ocs_client         (unproven)
-uav-power         host    root helper socket for the System tab
+uav-shutdown.path host    watches <ws>/logs/shutdown.request -> poweroff
+uav-reboot.path   host    watches <ws>/logs/reboot.request   -> reboot
 ```
+
+The two `.path` units are how the System tab powers the Jetson down. The
+container has no init to ask, so it drops a file in the workspace bind mount it
+already has and systemd acts on it — no socket, no daemon, no extra mount. The
+oneshot each one triggers (`uav-shutdown.service`, `uav-reboot.service`) has no
+`[Install]` section on purpose: enabling it would power the machine off at every
+boot. **Never `systemctl start uav-shutdown.service`** — that *is* the shutdown.
 
 The last two are auto-started because nobody will SSH into this Jetson between
 flights. Neither has carried a run; `systemctl disable uav-groundstation
@@ -211,9 +219,11 @@ until you log out and back in.
 | `docker attach uav` hangs, shows nothing | you attached to PID 1, which is `tail -f /dev/null` — silent by design. **Ctrl+C there kills the container** and takes the nodes with it | `docker exec -it uav bash`. To escape an attach: **Ctrl+P Ctrl+Q** |
 | `docker exec -it uav bash` has no `ros2` | `docker exec` does **not** run the image ENTRYPOINT, so `/ros_entrypoint.sh` never fires | rebuild the image (it now sources ROS in `.bashrc`), or `source /opt/ros/humble/setup.bash` by hand |
 | `systemctl restart` leaves **two** copies | `docker exec` does not propagate termination; the old process survives and still holds `:8090` | the `ExecStartPre` sweep handles it. Verify with `docker exec uav pgrep -fc install/uav_groundstation/lib/uav_groundstation/ground_station` — must be `1` |
-| `docker start` fails: **"not a directory: Are you trying to mount a directory onto a file"** | the container was created when `/run/uav-power.sock` did not exist, so Docker invented a **directory** there and the container's rootfs kept one. Now that the host path is a real socket the types disagree, and the container cannot start at all | not repairable in place — mounts are fixed at CREATE time. Re-run the installer, then recreate the container. It now mounts the **directory** `/run/uav` and the socket is `/run/uav/power.sock` |
-| System tab: "power helper unreachable" **after `systemctl restart uav-power`** | the old layout bind-mounted the socket *file*, which pins an inode. The helper unlinks and re-binds on every start, so the container was left holding a deleted inode | fixed by the directory mount above. On an old container, `systemctl restart uav-container` was the only cure |
-| container `Exited (127)` and never ran | 127 is "command not found" — Docker could not exec the container's command at all | `docker logs uav` before you `docker rm` it; that is the only surviving record. Then check `docker inspect -f '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' uav` |
+| container `Exited (127)`, **`docker logs` completely empty** | almost never a missing command. `dockerd` stamps 127 on a container whose task never started, and a bind mount it cannot satisfy is the usual reason — the process never ran, so there is nothing to log. An image fault would leave the shell's own error in the log | treat it as a **start** failure, not a command failure: `docker start uav` once by hand and read the daemon's error. Confirm the image is fine with `docker run --rm --entrypoint /bin/bash uav -c 'command -v tail; ls -l /ros_entrypoint.sh'` |
+| System tab: "power request directory … does not exist" | `<ws>/logs` is missing, or the workspace is not bind-mounted | re-run the installer (step 6 creates it); if the mount is the problem the System tab already says so separately |
+| power button reports the request was **withdrawn** after 5 s | the `.path` unit is not running, so nothing consumed the request file. The node takes it back rather than leaving a live request for the next boot to find | `systemctl status uav-shutdown.path uav-reboot.path` — `enable` is what arms them |
+| Jetson powers off again immediately after every boot | a `shutdown.request` outlived an interrupted shutdown, and `PathExists=` fires at unit start on a file that is already there | `/etc/tmpfiles.d/uav.conf` sweeps both request files at boot, before the `.path` units arm. Re-run the installer if it is missing |
+| container still mounts `/run/uav` or `/run/uav-power.sock` | left from the retired socket helper. Harmless as a directory, **fatal** as a file — `docker start` fails with "not a directory" | recreate it: `docker rm -f uav && sudo bash setup/install_jetson_host.sh`. The power request needs no mount of its own now |
 | `git pull` changed nothing | colcon installs into `install/`; the node does not import from `src/` | `rebuild.sh`, then restart the units |
 | Rebuild changed nothing either | the workspace is not actually bind-mounted | the System tab says so explicitly. Recreate with `-v ~/robotx_ws:/root/robotx_ws` |
 

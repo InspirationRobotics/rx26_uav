@@ -111,7 +111,7 @@ with a warning that the flight phase is a fallback.
 ## 4. Boot chain, props off
 
 ```bash
-sudo systemctl start uav-mavproxy uav-container uav-groundstation uav-ocs-client uav-power
+sudo systemctl start uav-mavproxy uav-container uav-groundstation uav-ocs-client
 ```
 
 Then reboot and let it come up unattended.

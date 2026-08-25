@@ -1,0 +1,15 @@
+# /etc/systemd/system/uav-reboot.path  (Jetson host)
+#
+# TEMPLATE: __UAV_WS__ is substituted by setup/install_jetson_host.sh.
+#
+# The reboot half of the pair. See uav-shutdown.path for why the ground station
+# asks with a FILE rather than a socket or a privileged container — that header
+# carries the reasoning for both.
+[Unit]
+Description=Watch for a reboot request from the UAV ground station
+
+[Path]
+PathExists=__UAV_WS__/logs/reboot.request
+
+[Install]
+WantedBy=multi-user.target

@@ -10,8 +10,9 @@
 #   [3] host prerequisites    docker + MAVProxy + the docker group, with the
 #                             exact fix for each
 #   [4] udev rules + dialout  stable /dev/uav-pixhawk, and permission to OPEN it
-#   [5] systemd units         mavproxy -> container -> ground station + OCS client
-#   [6] power helper          started BEFORE the container, so its socket exists
+#   [5] systemd units         mavproxy -> container -> ground station + OCS
+#                             client, plus the shutdown/reboot .path pair
+#   [6] power request path    <ws>/logs + the boot-time sweep of stale requests
 #   [7] container             created if absent; mounts CHECKED if present
 #
 # Usage:   sudo bash setup/install_jetson_host.sh
@@ -62,11 +63,6 @@ id -u "$UAV_USER" >/dev/null 2>&1 || {
 USER_HOME="$(getent passwd "$UAV_USER" | cut -d: -f6)"
 UAV_CONTAINER="${UAV_CONTAINER:-uav}"
 UAV_IMAGE="${UAV_IMAGE:-uav}"
-POWER_SOCK="${UAV_POWER_SOCKET:-/run/uav/power.sock}"
-# The container bind-mounts this DIRECTORY, never the socket file itself.
-# See step [6] for why that distinction is the whole ballgame.
-POWER_DIR="$(dirname "$POWER_SOCK")"
-POWER_SOCK_LEGACY=/run/uav-power.sock
 
 echo "== [1/7] workspace layout =="
 # The workspace is DERIVED FROM THE REPO, not from a constant, so a workspace
@@ -234,21 +230,50 @@ echo "== [5/7] systemd units =="
 # differ per Jetson, and a hardcoded /home/<someone> fails silently at boot —
 # which you discover in the field.
 echo "   container:  $UAV_CONTAINER"
-UNITS=(uav-mavproxy uav-container uav-groundstation uav-ocs-client uav-power)
+# FULL FILENAMES, because the power pair are .path units, not .service ones.
+UNITS=(uav-mavproxy.service uav-container.service uav-groundstation.service
+       uav-ocs-client.service
+       uav-shutdown.path uav-shutdown.service
+       uav-reboot.path uav-reboot.service)
+# ENABLE IS A DIFFERENT LIST. uav-shutdown.service and uav-reboot.service are
+# TRIGGERED by their .path units and carry no [Install] section on purpose:
+# enabling them directly would power the Jetson off, or reboot it, every single
+# time it finished booting.
+ENABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client
+        uav-shutdown.path uav-reboot.path)
+# The long-running ones, for the "start now" hint. `enable` is what arms a .path
+# unit; starting the oneshot it triggers would BE the shutdown.
+STARTABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client)
 for unit in "${UNITS[@]}"; do
   sed -e "s|__UAV_USER__|$UAV_USER|g" \
       -e "s|__UAV_REPO__|$UAV_REPO|g" \
       -e "s|__UAV_CONTAINER__|$UAV_CONTAINER|g" \
-      "tools/systemd/$unit.service" > "/etc/systemd/system/$unit.service"
-  chmod 644 "/etc/systemd/system/$unit.service"
+      -e "s|__UAV_WS__|$WS_HOST|g" \
+      "tools/systemd/$unit" > "/etc/systemd/system/$unit"
+  chmod 644 "/etc/systemd/system/$unit"
   # Fail loudly rather than enabling a unit that still carries a placeholder.
-  if grep -q "__UAV_" "/etc/systemd/system/$unit.service"; then
-    echo "ERROR: $unit.service still has unsubstituted placeholders." >&2
-    grep -n "__UAV_" "/etc/systemd/system/$unit.service" >&2
+  if grep -q "__UAV_" "/etc/systemd/system/$unit"; then
+    echo "ERROR: $unit still has unsubstituted placeholders." >&2
+    grep -n "__UAV_" "/etc/systemd/system/$unit" >&2
     exit 1
   fi
-  echo "   installed $unit.service"
+  echo "   installed $unit"
 done
+
+# ---------------------------------------------------------------------------
+# RETIRE THE SOCKET-BASED POWER HELPER, if this Jetson still has one.
+#
+# Replaced by the .path units above. Left behind it does nothing worse than
+# crash-loop against a socket nothing reads any more — but a failed unit in
+# `systemctl status` during a pre-flight check costs someone real time working
+# out that it does not matter, which is exactly when nobody has time.
+# ---------------------------------------------------------------------------
+if [[ -e /etc/systemd/system/uav-power.service ]]; then
+  echo "   retiring uav-power.service (its socket helper is gone from the repo)"
+  systemctl disable --now uav-power >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/uav-power.service
+  rm -rf /run/uav /run/uav-power.sock
+fi
 
 # Seed /etc/default/uav if it does not exist. The units reference it with a
 # leading `-` so a missing file is fine, but having it there with the knobs
@@ -266,71 +291,78 @@ UAV_BCAST_ADDR=192.168.8.255
 # rest of the line as one value. Additive: broadcast stays on regardless.
 #GCS_IPS="192.168.8.50 192.168.1.20"
 
-# Where the power helper listens. Its PARENT DIRECTORY is what gets
-# bind-mounted into the container — never the socket file, which is a fresh
-# inode on every helper restart and would leave the container holding a deleted
-# one. Move this and you must recreate the container to match.
-UAV_POWER_SOCKET=/run/uav/power.sock
-UAV_POWER_GROUP=uav
 DEFAULTS
   echo "   seeded /etc/default/uav"
 fi
 
 systemctl daemon-reload
-systemctl enable "${UNITS[@]}" >/dev/null
-echo "   enabled all five; start now with:"
-echo "     systemctl start ${UNITS[*]}"
+systemctl enable "${ENABLE[@]}" >/dev/null
+echo "   enabled ${#ENABLE[@]} units; start the long-running ones with:"
+echo "     systemctl start ${STARTABLE[*]}"
 
-echo "== [6/7] power helper, then [7/7] container =="
+echo "== [6/7] power request path, then [7/7] container =="
 # ---------------------------------------------------------------------------
-# THE CONTAINER MOUNTS THE DIRECTORY /run/uav, NOT THE SOCKET FILE.
+# THE GROUND STATION ASKS FOR A SHUTDOWN BY DROPPING A FILE.
 #
-# It used to mount the socket itself, and that is a trap with two jaws:
+# It runs inside the container, which has no init of its own to ask, so it
+# cannot power the Jetson off directly. It writes <ws>/logs/shutdown.request
+# into the WORKSPACE BIND MOUNT it already has, and uav-shutdown.path — enabled
+# in step [5] — sees it appear and runs a oneshot that deletes the file and
+# calls `systemctl poweroff`.
 #
-#   * A bind mount of a FILE pins an INODE. uav_power_helper.py unlinks and
-#     re-binds its socket on every start, so one `systemctl restart uav-power`
-#     leaves the container holding a deleted inode. Connections fail, the
-#     System tab says "unreachable", and only a CONTAINER restart fixes it —
-#     nothing on either side logs why.
-#   * Docker, told to bind-mount a path that does not exist yet, INVENTS A
-#     DIRECTORY at it on the host. The container then has a directory where it
-#     wants a socket, and the helper's os.unlink() hits IsADirectoryError and
-#     crash-loops. Worse, the container's own rootfs keeps that directory, so
-#     once the host path IS a real socket, `docker start` dies with
-#     "not a directory: Are you trying to mount a directory onto a file" and
-#     the container cannot be started AT ALL until it is recreated.
+# WHAT THIS REPLACED, and why (rx26_uav, 2026-08-24). It used to be a root
+# daemon on a Unix socket, bind-mounted into the container. That needed its own
+# mount, and a bind mount of a FILE pins an inode: the helper unlinks and
+# re-binds on every start, so one `systemctl restart uav-power` left the
+# container holding a deleted inode, with a System tab reporting "unreachable"
+# and nothing in either journal saying why. And when Docker was asked to mount
+# a socket path that did not exist yet it invented a DIRECTORY on the host,
+# after which the container would not start AT ALL. Three separate failures,
+# all from the same decision to mount a file.
 #
-# Mounting the parent directory removes both: a directory is what Docker would
-# create anyway, and the container resolves the socket name on each connect, so
-# a helper restart is invisible to it.
-#
-# uav-power.service creates /run/uav via RuntimeDirectory=uav (with
-# RuntimeDirectoryPreserve=yes so a restart does not delete it out from under
-# the running container). We create it here too, because the container may be
-# created before that unit has ever started.
-install -d -m 0755 "$POWER_DIR"
+# The file-drop design has no socket, no daemon, no extra mount, no group, and
+# nothing in /run to survive a reboot. It rides the workspace mount that must
+# work anyway for the node's code to be in there — so if the ground station is
+# running at all, the channel it needs is already proven. Borrowed from
+# robotx_graey_2026 (deploy/systemd/graey-shutdown.path), where it has flown.
+# ---------------------------------------------------------------------------
+LOGS_DIR="$WS_HOST/logs"
+install -d -o "$UAV_USER" -g "$(id -gn "$UAV_USER")" -m 0775 "$LOGS_DIR"
+echo "   power requests: $LOGS_DIR/{shutdown,reboot}.request"
 
-# MIGRATION off the old layout. Both forms of the old path are removed: the
-# socket file left by a previous helper, and the directory Docker invented.
-if [[ -e "$POWER_SOCK_LEGACY" ]]; then
-  echo "   removing legacy $POWER_SOCK_LEGACY ($(stat -c '%F' "$POWER_SOCK_LEGACY"))"
-  echo "   the socket now lives at $POWER_SOCK, inside a mounted directory"
-  rm -rf "$POWER_SOCK_LEGACY"
-fi
+# ---------------------------------------------------------------------------
+# SWEEP STALE REQUESTS AT BOOT — the one hazard this design does have.
+#
+# PathExists= fires when the unit starts and the file is ALREADY there, not
+# only on creation. So a request file that outlived an interrupted shutdown —
+# battery pulled between the write and the unit's `rm` — would power the Jetson
+# off again the instant it finished booting. Every time. An aircraft that will
+# not stay booted, with nothing on screen to explain it.
+#
+# systemd-tmpfiles-setup runs in sysinit.target, long before multi-user.target
+# arms the .path units, so this always wins the race. The `!` restricts it to
+# boot: it must never delete a request an operator just made.
+# ---------------------------------------------------------------------------
+cat > /etc/tmpfiles.d/uav.conf <<TMPFILES
+# Written by setup/install_jetson_host.sh. Removes power requests that outlived
+# a shutdown, at BOOT ONLY (the '!'), before uav-*.path can act on them.
+r! $LOGS_DIR/shutdown.request
+r! $LOGS_DIR/reboot.request
+TMPFILES
+# Apply now as well, in case one is sitting there from before this ran.
+systemd-tmpfiles --remove --boot /etc/tmpfiles.d/uav.conf >/dev/null 2>&1 || true
+echo "   installed /etc/tmpfiles.d/uav.conf (boot-time sweep of stale requests)"
 
-# The helper chowns the socket to this group. Without it the socket is
-# root-only and the helper logs a warning that reads like a failure — harmless
-# here (the container runs as root) but confusing.
-groupadd -f "${UAV_POWER_GROUP:-uav}" 2>/dev/null || true
-systemctl start uav-power || echo "WARN: uav-power did not start; the System tab will say so."
-for _ in 1 2 3 4 5; do [[ -S "$POWER_SOCK" ]] && break; sleep 1; done
-if [[ -S "$POWER_SOCK" ]]; then
-  echo "   power socket ready at $POWER_SOCK (mounting $POWER_DIR)"
+for u in uav-shutdown.path uav-reboot.path; do
+  systemctl restart "$u" >/dev/null 2>&1 || echo "WARN: $u did not start; the System tab will say power is unavailable."
+done
+if systemctl is-active --quiet uav-shutdown.path && systemctl is-active --quiet uav-reboot.path; then
+  echo "   uav-shutdown.path and uav-reboot.path are watching"
 else
-  echo "WARN: $POWER_SOCK is not a socket yet. The container will still be"
-  echo "      created and $POWER_DIR is a real directory, so this is now"
-  echo "      recoverable WITHOUT recreating the container — fix the helper"
-  echo "      (journalctl -u uav-power) and it will appear in there."
+  echo "WARN: a power .path unit is not active. The System tab will refuse to"
+  echo "      power down and say so, which is the intended failure — a button"
+  echo "      that silently does nothing is worse. Check:"
+  echo "        systemctl status uav-shutdown.path uav-reboot.path"
 fi
 
 # `docker start` CANNOT add mounts — they are fixed when the container is
@@ -343,9 +375,7 @@ elif docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
   MOUNTS="$(docker inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$UAV_CONTAINER" 2>/dev/null || true)"
   MISSING=""
   case "$MOUNTS" in *":/root/robotx_ws"*) ;; *) MISSING="$MISSING workspace" ;; esac
-  # The DIRECTORY, specifically. A container carrying the old socket-file
-  # mount matches neither, and is reported below as needing a recreate.
-  case "$MOUNTS" in *"$POWER_DIR:$POWER_DIR"*) ;; *) MISSING="$MISSING power-socket" ;; esac
+
   if [[ -n "$MISSING" ]]; then
     echo "WARN: container '$UAV_CONTAINER' is MISSING mounts:$MISSING"
     # Only the missing ones. Listing both consequences whatever is absent reads
@@ -356,20 +386,6 @@ elif docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
       echo "                        the container, a rebuild silently changes"
       echo "                        nothing, and 'docker rm' discards the lot." ;;
     esac
-    case "$MISSING" in *power-socket*)
-      echo "        power-socket -> the System tab cannot power the Jetson down;"
-      echo "                        it will say so. Everything else works." ;;
-    esac
-    # Name the case they are almost certainly in, because its symptom is not
-    # "the button is missing" — it is a container that will not start at all.
-    case "$MOUNTS" in *"$POWER_SOCK_LEGACY"*)
-      echo
-      echo "      THIS CONTAINER HAS THE OLD SOCKET-FILE MOUNT"
-      echo "        ($POWER_SOCK_LEGACY, bind-mounted as a file)."
-      echo "      It will fail to start with 'not a directory: Are you trying"
-      echo "      to mount a directory onto a file'. It CANNOT be repaired in"
-      echo "      place — mounts are fixed at CREATE time. Recreate it." ;;
-    esac
     echo "      Mounts are fixed at CREATE time, so this cannot be fixed by a"
     echo "      restart. Recreating is YOUR call — 'docker rm' throws away"
     echo "      anything living only inside the container:"
@@ -378,21 +394,37 @@ elif docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
     echo "        docker run -d --name $UAV_CONTAINER \\"
     echo "          --restart unless-stopped --network host --privileged \\"
     echo "          -v $WS_HOST:/root/robotx_ws \\"
-    echo "          -v $POWER_DIR:$POWER_DIR \\"
     echo "          -v /dev:/dev \\"
     echo "          $UAV_IMAGE tail -f /dev/null"
     echo
     echo "      Then: docker exec $UAV_CONTAINER bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh"
   else
-    echo "   mounts OK: workspace and power socket are both bind-mounted."
+    echo "   mounts OK: the workspace is bind-mounted."
   fi
+
+  # CHECKED SEPARATELY, because it is not a missing mount — it is a mount that
+  # actively breaks the container, and the workspace can be perfectly fine
+  # alongside it. The symptom is not "the button is missing", it is a container
+  # that will not start at all.
+  case "$MOUNTS" in *"/run/uav-power.sock"*|*"/run/uav:/run/uav"*)
+    echo "WARN: container '$UAV_CONTAINER' still mounts the RETIRED power socket."
+    echo "      Nothing serves it any more, and the socket-FILE form makes"
+    echo "      'docker start' fail outright with 'not a directory: Are you"
+    echo "      trying to mount a directory onto a file'."
+    echo "      Mounts are fixed at CREATE time, so recreate it — the power"
+    echo "      request now rides the workspace mount and needs no mount of"
+    echo "      its own:"
+    echo
+    echo "        docker rm -f $UAV_CONTAINER"
+    echo "        sudo bash setup/install_jetson_host.sh" ;;
+  esac
 elif docker image inspect "$UAV_IMAGE" >/dev/null 2>&1; then
-  # Nothing to lose: create it with both mounts already right.
+  # Nothing to lose: create it with the mounts already right. Note there is
+  # no power mount — the shutdown request is a file in the workspace.
   echo "   no container named '$UAV_CONTAINER' — creating it"
   docker run -d --name "$UAV_CONTAINER" \
     --restart unless-stopped --network host --privileged \
     -v "$WS_HOST":/root/robotx_ws \
-    -v "$POWER_DIR":"$POWER_DIR" \
     -v /dev:/dev \
     "$UAV_IMAGE" tail -f /dev/null >/dev/null
   echo "   created. Build the workspace inside it:"
@@ -450,17 +482,17 @@ echo "NEXT, in order:"
 # send someone down a path they do not need.
 if docker inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
   echo "  1. docker exec $UAV_CONTAINER bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh"
-  echo "  2. systemctl start ${UNITS[*]}"
+  echo "  2. systemctl start ${STARTABLE[*]}"
   echo "  3. open http://<this jetson>:8090"
 elif ! docker image inspect "$UAV_IMAGE" >/dev/null 2>&1; then
   echo "  1. docker build -t $UAV_IMAGE $UAV_REPO      # ~10-20 min on an Orin"
   echo "  2. sudo bash setup/install_jetson_host.sh   # re-run: creates the container"
   echo "  3. docker exec $UAV_CONTAINER bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh"
-  echo "  4. systemctl start ${UNITS[*]}"
+  echo "  4. systemctl start ${STARTABLE[*]}"
 else
   echo "  1. sudo bash setup/install_jetson_host.sh   # re-run: creates the container"
   echo "  2. docker exec $UAV_CONTAINER bash /root/robotx_ws/src/rx26_uav/setup/install_container.sh"
-  echo "  3. systemctl start ${UNITS[*]}"
+  echo "  3. systemctl start ${STARTABLE[*]}"
 fi
 echo
 echo "If a unit fails, README.md has a Troubleshooting table keyed by the exact"

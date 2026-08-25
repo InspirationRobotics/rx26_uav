@@ -1,0 +1,21 @@
+# /etc/systemd/system/uav-shutdown.service  (Jetson host)
+#
+# TEMPLATE: __UAV_WS__ is substituted by setup/install_jetson_host.sh.
+#
+# Triggered by uav-shutdown.path. Not enabled itself, and deliberately has no
+# [Install] section: enabling this would power the Jetson off at every boot.
+[Unit]
+Description=Power off the Jetson at the ground station's request
+
+[Service]
+Type=oneshot
+# DELETE THE REQUEST FIRST. If it survived into the next boot the path unit
+# would fire again and power the machine straight back off — an aircraft that
+# will not stay booted, with nothing on screen to say why. Ordering it before
+# the poweroff is what makes that impossible in the normal case; the tmpfiles.d
+# sweep covers the abnormal one (power cut between write and rm).
+ExecStart=/bin/rm -f __UAV_WS__/logs/shutdown.request
+# systemctl rather than `shutdown`, so it behaves the same whether or not a
+# login shell exists, and takes effect now rather than after a delay nobody on
+# the aircraft can cancel.
+ExecStart=/bin/systemctl poweroff

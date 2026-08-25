@@ -65,9 +65,10 @@ PARAM_SPEC = {
                       description="0.0.0.0 so the laptop can reach it"),
     "tools_dir": dict(read_only=True,
                       description="where tools/*.py live, for script nodes"),
-    "power_socket": dict(read_only=True,
-                         description="host power helper socket; see "
-                                     "tools/scripts/uav_power_helper.py"),
+    "power_request_dir": dict(read_only=True,
+                              description="where the shutdown/reboot request "
+                                          "files are dropped for the host's "
+                                          ".path units; see power_client.py"),
     "disk_path": dict(read_only=True, description="filesystem to report free"),
     "workspace_path": dict(read_only=True,
                            description="checked for being a bind mount, so the "
@@ -392,9 +393,10 @@ class GroundStation(Node):
         if not self.p["allow_power"]:
             return {"allowed": False,
                     "reason": "power is disabled by the allow_power parameter. "
-                              "Install uav-power.service (setup/"
-                              "install_jetson_host.sh) and set allow_power: "
-                              "true if a browser may halt this Jetson."}
+                              "Install uav-shutdown.path / uav-reboot.path "
+                              "(setup/install_jetson_host.sh) and set "
+                              "allow_power: true if a browser may halt this "
+                              "Jetson."}
         if not known:
             return {"allowed": False,
                     "reason": "armed state is UNKNOWN — no fresh FcuStatus. "
@@ -404,9 +406,9 @@ class GroundStation(Node):
         if armed:
             return {"allowed": False,
                     "reason": "vehicle is ARMED. Disarm before powering down."}
-        ok, why = power_client.available(self.p["power_socket"])
+        ok, why = power_client.available(self.p["power_request_dir"])
         if not ok:
-            # The helper's own wording: it already explains the bind mount and
+            # The client's own wording: it already explains the bind mount and
             # names the install script, and paraphrasing it here would give two
             # slightly different answers to the same question.
             return {"allowed": False, "reason": why}
@@ -500,15 +502,15 @@ class GroundStation(Node):
         self.get_logger().warn("POWER %s requested from the ground station" % verb)
         try:
             reply = power_client.request(
-                verb, self.p["power_socket"],
+                verb, self.p["power_request_dir"],
                 reason="ground_station, confirmed by hostname")
         except power_client.PowerUnavailable as e:
-            self.get_logger().error("power helper: %s" % e)
+            self.get_logger().error("power request: %s" % e)
             return {"ok": False, "message": str(e)}
         except ValueError as e:
             return {"ok": False, "message": str(e)}
-        # The helper acknowledges BEFORE it acts -- after it acts there is no
-        # socket left to answer on -- so a reply here means accepted, not done.
+        # The host deletes the request BEFORE it acts, so the file vanishing
+        # means systemd picked it up -- accepted, not done.
         return {"ok": True, "message": "%s: %s" % (verb, reply)}
 
     # ---------- teardown ----------

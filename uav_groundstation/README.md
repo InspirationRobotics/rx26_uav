@@ -67,15 +67,29 @@ unexplained fence breach. The map is a **readout**; the autopilot enforces.
 The map's origin is the fence centroid, not the first GPS fix, so the polygon
 does not jump when GPS arrives and two sessions draw the same picture.
 
-### Power needs a host-side helper
+### Power is a file, watched by the host
 
 A container has no init to ask, so `shutdown` inside it fails or does worse. The
 alternative — `--privileged` with the host PID namespace — buys one button by
-granting every process in the container permanent root. Instead:
-`tools/scripts/uav_power_helper.py` + `tools/systemd/uav-power.service`, a socket
-that accepts two words and interpolates nothing into a command.
+granting every process in the container permanent root. Instead the node writes
+`<ws>/logs/shutdown.request` into the workspace bind mount, and
+`tools/systemd/uav-shutdown.path` runs a oneshot that deletes the file and calls
+`systemctl poweroff`. The privileged surface is a set of two filenames; nothing
+written is ever read back, parsed, or executed.
 
-`allow_power` defaults to **false**: the helper needs a host-side unit installed
+This replaced a Unix-socket helper on 2026-08-24. The socket needed its own bind
+mount, and a bind mount of a *file* pins an inode — so every helper restart
+silently orphaned the container's end, and a socket path that did not exist at
+create time made Docker invent a directory that stopped the container starting
+at all. The request now rides the mount that must work anyway for this code to
+be here. Borrowed from `robotx_graey_2026`, where it has flown.
+
+The acknowledgement is the file **disappearing**: the host deletes it before
+acting, so a consumed request proves systemd picked it up. A request still there
+after five seconds means the `.path` unit is down, and the node says so instead
+of reporting a shutdown that will never come.
+
+`allow_power` defaults to **false**: the host-side units must be installed
 first, and a button that silently does nothing is worse than one that is openly
 off.
 

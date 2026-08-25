@@ -209,21 +209,27 @@ ground_station:
                                            #      that failure helps nobody.
     tools_dir: "/root/robotx_ws/src/rx26_uav/tools"   # [RO] where tools/*.py
                                            #      live INSIDE the container
-    power_socket: "/run/uav-power.sock"    # [RO] host power helper socket,
-                                           #      bind-mounted into the
-                                           #      container. A container CANNOT
+    power_request_dir: "/root/robotx_ws/logs"  # [RO] where shutdown.request
+                                           #      and reboot.request are
+                                           #      dropped. A container CANNOT
                                            #      power off the Jetson on its
-                                           #      own; see uav_power_helper.py.
+                                           #      own, so it asks with a file
+                                           #      the host's .path units watch
+                                           #      for. Rides the workspace
+                                           #      bind mount — no extra mount,
+                                           #      no socket, no daemon.
     allow_power: false                     # [RO] master switch for the power
                                            #      tab. FALSE by default: the
-                                           #      helper needs a host-side unit
-                                           #      installed first, and a button
-                                           #      that silently does nothing is
-                                           #      worse than one that is openly
-                                           #      off. Flip to true once
-                                           #      uav-power.service is running
-                                           #      and you have decided a browser
-                                           #      may halt this Jetson.
+                                           #      host-side .path units must
+                                           #      be installed first, and a
+                                           #      button that silently does
+                                           #      nothing is worse than one
+                                           #      that is openly off. Flip to
+                                           #      true once uav-shutdown.path
+                                           #      and uav-reboot.path are
+                                           #      enabled and you have decided
+                                           #      a browser may halt this
+                                           #      Jetson.
     disk_path: "/"                         # [RO] filesystem reported as free.
                                            #      Inside a container this is the
                                            #      CONTAINER's view, so the tab

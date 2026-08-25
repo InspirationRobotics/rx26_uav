@@ -1,0 +1,39 @@
+# /etc/systemd/system/uav-shutdown.path  (Jetson host)
+#
+# TEMPLATE: __UAV_WS__ is substituted by setup/install_jetson_host.sh.
+#
+# The ground station runs INSIDE the container and cannot power the Jetson off
+# — a container shares the host's kernel but has no init of its own to ask, so
+# `systemctl poweroff` in there either fails or does something worse. The usual
+# workaround is --privileged plus the host PID namespace, which buys one button
+# by handing every process in that container permanent root on the Jetson.
+#
+# This buys the same button with a FILE. The ground station drops
+# <ws>/logs/shutdown.request into the workspace bind mount it already has;
+# systemd watches for it here and runs uav-shutdown.service.
+#
+# WHY THIS REPLACED A UNIX SOCKET (rx26_uav, 2026-08-24): the socket needed its
+# own bind mount, and a bind mount of a FILE pins an inode — so every helper
+# restart silently orphaned the container's end of it. Worse, when Docker was
+# asked to mount a socket path that did not exist yet it invented a DIRECTORY
+# there, which left the container unable to start at all. This design has no
+# socket, no daemon, no extra mount and no group to get wrong: the request
+# rides the workspace mount that must work anyway for the code to be there.
+#
+# Borrowed from robotx_graey_2026 (deploy/systemd/graey-shutdown.path), where it
+# has flown.
+#
+# The unit started is uav-shutdown.service — systemd pairs a .path with the
+# .service of the SAME NAME, which is why neither file names the other.
+[Unit]
+Description=Watch for a shutdown request from the UAV ground station
+
+[Path]
+# Fires on creation, and also at unit start if the file is already there. That
+# second case is why /etc/tmpfiles.d/uav.conf sweeps stale requests at boot:
+# without it, a request file that outlived an interrupted shutdown would power
+# the Jetson off again the moment it finished booting, forever.
+PathExists=__UAV_WS__/logs/shutdown.request
+
+[Install]
+WantedBy=multi-user.target

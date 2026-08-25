@@ -1,0 +1,15 @@
+# /etc/systemd/system/uav-reboot.service  (Jetson host)
+#
+# TEMPLATE: __UAV_WS__ is substituted by setup/install_jetson_host.sh.
+#
+# Triggered by uav-reboot.path. No [Install] section on purpose: enabling this
+# unit directly would reboot the Jetson every time it finished booting.
+[Unit]
+Description=Reboot the Jetson at the ground station's request
+
+[Service]
+Type=oneshot
+# Delete first — a request that outlives the reboot makes an endless one. See
+# uav-shutdown.service.
+ExecStart=/bin/rm -f __UAV_WS__/logs/reboot.request
+ExecStart=/bin/systemctl reboot
