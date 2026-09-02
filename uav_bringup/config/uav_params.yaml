@@ -308,18 +308,25 @@ camera_node:
                                            #   exactly like one that works.
     gimbal_control_enabled: true           # [RO] create the
                                            #   /uav/camera/gimbal_cmd
-                                           #   subscription. FALSE HERE ON
-                                           #   PURPOSE: with no subscriber
-                                           #   there is no way to re-aim the
-                                           #   camera in flight, which is the
-                                           #   posture the flight config wants.
-                                           #   Turn it on for bench work, or
-                                           #   when a mission node on this
-                                           #   Jetson needs to change the
-                                           #   angle. Note DDS is not
-                                           #   local-only: with this true,
-                                           #   anything on the vehicle's ROS
-                                           #   graph can publish to it.
+                                           #   subscription. TRUE HERE: Fitz is
+                                           #   the development airframe and the
+                                           #   camera gets re-aimed by hand
+                                           #   often enough that not being able
+                                           #   to costs more than the surface
+                                           #   does. Know what it opens — DDS
+                                           #   is not local-only, so anything
+                                           #   on the vehicle's ROS graph,
+                                           #   including anything that reaches
+                                           #   it over the field WiFi, can
+                                           #   publish an arbitrary angle to
+                                           #   this topic. Set it false to shut
+                                           #   that path off; the node still
+                                           #   commands nadir at startup and
+                                           #   /uav/camera/set_nadir still
+                                           #   works, because that service can
+                                           #   only ever send the one angle
+                                           #   below and cannot aim the camera
+                                           #   anywhere new.
     record_dir: "/root/robotx_ws/logs/video"
                                            # [RO] rides the workspace bind mount
                                            #      on purpose: a path inside the
@@ -366,6 +373,21 @@ camera_node:
                                            #      arrive on separate MAVLink
                                            #      streams with separate rate
                                            #      groups.
+    gimbal_timeout_s: 3.0                  # [RO] s without an answer from the
+                                           #      gimbal before gimbal_ok goes
+                                           #      false and gimbal_pitch goes
+                                           #      NaN. Deliberately several
+                                           #      status ticks wide: one lost
+                                           #      UDP datagram is not a dead
+                                           #      gimbal, but a gimbal that has
+                                           #      genuinely stopped answering
+                                           #      must NOT keep publishing its
+                                           #      last angle as if it were
+                                           #      current — geo-projection uses
+                                           #      that angle, and a frozen one
+                                           #      is wrong by
+                                           #      altitude*tan(error) with
+                                           #      nothing to show for it.
     status_rate_hz: 2.0                    # [RO] /uav/camera/status rate. A
                                            #      heartbeat about the pipeline,
                                            #      not a per-frame record.

@@ -14,6 +14,10 @@
 #                             client, plus the shutdown/reboot .path pair
 #   [6] power request path    <ws>/logs + the boot-time sweep of stale requests
 #   [7] container             created if absent; mounts CHECKED if present
+#   [8] camera network        static address on the SIYI subnet, NO gateway --
+#                             the only step here that touches networking, and
+#                             it refuses any interface that carries the default
+#                             route, the OCS link, or your SSH session
 #
 # Usage:   sudo bash setup/install_jetson_host.sh
 #
@@ -450,10 +454,116 @@ else
   echo "        docker build -t $UAV_IMAGE $UAV_REPO"
 fi
 
+# ---------------------------------------------------------------------------
+# [8] CAMERA NETWORK — a static address on the SIYI subnet, with no way out.
+#
+# The A8 mini is hard-wired to 192.168.144.25 in its own firmware and cannot be
+# moved, so the Jetson has to come to it.
+#
+# THIS IS THE ONLY STEP IN THIS SCRIPT THAT RECONFIGURES NETWORKING, and it is
+# fenced accordingly. It refuses to touch an interface carrying the default
+# route, the interface the OCS is reached through, or the one your SSH session
+# is arriving on. Any of those and it prints what it would have done and moves
+# on. Getting this wrong locks you out of an aircraft, possibly a flying one.
+#
+# WHY NO GATEWAY, AND WHY never-default. The camera is a dumb peer with no route
+# off its own subnet. If its interface ever wins the default route, the OCS link
+# to 192.168.8.107:37564 and MAVProxy's broadcast to 192.168.8.255 leave by an
+# interface that silently drops them — and the symptom is "the OCS stopped
+# seeing us", which points nowhere near the cause. Same-subnet traffic needs no
+# gateway, so none is set; ipv4.never-default then makes it impossible for
+# NetworkManager to install one later even if something offers one.
+#
+# Override the interface when autodetection will not commit:
+#     sudo CAM_IF=eth0 bash setup/install_jetson_host.sh
+# ---------------------------------------------------------------------------
+CAM_CON="siyi-camera"
+CAM_LOCAL="192.168.144.20/24"
+OCS_IP="192.168.8.107"
+
+# The interface the kernel would actually use to reach an address, or empty.
+route_dev() {
+  ip -4 route get "$1" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1
+}
+
+cam_if="${CAM_IF:-}"
+if [[ -z "$cam_if" ]]; then
+  # Real wired ports only. Docker's bridges and veth pairs are ethernet as far
+  # as the kernel is concerned, and one of them would otherwise be a candidate.
+  mapfile -t cam_cands < <(
+    ip -o link show type ether 2>/dev/null \
+      | sed -n 's/^[0-9]*: \([^:@]*\).*/\1/p' \
+      | grep -Ev '^(lo|docker|veth|br-|virbr|tap|tun)' || true)
+  cam_defaults="$(ip -4 route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+  cam_keep=()
+  for c in "${cam_cands[@]:-}"; do
+    if [[ -z "$c" ]]; then continue; fi
+    # An interface already carrying a default route is somebody's uplink.
+    if ! grep -qx "$c" <<<"$cam_defaults"; then cam_keep+=("$c"); fi
+  done
+  if [[ "${#cam_keep[@]}" -eq 1 ]]; then
+    cam_if="${cam_keep[0]}"
+  else
+    echo "   camera network: ${#cam_keep[@]} candidate interfaces — NOT guessing."
+    echo "      candidates: ${cam_keep[*]:-none}"
+    echo "      Name the port the camera is plugged into and re-run:"
+    echo "        sudo CAM_IF=eth0 bash setup/install_jetson_host.sh"
+  fi
+fi
+
+if [[ -n "$cam_if" ]]; then
+  # Three ways this interface can turn out to be load-bearing for something
+  # else. Each is a refusal, not a warning: the cost of being wrong is losing
+  # the aircraft's link, and the cost of skipping is that the camera does not
+  # come up, which is visible immediately and harms nothing.
+  cam_skip=""
+  if ip -4 route show default 2>/dev/null | grep -q " dev $cam_if"; then
+    cam_skip="it carries the DEFAULT ROUTE"
+  elif [[ "$(route_dev "$OCS_IP")" == "$cam_if" ]]; then
+    cam_skip="the OCS at $OCS_IP is reached through it"
+  elif [[ -n "${SSH_CONNECTION:-}" ]] \
+       && [[ "$(route_dev "$(awk '{print $1}' <<<"$SSH_CONNECTION")")" == "$cam_if" ]]; then
+    cam_skip="your SSH session is arriving on it"
+  fi
+
+  if [[ -n "$cam_skip" ]]; then
+    echo "   camera network: SKIPPED on $cam_if — $cam_skip."
+    echo "      Nothing was changed. Give the camera its own port, or configure"
+    echo "      it by hand knowing exactly what shares that interface."
+    problems_net=1
+  elif ! command -v nmcli >/dev/null 2>&1 || ! nmcli -t general status >/dev/null 2>&1; then
+    echo "   camera network: NetworkManager is not running — not configuring."
+    echo "      Equivalent by hand, but LOST ON REBOOT:"
+    echo "        sudo ip addr add $CAM_LOCAL dev $cam_if"
+    echo "        sudo ip link set $cam_if up"
+  else
+    # Idempotent: this script is meant to be re-run, and re-running must not
+    # accumulate duplicate connection profiles fighting over one interface.
+    if nmcli -g NAME con show 2>/dev/null | grep -qx "$CAM_CON"; then
+      nmcli con modify "$CAM_CON" \
+        connection.interface-name "$cam_if" \
+        ipv4.method manual ipv4.addresses "$CAM_LOCAL" ipv4.gateway "" \
+        ipv4.never-default yes ipv6.method disabled \
+        connection.autoconnect yes
+      echo "   camera network: updated '$CAM_CON' on $cam_if"
+    else
+      nmcli con add type ethernet ifname "$cam_if" con-name "$CAM_CON" \
+        ipv4.method manual ipv4.addresses "$CAM_LOCAL" \
+        ipv4.never-default yes ipv6.method disabled \
+        connection.autoconnect yes >/dev/null
+      echo "   camera network: created '$CAM_CON' on $cam_if"
+    fi
+    # A down link (camera unplugged) makes this fail; that is not an install
+    # failure, and the verification below reports it in terms of the camera.
+    nmcli con up "$CAM_CON" >/dev/null 2>&1 || true
+    echo "      $cam_if -> $CAM_LOCAL, no gateway, never-default, autoconnect"
+  fi
+fi
+
 echo "== verification =="
 # Prerequisites were checked in [3/7]; these are the things that can only be
 # judged AFTER the rules and units are in place.
-problems=0
+problems="${problems_net:-0}"
 
 if [[ -e /dev/uav-pixhawk ]]; then
   echo "   /dev/uav-pixhawk -> $(readlink -f /dev/uav-pixhawk)"
@@ -482,10 +592,8 @@ if ! python3 "$UAV_REPO/tools/scripts/check_config.py" >/dev/null 2>&1; then
   problems=1
 fi
 
-# The camera lives on its own subnet (192.168.144.0/24, fixed in the camera's
-# firmware). This is REPORTED, never configured: reconfiguring an interface on a
-# machine someone is very likely SSH'd into is not a thing an installer should
-# do unasked, and getting it wrong locks you out of the aircraft.
+# Did step [8] actually produce a route to the camera? Separate from whether
+# nmcli reported success: the profile can be perfect and the cable still out.
 CAM_IP="192.168.144.25"
 if ip -4 route get "$CAM_IP" >/dev/null 2>&1; then
   cam_if="$(ip -4 route get "$CAM_IP" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
@@ -503,11 +611,12 @@ if ip -4 route get "$CAM_IP" >/dev/null 2>&1; then
   fi
 else
   echo "   camera subnet: no route to $CAM_IP (camera_node will not find it)"
-  echo "      Configure the camera interface with an address and NO gateway:"
-  echo "        sudo nmcli con add type ethernet ifname <IFACE> con-name siyi \\"
-  echo "          ipv4.method manual ipv4.addresses 192.168.144.20/24"
-  echo "        sudo nmcli con up siyi"
-  echo "      Not a failure if the camera is simply not fitted."
+  echo "      Step [8] above says what it did. If it configured an interface,"
+  echo "      the address is set and the CABLE or the camera is the problem:"
+  echo "        ip -4 addr show dev <IFACE>      # is 192.168.144.20 there?"
+  echo "        ip -4 link show dev <IFACE>      # does it say LOWER_UP?"
+  echo "      If it skipped, it printed why. Not a failure if no camera is"
+  echo "      fitted — set camera_node.siyi_enabled false and it stays quiet."
 fi
 
 echo

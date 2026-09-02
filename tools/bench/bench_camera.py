@@ -171,19 +171,33 @@ def case_rotate():
 
 # ---------------------------------------------------------------- pipeline
 
+# The codec elements, named ONCE. They used to be spelled out separately in
+# case_pipeline_full and case_pipeline_record_only, and when pipeline.py moved
+# from H.265 to H.264 the first case failed while the second kept passing --
+# because "nvv4l2decoder not in d" is trivially true once nothing uses
+# nvv4l2decoder. A test that cannot fail is worse than one that does, so both
+# cases now read the decoder from the same place.
+DEPAY, PARSE, DECODER = "rtph264depay", "h264parse", "nvv4l2decoder"
+
+
 def case_pipeline_full():
     d = Pipeline(RTSP, want_frames=True, preview_fps=5).describe("/tmp/a.mkv")
-    need = ("rtspsrc", "rtph265depay", "h265parse", "tee name=enc",
-            "matroskamux", "filesink", "nvv4l2decoder", "tee name=dec",
+    need = ("rtspsrc", DEPAY, PARSE, "tee name=enc",
+            "matroskamux", "filesink", DECODER, "tee name=dec",
             "appsink name=frames", "appsink name=preview", "framerate=5/1")
     missing = [n for n in need if n not in d]
     return check("pipeline has every branch", not missing, ",".join(missing))
 
 
 def case_pipeline_record_only():
-    """want_frames=False is the data-collection sortie: no decode at all."""
+    """want_frames=False is the data-collection sortie: no decode at all.
+
+    Guarded against going vacuous: case_pipeline_full asserts DECODER IS in the
+    full graph, so this one asserting it is NOT in the record-only graph can
+    only pass while the name is still the one pipeline.py actually uses.
+    """
     d = Pipeline(RTSP, want_frames=False).describe("/tmp/a.mkv")
-    ok = "nvv4l2decoder" not in d and "appsink" not in d and "filesink" in d
+    ok = DECODER not in d and "appsink" not in d and "filesink" in d
     return check("record-only omits decode", ok)
 
 

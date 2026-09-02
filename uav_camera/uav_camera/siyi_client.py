@@ -28,9 +28,10 @@ lat/lon per detection, not a camera that follows a target. Commanding an angle
 is a discrete act; tracking would be a control path and is a separate argument.
 
 WHO MAY CALL set_angles. The node exposes it on a topic only when
-gimbal_control_enabled is true, which is false in the flight config. See
-camera_node's header -- this file is happy to point, and the decision about
-whether anything is allowed to ask lives there.
+gimbal_control_enabled is true, and reaches it unconditionally from the
+/uav/camera/set_nadir service, which can only ever ask for the one configured
+angle. See camera_node's header -- this file is happy to point, and the decision
+about whether anything is allowed to ask lives there.
 
 NADIR IS NOT ALWAYS -90. SIYI documents -90 as full-down and +25 as full-up,
 and units in the field have been found reporting the opposite sign, so
@@ -50,6 +51,25 @@ NADIR_PITCH_DEG = -90.0
 # TENTHS of a degree. Identified from mzahana/siyi_sdk and confirmed against
 # this airframe's unit with tools/siyi_gimbal.py.
 CMD_SET_ATTITUDE = 0x0E
+
+# Attitude readback. No payload out; 12 bytes back -- yaw, pitch, roll,
+# yaw_rate, pitch_rate, roll_rate, each int16 little-endian in TENTHS, angles in
+# degrees and rates in degrees/second. Same source and same verification as the
+# command above.
+CMD_GET_ATTITUDE = 0x0D
+ATTITUDE_STRUCT = "<6h"
+ATTITUDE_LEN = 12
+
+# How long attitude() waits for the reply, and it is deliberately far shorter
+# than timeout_s. This call runs inside the node's status timer, on the
+# executor thread, so every millisecond spent waiting is a millisecond nothing
+# else in the node runs. The gimbal is a device on the same wired subnet: a
+# healthy reply lands in well under a millisecond. 250 ms is three orders of
+# magnitude of headroom and still bounds the stall to an eighth of one tick at
+# the 2 Hz status rate. Raising this to "be safe" is the wrong instinct -- a
+# gimbal that needs longer than this is not answering, which is exactly what
+# the caller wants to be told.
+ATTITUDE_TIMEOUT_S = 0.25
 
 
 def _crc16_xmodem(data):
@@ -74,6 +94,12 @@ def _crc16_xmodem(data):
 # geo-projection has to use what it reports, not what it was told. This is the
 # tolerance beyond which the node says the gimbal is not where it was asked.
 NADIR_TOLERANCE_DEG = 2.0
+
+
+# Marks a client opened with connect_wire_only(): everything that speaks the
+# wire protocol works, and the two SD-recording calls that genuinely need the
+# SDK return False rather than raising AttributeError on a sentinel.
+_WIRE_ONLY = object()
 
 
 class SiyiUnavailable(RuntimeError):
@@ -138,8 +164,27 @@ class SiyiClient:
             ) from e
         return self
 
+    def connect_wire_only(self):
+        """Use the gimbal WITHOUT siyi_sdk: pointing and attitude, no recording.
+
+        Pointing and attitude readback are spoken directly on this class's own
+        socket and need nothing installed. Only start_recording/stop_recording
+        go through the SDK. So a laptop with no SDK -- which is exactly the
+        machine you are holding when you need to find out which sign aims a new
+        unit at the ground -- can still drive the gimbal.
+
+        There is no handshake to do: SIYI is request/response over UDP with no
+        session. "Connected" here means "you may now send", and whether the
+        gimbal is actually there is answered by the first attitude() returning
+        None or not, which is the same answer it gives at any other time.
+
+        tools/siyi_gimbal.py is the intended caller.
+        """
+        self._sdk = _WIRE_ONLY
+        return self
+
     def close(self):
-        if self._sdk is not None:
+        if self._sdk is not None and self._sdk is not _WIRE_ONLY:
             try:
                 self._sdk.disconnect()
             except Exception:
@@ -179,8 +224,12 @@ class SiyiClient:
 
     # ------------------------------------------------------------ wire format
 
-    def _command(self, cmd_id, data=b"", seq=1):
+    def _command(self, cmd_id, data=b"", seq=1, timeout_s=None):
         """Send one SIYI frame and return the reply payload, or None.
+
+        `timeout_s` overrides the instance default for one call, because the
+        two callers want opposite things: a pointing command may take its time,
+        and an attitude read is on the node's timer and must not stall it.
 
         Its own short-lived socket rather than the SDK's: the SDK owns a
         receive thread on its socket, and a reply read from under it would be a
@@ -195,10 +244,11 @@ class SiyiClient:
         body = (b"\x55\x66\x01" + struct.pack("<H", len(data))
                 + struct.pack("<H", seq) + bytes([cmd_id]) + data)
         pkt = body + struct.pack("<H", _crc16_xmodem(body))
+        wait = self.timeout_s if timeout_s is None else float(timeout_s)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            sock.settimeout(self.timeout_s)
-            deadline = time.monotonic() + self.timeout_s
+            sock.settimeout(wait)
+            deadline = time.monotonic() + wait
             sock.sendto(pkt, (self.ip, self.port))
             while time.monotonic() < deadline:
                 try:
@@ -227,27 +277,58 @@ class SiyiClient:
         """
         return self.set_angles(0.0, self.nadir_pitch_deg)
 
-    def attitude(self):
-        """-> (yaw, pitch, roll) in degrees, MEASURED, or None.
+    def attitude_and_rates(self):
+        """-> (yaw, pitch, roll, yaw_rate, pitch_rate, roll_rate) or None.
 
-        The node publishes pitch from here rather than the commanded -90 because
-        geo-projection turns a pixel into a lat/lon using this angle: three
-        degrees of error is about a metre on the water at 20 m, and substituting
-        the command would hide exactly the error the projection cannot absorb.
+        Angles in degrees, rates in degrees per second, all MEASURED BY THIS
+        CALL. This is the closest thing to an IMU reading the A8 mini offers:
+        the gimbal reports its stabiliser's fused solution and the rates it is
+        turning at. There is no command for raw accelerometer or gyro samples.
+
+        WHY THIS ASKS THE GIMBAL INSTEAD OF CALLING self._sdk.getAttitude().
+        getAttitude() returns whatever the SDK's receive thread last cached, and
+        the cache carries no arrival time. If the gimbal stops answering --
+        cable knocked off, gimbal reboot, something else holding the SDK port --
+        the cache keeps its final value and getAttitude() hands that same value
+        back forever, indistinguishable from a live reading. That is exactly the
+        frozen-cache failure StreamCache was written to prevent, and this is the
+        worst number on the aircraft to have it happen to: geo-projection turns
+        a pixel into a lat/lon using this angle, so a frozen nadir while the
+        gimbal has actually drooped 30 degrees throws every reported position
+        out by altitude*tan(30) -- about 11 m at 20 m -- with nothing anywhere
+        saying so. A silent gimbal must read as silent.
+
+        One question, one fresh socket, one reply. No reply means None, and the
+        caller's StreamCache decides how many consecutive misses make a dead
+        gimbal rather than a dropped datagram.
+
+        The rates ride in the same 12-byte frame as the angles, so they are free
+        once the frame is being decoded at all. A large pitch rate says the
+        angle recorded next to a frame was moving when that frame was captured
+        -- the gimbal-side counterpart to pose_age_s in the index.
         """
         if self._sdk is None:
             return None
-        try:
-            att = self._sdk.getAttitude()
-        except Exception:
-            return None
-        if att is None:
+        payload = self._command(CMD_GET_ATTITUDE,
+                                timeout_s=ATTITUDE_TIMEOUT_S)
+        if payload is None or len(payload) < ATTITUDE_LEN:
             return None
         try:
-            yaw, pitch, roll = (float(att[0]), float(att[1]), float(att[2]))
-        except (TypeError, ValueError, IndexError):
+            vals = struct.unpack(ATTITUDE_STRUCT, payload[:ATTITUDE_LEN])
+        except struct.error:
             return None
-        return yaw, pitch, roll
+        return tuple(v / 10.0 for v in vals)
+
+    def attitude(self):
+        """-> (yaw, pitch, roll) in degrees, MEASURED, or None.
+
+        The node publishes pitch from here rather than the commanded angle
+        because geo-projection uses it: three degrees of error is about a metre
+        on the water at 20 m, and substituting the command would hide exactly
+        the error the projection cannot absorb.
+        """
+        full = self.attitude_and_rates()
+        return None if full is None else full[:3]
 
     def at_nadir(self, tolerance_deg=NADIR_TOLERANCE_DEG):
         """-> (is_nadir, measured_pitch). measured_pitch is None if unknown.
@@ -271,7 +352,7 @@ class SiyiClient:
         or full card costs the card and keeps the .mkv. Running both is why a
         sortie is unlikely to come back with nothing.
         """
-        if self._sdk is None:
+        if self._sdk is None or self._sdk is _WIRE_ONLY:
             return False
         try:
             self._sdk.requestRecording()
@@ -281,7 +362,7 @@ class SiyiClient:
 
     def stop_recording(self) -> bool:
         """Stop SD recording. Same toggle command as start on this firmware."""
-        if self._sdk is None:
+        if self._sdk is None or self._sdk is _WIRE_ONLY:
             return False
         try:
             self._sdk.requestRecording()
@@ -317,6 +398,9 @@ class NullSiyiClient:
 
     def set_nadir(self) -> bool:
         return False
+
+    def attitude_and_rates(self):
+        return None
 
     def attitude(self):
         return None

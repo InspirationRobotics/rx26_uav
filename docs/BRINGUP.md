@@ -204,6 +204,67 @@ now is cheaper than discovering it at a flight line.
 
 ---
 
+## 7. Camera
+
+Needs §4 (the container exists, with `--runtime nvidia`) and nothing above §4.
+
+Network first — nothing else can work without it. Step [8] of the host install
+configures it; this only confirms:
+
+```bash
+ip -4 route show default
+```
+
+The camera interface must **not** appear in that output. Then:
+
+```bash
+ping -c3 192.168.144.25
+```
+
+Hardware decode is present, and comes from the host rather than the image:
+
+```bash
+docker exec uav_ekko gst-inspect-1.0 nvv4l2decoder
+```
+
+Nothing found means the container is missing `--runtime nvidia`, and
+`docker start` cannot add one — it must be recreated.
+
+The gimbal, without ROS or the SDK:
+
+```bash
+python3 tools/siyi_gimbal.py read
+```
+
+Angles and rates, twice a second. `nadir` reports which pitch sign aims at the
+ground on this unit; the answer goes in `camera_node.gimbal_pitch_deg`. **The
+sign is unit-specific** — SIYI documents `-90` as full-down and this airframe's
+unit aims at the sky when sent that. A camera that films the clouds for a whole
+sortie looks exactly like one that works.
+
+Then with the node running:
+
+```bash
+ros2 service call /uav/camera/set_nadir std_srvs/srv/Trigger
+```
+
+`success` means the gimbal acknowledged, not that it has arrived. Where it
+actually ended up is `gimbal_pitch` on `/uav/camera/status`.
+
+### The staleness check — do not skip this
+
+With the node running and the gimbal reporting, **pull the camera Ethernet.**
+
+Within `gimbal_timeout_s` (3 s) `gimbal_ok` must go false, `gimbal_pitch` must go
+NaN, and exactly one error line must appear. Plug it back in; both recover.
+
+This is the check that a healthy-looking system cannot pass by accident. The
+angle feeds geo-projection, so a frozen one moves every reported lat/lon by
+`altitude x tan(error)` — about 11 m at 20 m for a 30° droop — while the status
+topic still says the gimbal is fine. Silence has to read as silence.
+
+---
+
 ## Still not proven by any of the above
 
 - Anything at all in the air.
@@ -211,3 +272,4 @@ now is cheaper than discovering it at a flight line.
   authority.
 - `geoid_separation_m` against the real venue.
 - The competition geofence — what ships is a placeholder at the right venue.
+- The camera over water, at altitude, against the real beacons.

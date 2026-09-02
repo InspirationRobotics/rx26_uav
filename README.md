@@ -54,6 +54,20 @@ not like two vehicles.
 **The boat lives on 1455x, the aircraft on 1454x.**
 `tools/scripts/check_config.py` fails if `mav_endpoint` drifts back.
 
+### The camera is on its own subnet, and it must stay a dead end
+
+The A8 mini is fixed at `192.168.144.25` in its own firmware, so the Jetson comes
+to it: **`192.168.144.20/24`, no gateway**, configured by step [8] of
+`setup/install_jetson_host.sh`.
+
+**That interface must never carry the default route.** The camera is a dumb peer
+with no route off its subnet, so if it wins the default route, the OCS link to
+`192.168.8.107:37564` and MAVProxy's broadcast to `192.168.8.255` leave by an
+interface that silently drops them. The symptom is "the OCS stopped seeing us",
+which points nowhere near the cause. The profile therefore sets no gateway and
+sets `ipv4.never-default yes`, so NetworkManager cannot add one later even if
+something offers it.
+
 ## The stack
 
 | Node | Package | Role |

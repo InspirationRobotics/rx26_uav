@@ -68,7 +68,29 @@ float64 disk_free_mb
 # projection cannot tolerate.
 #
 # NaN when the gimbal has not answered. Do not substitute the commanded angle.
+#
+# "Has not answered" is a real measurement, not an inference. The node asks the
+# gimbal for this on every status tick over its own socket and holds the reply
+# in a StreamCache, so silence becomes NaN once gimbal_timeout_s has elapsed.
+# It does NOT come from the SIYI SDK's cached copy, which has no arrival time
+# and hands back its last value forever after the gimbal stops talking.
 float64 gimbal_pitch
+
+# Gimbal pitch RATE in degrees/second, measured by the gimbal's own stabiliser
+# and arriving in the same frame as the angle above. NaN under the same
+# conditions as gimbal_pitch.
+#
+# This is the gimbal-side counterpart to pose_age_s in the frame index: a large
+# magnitude here says the angle recorded next to a frame was in motion when
+# that frame was captured, so the geo-projection for it is worth less than the
+# projection for a frame taken while the gimbal was settled. At rest on a
+# stabilised mount this should sit near zero; a persistent non-zero rate with
+# the aircraft still means the gimbal is hunting.
+#
+# This is as close to an IMU reading as the A8 mini exposes. The camera reports
+# its stabiliser's fused attitude and rates; there is no command in the SIYI
+# protocol for raw accelerometer or gyro samples.
+float64 gimbal_pitch_rate
 
 # False when the gimbal link is not answering. gimbal_pitch is NaN whenever this
 # is false, but the flag is carried explicitly so a consumer cannot read a NaN

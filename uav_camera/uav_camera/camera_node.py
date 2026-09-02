@@ -41,13 +41,23 @@ nadir view, and it stopped being right as soon as another node on this Jetson
 needed to change the angle without a human running a script.
 
 So there is now a subscription to /uav/camera/gimbal_cmd -- and it EXISTS ONLY
-IF gimbal_control_enabled IS TRUE, which the flight config leaves false. The
-distinction that makes this defensible is between an endpoint reachable from a
-browser (still absent) and a DDS topic on the vehicle's own graph (present when
-asked for). Be clear-eyed about the residual: DDS is not local-only, so on a
-vehicle whose ROS graph rides the field WiFi, anything on that network can
-publish to it. Ship it false; turn it on for bench work and for a mission node
-that genuinely needs to re-aim.
+IF gimbal_control_enabled IS TRUE. The distinction that makes this defensible is
+between an endpoint reachable from a browser (still absent) and a DDS topic on
+the vehicle's own graph (present when asked for). Be clear-eyed about the
+residual: DDS is not local-only, so on a vehicle whose ROS graph rides the field
+WiFi, anything on that network can publish to it.
+
+IT IS TRUE ON THIS AIRFRAME. Fitz is the development platform and the camera is
+re-aimed by hand often enough that the surface earns its keep. Turning it off is
+one parameter, and losing it costs less than it sounds: nadir is still commanded
+at startup, and /uav/camera/set_nadir still works either way.
+
+THE SERVICE IS NOT GATED, AND THAT IS NOT AN OVERSIGHT. /uav/camera/set_nadir
+takes no angle. It can only send gimbal_pitch_deg from the params file -- the
+same angle __init__ already commands unasked -- so it grants no authority the
+node was not already exercising, and it cannot point the camera anywhere wrong.
+Gating it would mean the one recovery action that is safe by construction is
+also the one you cannot reach after the gimbal has lost nadir.
 """
 import math
 import os
@@ -58,6 +68,7 @@ from datetime import datetime, timezone
 
 from geometry_msgs.msg import Vector3
 from rclpy.node import Node
+from std_srvs.srv import Trigger
 
 from uav_msgs.msg import Attitude, CameraStatus, GlobalPos
 
@@ -107,9 +118,11 @@ PARAM_SPEC = {
     "gimbal_control_enabled": dict(read_only=True,
                                    description="subscribe to "
                                                "/uav/camera/gimbal_cmd at all. "
-                                               "FALSE in the flight config: no "
-                                               "subscriber means no way to "
-                                               "re-aim in flight"),
+                                               "TRUE on the development "
+                                               "airframe; false shuts off "
+                                               "arbitrary-angle commands and "
+                                               "leaves only startup nadir and "
+                                               "the set_nadir service"),
     "record_dir": dict(read_only=True,
                        description="where .mkv and _frames.csv are written"),
     "record_on_start": dict(read_only=True,
@@ -133,6 +146,12 @@ PARAM_SPEC = {
     "attitude_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
                                description="attitude goes stale independently "
                                            "of pose; separate MAVLink streams"),
+    "gimbal_timeout_s": dict(read_only=True, lo=0.5, hi=30.0,
+                             description="s without an answer from the gimbal "
+                                         "before gimbal_ok goes false and "
+                                         "gimbal_pitch goes NaN. Spans several "
+                                         "status ticks so one lost datagram is "
+                                         "not a dead gimbal"),
     "status_rate_hz": dict(read_only=True, lo=0.2, hi=10.0,
                            description="/uav/camera/status rate. A heartbeat "
                                        "about the pipeline, not per frame"),
@@ -189,6 +208,7 @@ class CameraNode(Node):
         self._last_fps_t = None
         self._fps = float("nan")
         self._gimbal_pitch = float("nan")
+        self._gimbal_pitch_rate = float("nan")
         self._gimbal_ok = False
 
         self.guard = recorder_core.DiskGuard(float(p["min_free_mb"]))
@@ -198,6 +218,13 @@ class CameraNode(Node):
         self.pose_cache = StreamCache(float(p["pose_timeout_s"]))
         self.att_cache = StreamCache(float(p["attitude_timeout_s"]))
         self.frame_cache = StreamCache(float(p["frame_timeout_s"]))
+        # The gimbal gets the same treatment as every other stream, and for the
+        # same reason. It is polled rather than subscribed -- siyi_client asks
+        # the gimbal on each tick -- but the question a cache answers is
+        # identical either way: is what I am holding still true? Without this
+        # the node reported gimbal_ok on the mere fact that a call returned,
+        # which was true even when the answer was minutes old.
+        self.gimbal_cache = StreamCache(float(p["gimbal_timeout_s"]))
         self.create_subscription(GlobalPos, "/uav/pose", self._on_pose, 10)
         self.create_subscription(Attitude, "/uav/attitude", self._on_att, 10)
 
@@ -255,6 +282,24 @@ class CameraNode(Node):
                 "gimbal_control_enabled: /uav/camera/gimbal_cmd is live. "
                 "Anything on this ROS graph can re-aim the camera.")
 
+        # ---- re-command nadir. ALWAYS available, unlike the topic above.
+        #
+        # The difference is the whole reason this is a separate entry point:
+        # the topic accepts ANY angle, so it is a way to point the camera
+        # somewhere wrong and is gated accordingly. This service accepts NO
+        # angle. It can only ever send gimbal_pitch_deg from the params file --
+        # the same angle __init__ already commands at startup, unasked. It
+        # therefore grants no authority the node was not already exercising,
+        # and gating it would only mean that the one recovery action that
+        # cannot aim the camera wrongly is the one you cannot reach.
+        #
+        # What it buys: getting nadir BACK after the gimbal has lost it -- a
+        # power blip on the camera, a knock while handling the aircraft, a
+        # re-centre from UniGCS -- without restarting the node, which would end
+        # the recording session to fix a pointing problem.
+        self.create_service(Trigger, "/uav/camera/set_nadir",
+                            self._on_set_nadir)
+
         # ---- pipeline last: everything it calls back into must already exist.
         self.pipe = Pipeline(
             str(p["rtsp_url"]),
@@ -283,6 +328,42 @@ class CameraNode(Node):
                            time.monotonic(), msg.header.stamp)
 
     # ----------------------------------------------------------- gimbal in
+
+    def _on_set_nadir(self, request, response):
+        """Re-command the configured nadir angle. std_srvs/Trigger.
+
+        success is whether the gimbal ACKNOWLEDGED the command -- NOT whether
+        it has arrived. It has not: the A8 mini takes a few seconds to travel
+        its sweep, and this returns straight away rather than blocking the
+        executor while it does. Where it actually ended up is gimbal_pitch on
+        /uav/camera/status, which is MEASURED, and is the only angle
+        geo-projection may use. A service response echoing the commanded angle
+        would be a worse answer wearing a more official hat.
+
+        The last measured angle is reported anyway, because the useful question
+        when you call this is usually "how far off was it", and that is the
+        number that answers it.
+        """
+        target = self.siyi.nadir_pitch_deg
+        ok = self.siyi.set_nadir()
+        where = ("unknown -- the gimbal is not answering"
+                 if math.isnan(self._gimbal_pitch)
+                 else "%+.1f" % self._gimbal_pitch)
+        if ok:
+            response.message = (
+                "commanded nadir (pitch %+.1f). Last measured pitch was %s; "
+                "the gimbal takes a few seconds to travel. Watch gimbal_pitch "
+                "on /uav/camera/status for where it settles."
+                % (target, where))
+            self.get_logger().info(response.message)
+        else:
+            response.message = (
+                "gimbal did not accept the nadir command (pitch %+.1f); it is "
+                "still wherever it was. Last measured pitch was %s."
+                % (target, where))
+            self.get_logger().error(response.message)
+        response.success = bool(ok)
+        return response
 
     def _on_gimbal_cmd(self, msg):
         """Point the gimbal. x = yaw, y = pitch, degrees. z ignored.
@@ -445,13 +526,30 @@ class CameraNode(Node):
             self._end_session()
             self._start_session()
 
-        att = self.siyi.attitude()
-        if att is None:
+        # Ask the gimbal, then read the answer back OUT OF THE CACHE rather
+        # than using it directly. The extra hop is what separates a lost
+        # datagram from a dead gimbal: a single miss leaves the last good angle
+        # standing until gimbal_timeout_s has run out, and a gimbal that has
+        # actually stopped answering goes NaN and says so exactly once.
+        g = self.siyi.attitude_and_rates()
+        if g is not None:
+            self.gimbal_cache.set(g, now)
+        if self.gimbal_cache.went_stale(now):
+            self.get_logger().error(
+                "gimbal has not answered for %.1fs. gimbal_pitch is NaN and the "
+                "frame index will write blanks for it from here -- those frames "
+                "cannot be geo-projected. Video and recording are unaffected; "
+                "the camera is still pointing wherever it last was."
+                % self.gimbal_cache.timeout_s)
+        g = self.gimbal_cache.get(now)
+        if g is None:
             self._gimbal_ok = False
             self._gimbal_pitch = float("nan")
+            self._gimbal_pitch_rate = float("nan")
         else:
             self._gimbal_ok = True
-            self._gimbal_pitch = att[1]
+            self._gimbal_pitch = g[1]
+            self._gimbal_pitch_rate = g[4]
 
         msg = CameraStatus()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -465,6 +563,7 @@ class CameraNode(Node):
         msg.frame_index = int(frame_idx)
         msg.disk_free_mb = float(free_mb)
         msg.gimbal_pitch = float(self._gimbal_pitch)
+        msg.gimbal_pitch_rate = float(self._gimbal_pitch_rate)
         msg.gimbal_ok = bool(self._gimbal_ok)
         self.status_pub.publish(msg)
 
@@ -487,6 +586,8 @@ class CameraNode(Node):
             "recording_sd": self._recording_sd,
             "gimbal_pitch": (None if math.isnan(self._gimbal_pitch)
                              else round(self._gimbal_pitch, 1)),
+            "gimbal_pitch_rate": (None if math.isnan(self._gimbal_pitch_rate)
+                                  else round(self._gimbal_pitch_rate, 1)),
             "gimbal_ok": self._gimbal_ok,
             "disk_free_mb": round(self._free_mb()),
         }

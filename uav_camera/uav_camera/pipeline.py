@@ -4,10 +4,10 @@ WHY THE GRAPH SPLITS WHERE IT DOES. Three consumers want the same stream and
 they want it in three different forms:
 
     rtspsrc ! rtph264depay ! h264parse ! tee name=enc
-      enc. ! queue ! matroskamux ! filesink        <- the recording
-      enc. ! queue ! avdec_h264 ! videoconvert ! tee name=dec
-           dec. ! queue ! appsink                  <- frames for processing
-           dec. ! queue ! videorate ! jpegenc      <- the operator's view
+      enc. ! queue ! matroskamux ! filesink              <- the recording
+      enc. ! queue ! nvv4l2decoder ! nvvidconv ! tee name=dec
+           dec. ! queue ! appsink                        <- frames to process
+           dec. ! queue ! videorate ! jpegenc            <- the operator's view
 
 The split is AFTER h264parse and BEFORE the decoder on purpose. The file gets
 the camera's own encoded bytes -- full quality, and near zero CPU, because
@@ -90,16 +90,36 @@ class Pipeline:
         parts = [
             "rtspsrc location=%s latency=%d protocols=tcp name=src"
             % (self.rtsp_url, self.latency_ms),
-            "! rtph264depay ! h264parse config-interval=-1 ! tee name=enc",
+            # The caps after h264parse are pinned rather than left to
+            # negotiation because nvv4l2decoder's sink pad accepts H.264 ONLY
+            # as byte-stream/au. Left implicit it usually works and then
+            # doesn't, and the failure surfaces as "could not link" naming an
+            # element two hops away. matroskamux on the record branch takes
+            # byte-stream quite happily, so constraining both costs nothing.
+            "! rtph264depay ! h264parse config-interval=-1 "
+            "! video/x-h264,stream-format=byte-stream,alignment=au "
+            "! tee name=enc",
         ]
         if record_path:
             parts.append(
                 "enc. ! queue max-size-buffers=200 leaky=no "
                 "! matroskamux ! filesink location=%s sync=false" % record_path)
         if self.want_frames:
+            # HARDWARE decode. nvv4l2decoder is not in any GStreamer package
+            # in the image -- it arrives from the L4T host through
+            # `--runtime nvidia` (see the Dockerfile header). Confirm with:
+            #     docker exec uav_ekko gst-inspect-1.0 nvv4l2decoder
+            # If that finds nothing the container is missing the runtime flag,
+            # and `docker start` cannot add one: it must be recreated.
+            #
+            # nvvidconv IS NOT OPTIONAL. nvv4l2decoder emits
+            # video/x-raw(memory:NVMM) -- buffers in GPU memory. appsink and
+            # jpegenc cannot map those. nvvidconv is what brings them back to
+            # system memory, and without it the graph links cleanly and then
+            # hands downstream buffers it cannot read.
             parts.append(
                 "enc. ! queue max-size-buffers=8 leaky=downstream "
-                "! avdec_h264 ! videoconvert ! video/x-raw,format=BGRx "
+                "! nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx "
                 "! tee name=dec")
             parts.append(
                 "dec. ! queue max-size-buffers=%d leaky=downstream "
