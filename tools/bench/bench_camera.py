@@ -201,6 +201,32 @@ def case_pipeline_record_only():
     return check("record-only omits decode", ok)
 
 
+def case_pipeline_branch_caps():
+    """The record branch must NOT be forced to byte-stream H.264.
+
+    This is a regression test with a scar. matroskamux accepts avc only and
+    nvv4l2decoder accepts byte-stream only, so a caps filter placed before the
+    tee -- where it looks harmless, and where it satisfies the decoder you were
+    thinking about -- silently breaks the other branch. On hardware it surfaced
+    as "could not link queue0 to matroskamux0": an error naming the record
+    branch for a decision made two elements upstream, in a graph that had been
+    working the day before.
+
+    So: the segment up to the tee carries no stream-format at all, and the
+    byte-stream conversion happens inside the decode branch.
+    """
+    d = Pipeline(RTSP, want_frames=True).describe("/tmp/a.mkv")
+    head, _, rest = d.partition("tee name=enc")
+    record = [ln for ln in rest.split("enc.") if "matroskamux" in ln]
+    decode = [ln for ln in rest.split("enc.") if DECODER in ln]
+    ok = ("stream-format" not in head              # tee unconstrained
+          and record and "byte-stream" not in record[0]
+          and decode and "stream-format=byte-stream" in decode[0]
+          and decode[0].count("h264parse") == 1)   # the branch-local convert
+    return check("caps converted per branch", bool(ok),
+                 "head=%s" % ("clean" if "stream-format" not in head else "PINNED"))
+
+
 def case_pipeline_no_sink():
     """Nothing consuming the tee is a config mistake, not a silent no-op."""
     try:
@@ -254,6 +280,7 @@ def main():
         case_rotate(),
         case_pipeline_full(),
         case_pipeline_record_only(),
+        case_pipeline_branch_caps(),
         case_pipeline_no_sink(),
         case_pipeline_bad_url(),
         case_pipeline_leaky(),

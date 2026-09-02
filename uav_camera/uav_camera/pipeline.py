@@ -3,11 +3,17 @@
 WHY THE GRAPH SPLITS WHERE IT DOES. Three consumers want the same stream and
 they want it in three different forms:
 
-    rtspsrc ! rtph264depay ! h264parse ! tee name=enc
-      enc. ! queue ! matroskamux ! filesink              <- the recording
-      enc. ! queue ! nvv4l2decoder ! nvvidconv ! tee name=dec
-           dec. ! queue ! appsink                        <- frames to process
-           dec. ! queue ! videorate ! jpegenc            <- the operator's view
+    rtspsrc ! rtph264depay ! h264parse ! tee name=enc        (avc)
+      enc. ! queue ! matroskamux ! filesink                  <- the recording
+      enc. ! queue ! h264parse ! byte-stream                 <- convert, see below
+           ! nvv4l2decoder ! nvvidconv ! tee name=dec
+           dec. ! queue ! appsink                            <- frames to process
+           dec. ! queue ! videorate ! jpegenc                <- the operator's view
+
+The second h264parse is not redundant. matroskamux accepts H.264 as avc only and
+nvv4l2decoder accepts it as byte-stream only, so the two branches cannot share
+one format and the tee cannot hand out two. The tee therefore carries avc and
+the decode branch converts for itself.
 
 The split is AFTER h264parse and BEFORE the decoder on purpose. The file gets
 the camera's own encoded bytes -- full quality, and near zero CPU, because
@@ -90,15 +96,24 @@ class Pipeline:
         parts = [
             "rtspsrc location=%s latency=%d protocols=tcp name=src"
             % (self.rtsp_url, self.latency_ms),
-            # The caps after h264parse are pinned rather than left to
-            # negotiation because nvv4l2decoder's sink pad accepts H.264 ONLY
-            # as byte-stream/au. Left implicit it usually works and then
-            # doesn't, and the failure surfaces as "could not link" naming an
-            # element two hops away. matroskamux on the record branch takes
-            # byte-stream quite happily, so constraining both costs nothing.
-            "! rtph264depay ! h264parse config-interval=-1 "
-            "! video/x-h264,stream-format=byte-stream,alignment=au "
-            "! tee name=enc",
+            # NO CAPS FILTER HERE, and that is load-bearing. The two branches
+            # want DIFFERENT H.264 stream-formats and a tee can only hand out
+            # one:
+            #
+            #   matroskamux    accepts avc ONLY
+            #   nvv4l2decoder  accepts byte-stream ONLY
+            #
+            # Pinning either format at the tee breaks the other branch, which
+            # is how this was first got wrong: byte-stream here produced
+            # "could not link queue0 to matroskamux0" -- an error naming the
+            # record branch for a caps decision made two elements upstream.
+            #
+            # So the tee carries whatever the record branch needs (avc, since
+            # matroskamux is the only inflexible consumer of it) and the decode
+            # branch converts for itself with a second h264parse. Software
+            # decoders took either format, which is why this conflict did not
+            # exist before the switch to hardware decode.
+            "! rtph264depay ! h264parse config-interval=-1 ! tee name=enc",
         ]
         if record_path:
             parts.append(
@@ -117,8 +132,17 @@ class Pipeline:
             # jpegenc cannot map those. nvvidconv is what brings them back to
             # system memory, and without it the graph links cleanly and then
             # hands downstream buffers it cannot read.
+            #
+            # The SECOND h264parse is the branch-local conversion to
+            # byte-stream (see the tee comment above). config-interval=-1 makes
+            # it repeat SPS/PPS inline, which is what lets the decoder start on
+            # any frame rather than waiting for the next parameter set -- it
+            # matters here because this branch can be torn down and rebuilt on
+            # a reconnect while the recording branch keeps running.
             parts.append(
                 "enc. ! queue max-size-buffers=8 leaky=downstream "
+                "! h264parse config-interval=-1 "
+                "! video/x-h264,stream-format=byte-stream,alignment=au "
                 "! nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx "
                 "! tee name=dec")
             parts.append(
