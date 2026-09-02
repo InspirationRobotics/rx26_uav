@@ -257,3 +257,90 @@ ground_station:
       - 103.85520
       - 1.28010
       - 103.85520
+
+camera_node:
+  ros__parameters:
+    rtsp_url: "rtsp://192.168.144.25:8554/main.264"
+                                           # [RO] the camera's MAIN stream.
+                                           #      NOT the SIYI proprietary UDP
+                                           #      protocol that UniGCS uses on
+                                           #      the same port — GStreamer does
+                                           #      not speak that one.
+                                           #      A8 mini uses the OLD address
+                                           #      scheme (main.264 / sub.264);
+                                           #      ZT30 and later use video1 /
+                                           #      video2. Manual v1.10 p63.
+    rtsp_latency_ms: 0                     # [RO] rtspsrc jitter buffer. 0 on a
+                                           #      wired link; raise only if the
+                                           #      stream tears.
+    want_frames: true                      # [RO] build the decode branch. false
+                                           #      = record-only sortie at almost
+                                           #      no CPU, for data collection.
+    preview_fps: 5                         # [RO] operator view rate. NOT the
+                                           #      record rate — the file gets
+                                           #      every frame regardless.
+    mjpeg_port: 8091                       # [RO] viewer port. MUST differ from
+                                           #      ground_station.port (8090) and
+                                           #      ocs_client.ocs_port (37564);
+                                           #      check_config.py enforces it.
+                                           #      Clear of the aircraft's 1454x
+                                           #      range.
+    bind_host: "0.0.0.0"                   # [RO] must NOT be 127.0.0.1 or the
+                                           #      laptop cannot reach the viewer
+    siyi_enabled: true                     # [RO] false = stream and record with
+                                           #      no gimbal control and no SD
+                                           #      recording. For a bench with no
+                                           #      siyi_sdk installed.
+    siyi_ip: "192.168.144.25"              # [RO] gimbal SDK address; same device
+                                           #      as the RTSP stream, different
+                                           #      protocol and port.
+    siyi_port: 37260                       # [RO] gimbal SDK UDP port
+    record_dir: "/root/robotx_ws/logs/video"
+                                           # [RO] rides the workspace bind mount
+                                           #      on purpose: a path inside the
+                                           #      container's own filesystem
+                                           #      vanishes with the container,
+                                           #      taking the sortie with it.
+    record_on_start: true                  # [RO] begin a session as soon as
+                                           #      frames flow. There is no
+                                           #      operator action on this
+                                           #      aircraft to press record with,
+                                           #      and an unrecorded flight is a
+                                           #      flight flown twice.
+    record_sd: true                        # [RO] also drive the camera's own SD
+                                           #      recording, which is 4K where
+                                           #      the stream caps at 1080p. The
+                                           #      two record paths fail
+                                           #      independently; that is why
+                                           #      both exist.
+    min_free_mb: 1024.0                    # [RO] stop recording above this
+                                           #      floor. Not zero: the muxer
+                                           #      still has to write the
+                                           #      matroska index, and a file
+                                           #      whose index never landed may
+                                           #      not open at all.
+    max_session_s: 600.0                   # [RO] roll to a new session every
+                                           #      10 min; 0 disables. Bounds
+                                           #      what a crash costs to one
+                                           #      segment rather than the
+                                           #      sortie.
+    frame_timeout_s: 2.0                   # [RO] s without a frame before the
+                                           #      stream is reported down. Well
+                                           #      above one frame interval so a
+                                           #      hiccup is not a dropout.
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s (pinned
+                                           #      by check_config.py). Older than
+                                           #      this and the frame index writes
+                                           #      BLANKS rather than a stale
+                                           #      position — a blank is a fact, a
+                                           #      back-filled coordinate is a
+                                           #      guess that looks like a
+                                           #      measurement.
+    attitude_timeout_s: 1.0                # [RO] attitude goes stale
+                                           #      independently of pose; they
+                                           #      arrive on separate MAVLink
+                                           #      streams with separate rate
+                                           #      groups.
+    status_rate_hz: 2.0                    # [RO] /uav/camera/status rate. A
+                                           #      heartbeat about the pipeline,
+                                           #      not a per-frame record.

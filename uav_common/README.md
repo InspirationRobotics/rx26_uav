@@ -46,4 +46,4 @@ the two spellings.
 | `fence_core.py` | `tools/bench/bench_fence.py` — 7 cases including every readback failure |
 | `geo.py` | `tools/bench/bench_heartbeat.py` and the Map tab's inside/outside readout |
 | `config.py` | run a node from the **install space**, not the source tree; that is where the path bug lives |
-| `stream_cache.py` | pull the MAVLink stream and confirm republishing **stops** and logs once |
+| `stream_cache.py` | pull the MAVLink stream and confirm republishing **stops** and logs once; also `tools/bench/bench_camera.py`, whose frame index writes blanks off the same freshness rule |

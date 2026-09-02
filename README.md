@@ -29,6 +29,7 @@ autopilot, one that faces the operator, and a data-only package on top.
 | [`uav_common`](uav_common/) | Params loader, node lifecycle, stream cache, drop latch, geodesy, the geofence protocol. No nodes | library |
 | [`uav_fcu`](uav_fcu/) | `telemetry_bridge` — the only thing that speaks MAVLink. Also uploads the geofence | **untested in flight** |
 | [`uav_groundstation`](uav_groundstation/) | `ground_station` (one web page on `:8090`) and `ocs_client` (the OCS heartbeat) | **untested in flight** |
+| [`uav_camera`](uav_camera/) | `camera_node` — the SIYI A8 mini gateway: RTSP in, MJPEG out on `:8091`, records to the Jetson and the camera's SD card, holds the gimbal at nadir | **untested in flight** |
 | [`uav_bringup`](uav_bringup/) | Launch file + the params YAML. Ships no code; build entry point | — |
 
 **A new package must be added to `uav_bringup/package.xml`'s exec_depends** or it
@@ -46,6 +47,8 @@ not like two vehicles.
 | MAVProxy → ROS bridge (loopback) | 14551 | **14541** |
 | MAVProxy → GCS (loopback + subnet broadcast) | 14550 | **14540** |
 | Ground station HTTP | 8090 | 8090 (different machine) |
+| Camera MJPEG viewer | — | **8091** |
+| Camera (SIYI SDK, UDP) | — | **37260** on `192.168.144.25` |
 | OCS vehicle link | 37564 | 37564 (outbound to `192.168.8.107`) |
 
 **The boat lives on 1455x, the aircraft on 1454x.**
@@ -257,7 +260,7 @@ python3 tools/scripts/check_config.py
 ```
 
 ```bash
-python3 tools/bench/bench_fence.py && python3 tools/bench/bench_heartbeat.py && python3 tools/bench/bench_gcs.py
+python3 tools/bench/bench_fence.py && python3 tools/bench/bench_heartbeat.py && \npython3 tools/bench/bench_gcs.py && python3 tools/bench/bench_camera.py && \npython3 tools/bench/bench_mjpeg.py
 ```
 
 `7/7`, `24/24`, `15/15`, `OK`. If those pass, the logic is sound and the problem

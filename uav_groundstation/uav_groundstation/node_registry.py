@@ -38,6 +38,8 @@ GROUPS = (
      "The MAVLink gateway. Protected: startable here, not stoppable."),
     ("comms", "Comms",
      "The link to the Operator Control Station."),
+    ("perception", "Perception",
+     "The gimbal camera. Serves its own video port; see the Camera tab."),
 )
 
 
@@ -76,6 +78,22 @@ REGISTRY = (
     NodeSpec("ocs_client", "ocs_client", "uav_groundstation",
              "ocs_client", "comms",
              note="2 Hz heartbeat to the OCS at 192.168.8.107:37564"),
+    # port/stream_path are what the Camera tab points its <img> at — the video
+    # is served by THIS node on its own socket, not proxied through :8090.
+    # Proxying would put megabytes of MJPEG through the ground station's
+    # single-threaded snapshot path and make a stalled camera look like a
+    # stalled ground station.
+    #
+    # exclusive="camera" is set now, while nothing else wants the A8 mini,
+    # because the moment something does — a recorder, a detector that opens its
+    # own RTSP session — the failure is a second GStreamer client fighting for
+    # the stream, and that reads as a flaky camera rather than a design mistake.
+    NodeSpec("camera_node", "camera_node", "uav_camera",
+             "camera_node", "perception", exclusive="camera",
+             port=8091, stream_path="/stream.mjpg",
+             note="owns the A8 mini: RTSP in, MJPEG out on :8091, records to "
+                  "the Jetson and the camera's SD card, holds the gimbal at "
+                  "nadir"),
 )
 
 BY_NAME = {n.name: n for n in REGISTRY}
@@ -83,7 +101,12 @@ BY_NAME = {n.name: n for n in REGISTRY}
 # One-click profiles. A profile is a claim about what a session needs, and
 # naming them here rather than in the page keeps that claim reviewable.
 PROFILES = {
-    "flight": ("Flight profile", ("telemetry_bridge", "ocs_client")),
+    # camera_node is in the flight profile because an unrecorded sortie is a
+    # sortie flown twice, and the recordings are the training data the
+    # perception work depends on. It is not in the bench profile: that one runs
+    # without a Pixhawk, and usually without a camera too.
+    "flight": ("Flight profile",
+               ("telemetry_bridge", "ocs_client", "camera_node")),
     "bench": ("Bench profile", ("telemetry_bridge",)),
 }
 

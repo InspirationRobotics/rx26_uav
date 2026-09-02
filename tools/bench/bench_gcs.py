@@ -78,9 +78,9 @@ def main():
     print("\npage")
     r.append(check("poll period substituted", b"__POLL_MS__" not in page,
                    "template placeholder left in" if b"__POLL_MS__" in page else ""))
-    r.append(check("has all five tabs",
+    r.append(check("has all six tabs",
                    all(t in page for t in (b"'nodes'", b"'tel'", b"'map'",
-                                           b"'logs'", b"'sys'"))))
+                                           b"'cam'", b"'logs'", b"'sys'"))))
     r.append(check("self-contained (no external fetch)",
                    b"http://" not in page.replace(b"http://<JETSON_IP>", b"")
                    and b"cdn" not in page.lower()))

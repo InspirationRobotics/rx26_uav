@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uav_camera</name>
+  <version>0.1.0</version>
+  <description>
+    The gimbal camera gateway. camera_node is the single owner of the SIYI A8
+    mini: it holds the one RTSP connection, the one SIYI SDK socket, and the one
+    recording writer. Nothing else in the workspace may open either.
+
+    It carries NO detection, deliberately. Perception belongs in a package that
+    SUBSCRIBES to this one, so that nothing contends for the camera and a
+    detector that crashes or runs the Jetson out of memory cannot stop the
+    recording — which is the artifact a flight exists to produce.
+
+    It also carries no gimbal AIMING beyond pointing straight down at startup.
+    The missions need a fixed nadir view and a lat/lon per detection; they never
+    need the camera to track a target, and a pointing loop is a control path
+    that would have to be justified against README safety constraint 6.
+  </description>
+  <maintainer email="chase001cz@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_uav</url>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>uav_msgs</depend>
+  <depend>uav_common</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

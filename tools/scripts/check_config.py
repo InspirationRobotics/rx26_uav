@@ -84,6 +84,13 @@ PINNED = [
         ("telemetry_bridge", "stream_timeout_s"),
         ("ocs_client", "pose_timeout_s"),
         ("ground_station", "pose_timeout_s"),
+        # camera_node uses it to decide when a frame's pose is too old to
+        # write into the frame index. A camera that trusted a pose for longer
+        # than the bridge vouches for it would stamp coordinates onto frames
+        # the bridge had already stopped standing behind — and unlike a stale
+        # readout, that one is written to disk and read back months later as
+        # if it were measured.
+        ("camera_node", "pose_timeout_s"),
     ]),
     (("shared", "geoid_separation_m"), [
         ("ocs_client", "geoid_separation_m"),
@@ -222,12 +229,30 @@ def check_ocs_identity(cfg, toml_path):
 
 def check_ports(cfg):
     """Ports must be distinct locally, and clear of the ASV's on a shared subnet."""
-    http = get(cfg, "ground_station", "port")
-    ocs = get(cfg, "ocs_client", "ocs_port")
-    if http is not None and ocs is not None and http == ocs:
-        fail("ground_station.port and ocs_client.ocs_port are both %s — two "
-             "servers cannot bind one socket and the loser dies with an "
-             "address-in-use that reads like a crash." % http)
+    # Every port this vehicle binds or dials, checked pairwise. Listed rather
+    # than compared ad hoc so adding a service means adding one line here, and
+    # the failure names both halves instead of leaving someone to find the
+    # other one.
+    ports = [
+        ("ground_station.port", get(cfg, "ground_station", "port")),
+        ("ocs_client.ocs_port", get(cfg, "ocs_client", "ocs_port")),
+        ("camera_node.mjpeg_port", get(cfg, "camera_node", "mjpeg_port")),
+        ("camera_node.siyi_port", get(cfg, "camera_node", "siyi_port")),
+    ]
+    seen = {}
+    for name, value in ports:
+        if value is None:
+            continue
+        if value in seen:
+            fail("%s and %s are both %s — two servers cannot bind one socket "
+                 "and the loser dies with an address-in-use that reads like a "
+                 "crash." % (seen[value], name, value))
+        seen[value] = name
+    mjpeg = get(cfg, "camera_node", "mjpeg_port")
+    if mjpeg is not None and 14540 <= mjpeg <= 14549:
+        fail("camera_node.mjpeg_port = %s is inside the aircraft's MAVLink "
+             "range (1454x). MAVProxy binds those; see the port table in the "
+             "README." % mjpeg)
     endpoint = get(cfg, "telemetry_bridge", "mav_endpoint")
     if endpoint and not (endpoint.startswith("udp") or endpoint.startswith("tcp")):
         fail("telemetry_bridge.mav_endpoint = %r is not udp/tcp. MAVProxy is "

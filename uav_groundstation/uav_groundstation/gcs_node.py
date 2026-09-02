@@ -128,6 +128,9 @@ class GroundStation(Node):
 
         self._trail = deque(maxlen=int(p["trail_length"]) or 1)
         self._cpu = system_info.CpuMeter()
+        # {port: (checked_at, is_open)} — see _port_open. Bounded by the number
+        # of NodeSpecs that declare a port, which is one.
+        self._port_probe = {}
         self._hostname = socket.gethostname()
 
         self.procs = ProcessManager(
@@ -267,7 +270,7 @@ class GroundStation(Node):
 
     def _snapshot(self):
         now = time.monotonic()
-        items, _running = self._node_items()
+        items, running = self._node_items()
         groups = [{"key": k, "label": label, "why": why,
                    "nodes": [i for i in items if i["group"] == k]}
                   for k, label, why in reg.GROUPS]
@@ -324,7 +327,57 @@ class GroundStation(Node):
             },
             "sys": self._sys_state(),
             "power": self._power_state(known, armed),
+            "cam": self._cam_state(running),
         }
+
+    def _cam_state(self, running):
+        """What the Camera tab should point at, if anything.
+
+        The running/serving distinction is the whole reason tab_source exists:
+        camera_node appears in /proc within a second of starting and then spends
+        several more negotiating RTSP before its viewer port binds. A tab that
+        trusted "running" alone would point an <img> at a closed port, get
+        connection-refused, and stay on that error until someone reloaded by
+        hand — see tab_source's docstring.
+        """
+        spec = reg.BY_NAME.get("camera_node")
+        if spec is None or not spec.port:
+            return {"source": None, "starting": False}
+        serving = {spec.name} if self._port_open(spec.port) else set()
+        name, starting = reg.tab_source((spec.name,), running, serving)
+        return {
+            "source": name,
+            "starting": starting,
+            "port": spec.port,
+            "path": spec.stream_path,
+        }
+
+    def _port_open(self, port):
+        """Is something accepting on this port, checked at most once a second.
+
+        Rate-limited because the browser polls /state five times a second and a
+        connect attempt per poll would be a self-inflicted port scan on a flight
+        computer. The cached answer being up to a second stale is fine: the tab
+        it feeds takes longer than that to render anyway.
+        """
+        now = time.monotonic()
+        cached = self._port_probe.get(port)
+        if cached is not None and (now - cached[0]) < 1.0:
+            return cached[1]
+        s = socket.socket()
+        # Short: this is a loopback connect to a port that is either bound or
+        # not. Anything slower than this is a machine in trouble, and blocking
+        # the snapshot to find that out helps nobody.
+        s.settimeout(0.15)
+        try:
+            s.connect(("127.0.0.1", int(port)))
+            ok = True
+        except OSError:
+            ok = False
+        finally:
+            s.close()
+        self._port_probe[port] = (now, ok)
+        return ok
 
     def _geoid(self):
         """The geoid separation ocs_client uses, read from the same file.

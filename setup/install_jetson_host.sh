@@ -232,18 +232,18 @@ echo "== [5/7] systemd units =="
 echo "   container:  $UAV_CONTAINER"
 # FULL FILENAMES, because the power pair are .path units, not .service ones.
 UNITS=(uav-mavproxy.service uav-container.service uav-groundstation.service
-       uav-ocs-client.service
+       uav-ocs-client.service uav-camera.service
        uav-shutdown.path uav-shutdown.service
        uav-reboot.path uav-reboot.service)
 # ENABLE IS A DIFFERENT LIST. uav-shutdown.service and uav-reboot.service are
 # TRIGGERED by their .path units and carry no [Install] section on purpose:
 # enabling them directly would power the Jetson off, or reboot it, every single
 # time it finished booting.
-ENABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client
+ENABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client uav-camera
         uav-shutdown.path uav-reboot.path)
 # The long-running ones, for the "start now" hint. `enable` is what arms a .path
 # unit; starting the oneshot it triggers would BE the shutdown.
-STARTABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client)
+STARTABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client uav-camera)
 for unit in "${UNITS[@]}"; do
   sed -e "s|__UAV_USER__|$UAV_USER|g" \
       -e "s|__UAV_REPO__|$UAV_REPO|g" \
@@ -406,6 +406,7 @@ elif docker container inspect "$UAV_CONTAINER" >/dev/null 2>&1; then
     echo "        docker rm -f $UAV_CONTAINER"
     echo "        docker run -d --name $UAV_CONTAINER \\"
     echo "          --restart unless-stopped --network host --privileged \\"
+    echo "          --runtime nvidia \\"
     echo "          -v $WS_HOST:/root/robotx_ws \\"
     echo "          -v /dev:/dev \\"
     echo "          $UAV_IMAGE tail -f /dev/null"
@@ -437,6 +438,7 @@ elif docker image inspect "$UAV_IMAGE" >/dev/null 2>&1; then
   echo "   no container named '$UAV_CONTAINER' — creating it"
   docker run -d --name "$UAV_CONTAINER" \
     --restart unless-stopped --network host --privileged \
+    --runtime nvidia \
     -v "$WS_HOST":/root/robotx_ws \
     -v /dev:/dev \
     "$UAV_IMAGE" tail -f /dev/null >/dev/null
@@ -478,6 +480,34 @@ if ! python3 "$UAV_REPO/tools/scripts/check_config.py" >/dev/null 2>&1; then
   echo "WARN: check_config.py reports problems — the params file can ground the"
   echo "      aircraft, so read them:  python3 tools/scripts/check_config.py"
   problems=1
+fi
+
+# The camera lives on its own subnet (192.168.144.0/24, fixed in the camera's
+# firmware). This is REPORTED, never configured: reconfiguring an interface on a
+# machine someone is very likely SSH'd into is not a thing an installer should
+# do unasked, and getting it wrong locks you out of the aircraft.
+CAM_IP="192.168.144.25"
+if ip -4 route get "$CAM_IP" >/dev/null 2>&1; then
+  cam_if="$(ip -4 route get "$CAM_IP" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
+  echo "   camera subnet: $CAM_IP reachable via ${cam_if:-?}"
+  # A DEFAULT route out of the camera interface is the failure worth catching.
+  # The camera is a dumb peer with no route off its subnet, so if it wins the
+  # default route the OCS link (192.168.8.107:37564) and MAVProxy's broadcast to
+  # 192.168.8.255 leave by an interface that drops them — and the symptom is
+  # "the OCS stopped seeing us", nowhere near the cause.
+  if [[ -n "$cam_if" ]] && ip -4 route show default | grep -q " dev $cam_if"; then
+    echo "WARN: $cam_if carries a DEFAULT ROUTE. The camera interface must not:"
+    echo "      configure it with an address and netmask and NO gateway, or the"
+    echo "      OCS link and the MAVLink broadcast can leave by the wrong one."
+    problems=1
+  fi
+else
+  echo "   camera subnet: no route to $CAM_IP (camera_node will not find it)"
+  echo "      Configure the camera interface with an address and NO gateway:"
+  echo "        sudo nmcli con add type ethernet ifname <IFACE> con-name siyi \\"
+  echo "          ipv4.method manual ipv4.addresses 192.168.144.20/24"
+  echo "        sudo nmcli con up siyi"
+  echo "      Not a failure if the camera is simply not fitted."
 fi
 
 echo

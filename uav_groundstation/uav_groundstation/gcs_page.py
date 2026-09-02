@@ -128,12 +128,19 @@ select,input{font:inherit;background:#232a34;color:var(--fg);
     misses output written straight to stdout, and anything printed before a node
     finished constructing, which is exactly when a bad parameter kills one.</p>
   </section>
+  <section id="s-cam"><div id="cam"></div>
+    <p class="hint">The video is served by <code>camera_node</code> on its own
+    port, not proxied through this one — megabytes of MJPEG through the
+    ground station's snapshot path would make a stalled camera look like a
+    stalled ground station. The tab waits for that port to actually accept a
+    connection before pointing at it, because a process appears in the table
+    seconds before its server binds.</p></section>
   <section id="s-sys"><div class="cards" id="sys"></div><div id="power"></div></section>
 </main>
 <div id="toast"></div>
 <script>
 var POLL=__POLL_MS__, S={}, tab='nodes', logs=[], logSeq=0, dropped=0;
-var TABS=[['nodes','Nodes'],['tel','Telemetry'],['map','Map'],['logs','Logs'],['sys','System']];
+var TABS=[['nodes','Nodes'],['tel','Telemetry'],['map','Map'],['cam','Camera'],['logs','Logs'],['sys','System']];
 function el(i){return document.getElementById(i)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -348,9 +355,41 @@ function renderSys(){
 function power(v){post('/power',{verb:v,confirm:(el('pwconf')||{}).value||''})}
 
 /* ---- poll ---- */
+/* ---- camera ----
+   The <img> src is set ONCE per source change, never on every poll: assigning
+   src restarts the MJPEG connection, so re-setting it at the poll rate would
+   tear the stream down and rebuild it five times a second. camSrc remembers
+   what is already showing so the common case touches nothing. */
+var camSrc=null;
+function renderCam(){
+  var c=S.cam||{},host=location.hostname,box=el('cam');
+  if(!c.source){
+    camSrc=null;
+    box.innerHTML='<p class="hint">camera_node is not running. Start it from '
+      +'the <b>Nodes</b> tab.</p>';
+    return;
+  }
+  if(c.starting){
+    camSrc=null;
+    box.innerHTML='<p class="hint">camera_node is up; waiting for its video '
+      +'port to accept a connection…</p>';
+    return;
+  }
+  /* Protocol-relative on purpose. It inherits the page's own scheme, so the
+     video is never blocked as mixed content if this page is ever served over
+     TLS — and it keeps the page free of an absolute URL, which bench_gcs
+     checks for because a page that can fetch from elsewhere is a page that can
+     fail on a field network with no route off the subnet. */
+  var url='//'+host+':'+c.port+c.path;
+  if(camSrc!==url){
+    camSrc=url;
+    box.innerHTML='<img id="camimg" alt="camera" style="max-width:100%;'
+      +'border:1px solid #333" src="'+esc(url)+'">';
+  }
+}
 function render(){
   if(tab==='nodes')renderNodes(); else if(tab==='tel')renderTel();
-  else if(tab==='sys')renderSys();
+  else if(tab==='sys')renderSys(); else if(tab==='cam')renderCam();
   renderMap();
 }
 function poll(){

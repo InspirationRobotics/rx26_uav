@@ -3,10 +3,29 @@
 #
 #     docker build -t uav .
 #
-# NO DEVICE SDKs, deliberately. There is no camera or LiDAR on this airframe
-# yet, and the ASV's image carries CUDA/TensorRT/depthai only because its
-# perception nodes need them. Adding them "for later" costs a multi-GB image
-# and a longer build on every Jetson that will never open a camera.
+# DEVICE SDKs: GSTREAMER ONLY, AND ONLY BECAUSE A CAMERA ARRIVED.
+#
+# This file used to say "NO DEVICE SDKs, deliberately… the ASV's image carries
+# CUDA/TensorRT/depthai only because its perception nodes need them." The
+# condition in that sentence is now met: a SIYI A8 mini is fitted and uav_camera
+# opens it. So GStreamer and OpenCV are here, and the rule they were an instance
+# of still stands — you add a device SDK when something in this workspace opens
+# that device, not before.
+#
+# WHAT IS STILL NOT HERE: CUDA, TensorRT and any inference runtime. camera_node
+# streams, records and serves video; it does not detect anything. When the
+# perception node lands it will need them and that will be the argument for
+# adding them, in this comment, at that time.
+#
+# HARDWARE DECODE COMES FROM THE HOST, NOT FROM THIS IMAGE. On L4T the NVIDIA
+# container runtime bind-mounts the Tegra userspace — including the
+# nvv4l2decoder and nvvidconv GStreamer plugins — into the container. That is
+# why the run command needs `--runtime nvidia` (setup/install_jetson_host.sh
+# sets it) and why the base image does not need to be an l4t one. Check it
+# landed with:
+#     docker exec uav_ekko gst-inspect-1.0 nvv4l2decoder
+# If that finds nothing, the runtime flag is missing or the container predates
+# it — `docker start` cannot add a runtime, so the container must be recreated.
 #
 # MAVPROXY IS NOT IN HERE. It owns the Pixhawk serial device and runs on the
 # HOST under uav-mavproxy.service; this container consumes its UDP rebroadcast
@@ -28,7 +47,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-colcon-common-extensions \
       procps \
       iproute2 \
+      iputils-ping \
+      python3-gi \
+      gir1.2-gstreamer-1.0 \
+      gir1.2-gst-plugins-base-1.0 \
+      gstreamer1.0-tools \
+      gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad \
+      gstreamer1.0-libav \
+      python3-opencv \
  && rm -rf /var/lib/apt/lists/*
+
+# GStreamer notes, because the package split is not obvious and picking wrong
+# produces "no element rtspsrc" three layers from the cause:
+#   python3-gi + gir1.2-gstreamer-1.0   the Python bindings uav_camera imports
+#   plugins-good                        rtspsrc, rtph265depay, matroskamux
+#   plugins-bad                         h265parse
+#   plugins-base                        videoconvert, videorate, appsink, tee
+#   gstreamer1.0-tools                  gst-inspect-1.0 / gst-launch-1.0, which
+#                                       are how you bisect a pipeline that will
+#                                       not start without editing Python
+# The nvv4l2decoder used for hardware decode is NOT in any of these; it arrives
+# from the host via `--runtime nvidia` (see the header).
+#
+# python3-opencv is the distro build: no CUDA, and that is correct for now.
+# camera_node does not process frames, it hands them on. An inference-capable
+# build belongs with the perception node that needs it.
 
 # procps is not optional here: scripts/run_in_container.sh uses pkill/pgrep to
 # sweep orphaned nodes, and without them `systemctl restart` leaves a second

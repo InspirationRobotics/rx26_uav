@@ -1,0 +1,82 @@
+# /etc/systemd/system/uav-camera.service  (Jetson host)
+#
+# TEMPLATE: __UAV_USER__ / __UAV_REPO__ / __UAV_CONTAINER__ are substituted by
+# setup/install_jetson_host.sh at install time.
+#
+# Runs camera_node — the SIYI A8 mini gateway — inside the container. It holds
+# the one RTSP connection, serves the operator's video on :8091, records to the
+# Jetson and to the camera's own SD card, and holds the gimbal at nadir.
+#
+# NOT PROVEN IN FLIGHT.
+#     systemctl disable uav-camera            # is the way back
+#
+# WHY THIS IS A UNIT AND NOT A LINE IN core.launch.py. That launch file starts
+# only telemetry_bridge, because a launch is one process tree and a crash-loop
+# in a display would take the telemetry gateway down with it. A node that holds
+# a GStreamer pipeline, an HTTP server and a UDP session to a gimbal is exactly
+# the case that rule was written for: it has three ways to die that the gateway
+# does not, and none of them should reach it.
+#
+# THE RECORDING IS WHY Restart=on-failure MATTERS HERE. If the camera drops off
+# the network the node exits, systemd brings it back, and it opens a NEW session
+# — a new .mkv and a new _frames.csv. The sortie ends up as several files rather
+# than one, which is fine and is why the stems are timestamped. What is not fine
+# is the node staying dead for the rest of the flight.
+#
+# ---------------------------------------------------------------------------
+# THE THREE-LAYER STOP, and why it is not one line.
+#
+# `docker exec` does not propagate termination: killing the exec client leaves
+# the process running INSIDE the container. Without all three of the lines
+# below, `systemctl restart` starts a second copy while the first still holds
+# its resources — and for THIS node that is worse than for the others, because
+# the leftover still holds the RTSP session and the :8091 socket. The new copy
+# then fails to bind and dies with an error that reads like a broken camera.
+#
+#   ExecStartPre  sweeps orphans BEFORE starting. This is the one that saves
+#                 you, because it works even when the PREVIOUS stop failed.
+#   ExecStart     run_in_container.sh also traps SIGTERM and forwards the kill
+#                 inward, so the normal stop path works on its own.
+#   ExecStop      backstop for when the wrapper itself is gone.
+#
+# The pkill pattern is the INSTALL-SPACE PATH, not the node name. It must stay
+# identical to the MARKER run_in_container.sh derives — that script prints it at
+# startup so a mismatch is visible rather than silent.
+#
+# The leading `-` on both pkill lines is load-bearing: pkill exits 1 when it
+# matches nothing, and without the `-` a perfectly clean start or stop fails.
+#
+# Verify with pgrep, not with "the video appeared":
+#     systemctl restart uav-camera
+#     docker exec __UAV_CONTAINER__ pgrep -fc install/uav_camera/lib/uav_camera/camera_node
+#   must print exactly 1. Two = the sweep is not matching. Zero = wrong marker.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=UAV camera_node (SIYI A8 mini: stream, record, nadir)
+After=uav-container.service
+Requires=uav-container.service
+# BindsTo, so stopping the container stops this too rather than leaving the
+# unit restart-looping against a container that is gone.
+BindsTo=uav-container.service
+
+[Service]
+Type=simple
+User=__UAV_USER__
+EnvironmentFile=-/etc/default/uav
+Environment=UAV_CONTAINER=__UAV_CONTAINER__
+ExecStartPre=-/usr/bin/docker exec __UAV_CONTAINER__ pkill -f install/uav_camera/lib/uav_camera/camera_node
+ExecStart=__UAV_REPO__/scripts/run_in_container.sh uav_camera camera_node
+ExecStop=-/usr/bin/docker exec __UAV_CONTAINER__ pkill -f install/uav_camera/lib/uav_camera/camera_node
+# Longer than the wrapper's 5 s SIGTERM grace plus its SIGKILL follow-up, AND
+# longer than the pipeline's own teardown: camera_node sends EOS and waits up to
+# 3 s for the muxer to finalise the matroska index. Shooting it before that
+# leaves a file that may not seek, which is discovered later by whoever tries to
+# label it.
+TimeoutStopSec=20
+# mixed: SIGTERM the wrapper (firing its trap), escalate to the cgroup after.
+KillMode=mixed
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

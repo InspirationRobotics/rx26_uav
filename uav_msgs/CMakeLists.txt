@@ -13,6 +13,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FlightState.msg"
   "msg/FcuStatus.msg"
   "msg/RcChannels.msg"
+  "msg/CameraStatus.msg"
   DEPENDENCIES std_msgs
 )
 
