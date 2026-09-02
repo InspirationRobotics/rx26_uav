@@ -295,6 +295,31 @@ camera_node:
                                            #      as the RTSP stream, different
                                            #      protocol and port.
     siyi_port: 37260                       # [RO] gimbal SDK UDP port
+    gimbal_pitch_deg: 90.0                 # [RO] pitch commanded at startup =
+                                           #   NADIR. THE SIGN IS UNIT-SPECIFIC.
+                                           #   SIYI documents -90 as full-down;
+                                           #   this airframe's A8 mini aims at
+                                           #   the SKY when sent -90, so nadir
+                                           #   here is +90. Measure it with
+                                           #   tools/siyi_gimbal.py before
+                                           #   trusting either sign on a new
+                                           #   unit — a camera that films the
+                                           #   clouds for a whole sortie looks
+                                           #   exactly like one that works.
+    gimbal_control_enabled: true           # [RO] create the
+                                           #   /uav/camera/gimbal_cmd
+                                           #   subscription. FALSE HERE ON
+                                           #   PURPOSE: with no subscriber
+                                           #   there is no way to re-aim the
+                                           #   camera in flight, which is the
+                                           #   posture the flight config wants.
+                                           #   Turn it on for bench work, or
+                                           #   when a mission node on this
+                                           #   Jetson needs to change the
+                                           #   angle. Note DDS is not
+                                           #   local-only: with this true,
+                                           #   anything on the vehicle's ROS
+                                           #   graph can publish to it.
     record_dir: "/root/robotx_ws/logs/video"
                                            # [RO] rides the workspace bind mount
                                            #      on purpose: a path inside the

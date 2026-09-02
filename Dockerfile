@@ -34,6 +34,8 @@ FROM ros:humble-ros-base
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-pip \
@@ -82,6 +84,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # pymavlink is the only thing telemetry_bridge needs beyond ROS.
 RUN python3 -m pip install --no-cache-dir pymavlink
+
+# siyi_sdk is not on PyPI and has no packaging, so it cannot be pip-installed.
+# Cloned to a fixed path on PYTHONPATH: the pinned commit stays visible here
+# rather than buried in a vendored copy of someone else's tree.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+ && git clone https://github.com/mzahana/siyi_sdk.git /opt/siyi_sdk \
+ && git -C /opt/siyi_sdk checkout b645656b71e9d3fc49e101ac2caa91d924f60b81 \
+ && rm -rf /opt/siyi_sdk/.git /var/lib/apt/lists/*
+ENV PYTHONPATH=/opt/siyi_sdk:${PYTHONPATH}
 
 WORKDIR /root/robotx_ws
 

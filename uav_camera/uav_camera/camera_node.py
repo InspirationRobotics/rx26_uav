@@ -30,10 +30,24 @@ NO MAVLINK. This node subscribes to /uav/pose and /uav/attitude like any other
 consumer. telemetry_bridge is the sole MAVLink consumer and that is what keeps
 the single-owner rule enforceable rather than merely stated.
 
-NO CONTROL SURFACE. The viewer serves GET only, and the gimbal is commanded once
-at startup rather than from anything a browser can reach. README safety
-constraint 6 -- WiFi is a convenience, never a control path -- stays true only
-if nobody adds the endpoint that would make it false.
+NO CONTROL SURFACE ON THE VIEWER. The MJPEG server serves GET only. README
+safety constraint 6 -- WiFi is a convenience, never a control path -- stays true
+only if nobody adds an HTTP endpoint that would make it false, and nobody has.
+
+THE GIMBAL TOPIC IS A DIFFERENT QUESTION, AND IT IS GATED. This node originally
+had no way to move the gimbal at all: it was commanded to nadir at startup and
+that was the whole story. That was right when the only requirement was a fixed
+nadir view, and it stopped being right as soon as another node on this Jetson
+needed to change the angle without a human running a script.
+
+So there is now a subscription to /uav/camera/gimbal_cmd -- and it EXISTS ONLY
+IF gimbal_control_enabled IS TRUE, which the flight config leaves false. The
+distinction that makes this defensible is between an endpoint reachable from a
+browser (still absent) and a DDS topic on the vehicle's own graph (present when
+asked for). Be clear-eyed about the residual: DDS is not local-only, so on a
+vehicle whose ROS graph rides the field WiFi, anything on that network can
+publish to it. Ship it false; turn it on for bench work and for a mission node
+that genuinely needs to re-aim.
 """
 import math
 import os
@@ -42,6 +56,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from geometry_msgs.msg import Vector3
 from rclpy.node import Node
 
 from uav_msgs.msg import Attitude, CameraStatus, GlobalPos
@@ -83,6 +98,18 @@ PARAM_SPEC = {
     "siyi_ip": dict(read_only=True, description="gimbal SDK address"),
     "siyi_port": dict(read_only=True, lo=1, hi=65535,
                       description="gimbal SDK UDP port"),
+    "gimbal_pitch_deg": dict(read_only=True, lo=-180.0, hi=180.0,
+                             description="pitch commanded at startup. NADIR, "
+                                         "and the sign is unit-specific: SIYI "
+                                         "documents -90 as full-down and units "
+                                         "have been found where that aims up. "
+                                         "Measure it, then write it here"),
+    "gimbal_control_enabled": dict(read_only=True,
+                                   description="subscribe to "
+                                               "/uav/camera/gimbal_cmd at all. "
+                                               "FALSE in the flight config: no "
+                                               "subscriber means no way to "
+                                               "re-aim in flight"),
     "record_dir": dict(read_only=True,
                        description="where .mkv and _frames.csv are written"),
     "record_on_start": dict(read_only=True,
@@ -188,23 +215,45 @@ class CameraNode(Node):
         # ---- gimbal. A silent gimbal is degraded, not fatal: the camera still
         # streams and still records wherever it happens to be pointing, and
         # losing the footage over the pointing link would be the wrong trade.
+        nadir = float(p["gimbal_pitch_deg"])
         if p["siyi_enabled"]:
             try:
-                self.siyi = SiyiClient(str(p["siyi_ip"]),
-                                       int(p["siyi_port"])).connect()
+                self.siyi = SiyiClient(str(p["siyi_ip"]), int(p["siyi_port"]),
+                                       nadir_pitch_deg=nadir).connect()
                 if self.siyi.set_nadir():
-                    self.get_logger().info("gimbal commanded to nadir (-90)")
+                    self.get_logger().info(
+                        "gimbal commanded to nadir (pitch %+.1f)" % nadir)
                 else:
                     self.get_logger().error("gimbal did not accept the nadir "
                                             "command; it is wherever it was")
             except SiyiUnavailable as e:
                 self.get_logger().error("gimbal unavailable: %s" % e)
-                self.siyi = NullSiyiClient()
+                self.siyi = NullSiyiClient(nadir_pitch_deg=nadir)
         else:
             self.get_logger().warn(
                 "siyi_enabled is false: no gimbal control, no SD recording. "
                 "The camera will stream and record from the Jetson only.")
-            self.siyi = NullSiyiClient()
+            self.siyi = NullSiyiClient(nadir_pitch_deg=nadir)
+
+        # ---- the gimbal command topic, created only when asked for.
+        #
+        # A Vector3 rather than a new message type: x is yaw, y is pitch, both
+        # degrees, z unused. uav_msgs would mean editing CMakeLists.txt, and a
+        # message left out of that file is not generated and fails at import
+        # with no hint that the .msg was ever the problem. Two floats do not
+        # justify that risk.
+        #
+        # Fire and forget, by design. The answer to "did it get there" is not a
+        # service response, it is gimbal_pitch on /uav/camera/status -- the
+        # MEASURED angle, which is the only one geo-projection may use. A
+        # response echoing the commanded angle would be a worse answer wearing
+        # a more official hat.
+        if p["gimbal_control_enabled"]:
+            self.create_subscription(Vector3, "/uav/camera/gimbal_cmd",
+                                     self._on_gimbal_cmd, 10)
+            self.get_logger().warn(
+                "gimbal_control_enabled: /uav/camera/gimbal_cmd is live. "
+                "Anything on this ROS graph can re-aim the camera.")
 
         # ---- pipeline last: everything it calls back into must already exist.
         self.pipe = Pipeline(
@@ -232,6 +281,38 @@ class CameraNode(Node):
     def _on_att(self, msg):
         self.att_cache.set((msg.roll, msg.pitch, msg.yaw),
                            time.monotonic(), msg.header.stamp)
+
+    # ----------------------------------------------------------- gimbal in
+
+    def _on_gimbal_cmd(self, msg):
+        """Point the gimbal. x = yaw, y = pitch, degrees. z ignored.
+
+        Only ever subscribed when gimbal_control_enabled is true.
+
+        NaN IS REJECTED, not passed through. A NaN reaching setGimbalRotation
+        is a command with no defined meaning, and the gimbal's response to one
+        is not something to discover in flight. An out-of-range angle IS passed
+        through: the gimbal stops at its own limits, and refusing it here would
+        mean encoding a sign convention that has already been observed to
+        differ between units.
+        """
+        yaw, pitch = float(msg.x), float(msg.y)
+        if math.isnan(yaw) or math.isnan(pitch) or \
+                math.isinf(yaw) or math.isinf(pitch):
+            self.get_logger().warn(
+                "gimbal_cmd ignored: yaw=%r pitch=%r is not a finite angle"
+                % (msg.x, msg.y))
+            return
+        if self.siyi.set_angles(yaw, pitch):
+            self.get_logger().info("gimbal commanded to yaw %+.1f pitch %+.1f"
+                                   % (yaw, pitch))
+        else:
+            # Not an exception: a silent gimbal is degraded, not fatal, and the
+            # same rule applies to a command as to the startup nadir.
+            self.get_logger().error(
+                "gimbal did not accept yaw %+.1f pitch %+.1f; it is wherever "
+                "it was. Watch gimbal_pitch on /uav/camera/status."
+                % (yaw, pitch))
 
     # --------------------------------------------------------------- sessions
 

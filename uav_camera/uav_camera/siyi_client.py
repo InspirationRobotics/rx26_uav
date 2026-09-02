@@ -21,19 +21,58 @@ VENDOR OR PIN THE LIBRARY. Do not track its default branch -- this sits on a
 flight computer, and an upstream rename between two `pip install`s is not a
 thing to discover on a flight line.
 
-WHAT THIS DELIBERATELY DOES NOT DO. It does not aim the gimbal at anything.
-Tasks 1 and 3 need a fixed nadir view and a lat/lon per detection; nothing needs
-the camera to track. A pointing loop would be a control path and would have to
-be argued against README safety constraint 6, so the absence is the design.
+NO TRACKING LOOP. set_angles() points the gimbal where it is told, once, and
+returns. There is no loop that keeps aiming at a moving thing: the gimbal holds
+its own attitude against its IMU, and Tasks 1 and 3 need a fixed view and a
+lat/lon per detection, not a camera that follows a target. Commanding an angle
+is a discrete act; tracking would be a control path and is a separate argument.
+
+WHO MAY CALL set_angles. The node exposes it on a topic only when
+gimbal_control_enabled is true, which is false in the flight config. See
+camera_node's header -- this file is happy to point, and the decision about
+whether anything is allowed to ask lives there.
+
+NADIR IS NOT ALWAYS -90. SIYI documents -90 as full-down and +25 as full-up,
+and units in the field have been found reporting the opposite sign, so
+commanding -90 aims at the sky. The angle is therefore a PARAMETER, not a
+constant: uav_params.yaml carries the value measured on the airframe it is
+bolted to. The default below is SIYI's documented convention and is the thing
+most likely to be wrong for any given unit.
 """
+
+import socket
+import struct
+import time
 
 NADIR_PITCH_DEG = -90.0
 
-# The A8 mini's travel is -90..+25 in pitch, so nadir sits exactly on the stop.
-# A gimbal that reports -87 while commanded to -90 is not broken, it is against
-# the limit with a calibration offset -- and geo-projection has to use what it
-# reports, not what it was told. This is the tolerance beyond which the node
-# says the gimbal is not where it was asked to be.
+# Absolute-angle command. Payload is yaw then pitch, int16 little-endian, in
+# TENTHS of a degree. Identified from mzahana/siyi_sdk and confirmed against
+# this airframe's unit with tools/siyi_gimbal.py.
+CMD_SET_ATTITUDE = 0x0E
+
+
+def _crc16_xmodem(data):
+    """SIYI's frame checksum: CRC16-XMODEM, poly 0x1021, init 0x0000.
+
+    Not documented as such anywhere SIYI publishes; identified by testing the
+    ten common CRC16 variants against a frame from their own manual, of which
+    exactly one matched. A wrong variant does not error -- the gimbal simply
+    ignores every frame, which looks like a dead camera.
+    """
+    crc = 0x0000
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 \
+                else (crc << 1) & 0xFFFF
+    return crc
+
+# The gimbal's travel puts nadir exactly on a mechanical stop, whichever sign
+# convention the unit uses. A gimbal that reports -87 while commanded to -90 is
+# not broken, it is against the limit with a calibration offset -- and
+# geo-projection has to use what it reports, not what it was told. This is the
+# tolerance beyond which the node says the gimbal is not where it was asked.
 NADIR_TOLERANCE_DEG = 2.0
 
 
@@ -51,10 +90,16 @@ class SiyiClient:
     trade. Construction is the exception -- see connect().
     """
 
-    def __init__(self, ip="192.168.144.25", port=37260, timeout_s=3.0):
+    def __init__(self, ip="192.168.144.25", port=37260, timeout_s=3.0,
+                 nadir_pitch_deg=NADIR_PITCH_DEG):
         self.ip = ip
         self.port = int(port)
         self.timeout_s = float(timeout_s)
+        # Carried per instance, not read from the module constant at call time,
+        # so at_nadir() can never check against a different angle from the one
+        # set_nadir() commanded. That pair going out of step would report a
+        # healthy gimbal as misaimed, or worse, the reverse.
+        self.nadir_pitch_deg = float(nadir_pitch_deg)
         self._sdk = None
 
     # ------------------------------------------------------------------ life
@@ -107,6 +152,71 @@ class SiyiClient:
 
     # --------------------------------------------------------------- pointing
 
+    def set_angles(self, yaw_deg, pitch_deg) -> bool:
+        """Point at an absolute yaw and pitch, in degrees. One command.
+
+        NOT VALIDATED AGAINST A RANGE HERE, deliberately. The documented travel
+        is -90..+25 in pitch, but that assumes SIYI's sign convention and units
+        have been found using the opposite one -- a clamp written against the
+        wrong convention silently refuses the only angle that works. The gimbal
+        stops at its own mechanical limits regardless, and attitude() reports
+        where it actually ended up, which is the check that means something.
+
+        WHY NOT self._sdk.setGimbalRotation(). That helper validates against a
+        HARDCODED -90..+25 pitch range in SIYI's documented sign convention, and
+        this airframe's unit uses the opposite one -- so the only angle that
+        actually aims at the water, +90, is the one the helper refuses. Worse,
+        it refuses by PRINTING and returning, not by raising, so the caller sees
+        success while the gimbal never moved. The command frame itself is four
+        bytes of payload and is sent here directly; the gimbal's own mechanical
+        stops are the real limit, and attitude() reports where it ended up.
+        """
+        if self._sdk is None:
+            return False
+        data = struct.pack("<hh", int(round(float(yaw_deg) * 10)),
+                           int(round(float(pitch_deg) * 10)))
+        return self._command(CMD_SET_ATTITUDE, data) is not None
+
+    # ------------------------------------------------------------ wire format
+
+    def _command(self, cmd_id, data=b"", seq=1):
+        """Send one SIYI frame and return the reply payload, or None.
+
+        Its own short-lived socket rather than the SDK's: the SDK owns a
+        receive thread on its socket, and a reply read from under it would be a
+        reply the SDK never sees. Sending from a separate ephemeral port keeps
+        the two conversations disjoint -- the gimbal answers whoever asked.
+
+        MATCHING THE RETURNED CMD_ID IS NOT OPTIONAL. The gimbal also emits
+        unsolicited attitude frames, and their CRC is valid, so accepting the
+        first datagram that arrives yields a well-formed reply to a question
+        nobody asked.
+        """
+        body = (b"\x55\x66\x01" + struct.pack("<H", len(data))
+                + struct.pack("<H", seq) + bytes([cmd_id]) + data)
+        pkt = body + struct.pack("<H", _crc16_xmodem(body))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(self.timeout_s)
+            deadline = time.monotonic() + self.timeout_s
+            sock.sendto(pkt, (self.ip, self.port))
+            while time.monotonic() < deadline:
+                try:
+                    reply, _ = sock.recvfrom(1024)
+                except socket.timeout:
+                    return None
+                if len(reply) < 10 or reply[:2] != b"\x55\x66":
+                    continue
+                n = struct.unpack("<H", reply[3:5])[0]
+                if len(reply) < 10 + n or reply[7] != cmd_id:
+                    continue
+                return reply[8:8 + n]
+            return None
+        except OSError:
+            return None
+        finally:
+            sock.close()
+
     def set_nadir(self) -> bool:
         """Point straight down. One command; the gimbal's own IMU holds it.
 
@@ -115,13 +225,7 @@ class SiyiClient:
         through aircraft roll and pitch without being told again -- re-commanding
         it every tick would add a control loop that has nothing to correct.
         """
-        if self._sdk is None:
-            return False
-        try:
-            self._sdk.setGimbalRotation(0.0, NADIR_PITCH_DEG)
-            return True
-        except Exception:
-            return False
+        return self.set_angles(0.0, self.nadir_pitch_deg)
 
     def attitude(self):
         """-> (yaw, pitch, roll) in degrees, MEASURED, or None.
@@ -146,12 +250,16 @@ class SiyiClient:
         return yaw, pitch, roll
 
     def at_nadir(self, tolerance_deg=NADIR_TOLERANCE_DEG):
-        """-> (is_nadir, measured_pitch). measured_pitch is None if unknown."""
+        """-> (is_nadir, measured_pitch). measured_pitch is None if unknown.
+
+        Compared against THIS INSTANCE's nadir angle, so a unit configured with
+        an inverted sign is judged against the angle it was actually sent.
+        """
         att = self.attitude()
         if att is None:
             return False, None
         pitch = att[1]
-        return abs(pitch - NADIR_PITCH_DEG) <= tolerance_deg, pitch
+        return abs(pitch - self.nadir_pitch_deg) <= tolerance_deg, pitch
 
     # -------------------------------------------------------------- recording
 
@@ -192,11 +300,20 @@ class NullSiyiClient:
 
     connected = False
 
+    def __init__(self, *args, **kwargs):
+        # Same constructor shape as SiyiClient so the node can build either
+        # without knowing which it got.
+        self.nadir_pitch_deg = float(kwargs.get("nadir_pitch_deg",
+                                                NADIR_PITCH_DEG))
+
     def connect(self):
         return self
 
     def close(self):
         pass
+
+    def set_angles(self, yaw_deg, pitch_deg) -> bool:
+        return False
 
     def set_nadir(self) -> bool:
         return False

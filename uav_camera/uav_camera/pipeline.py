@@ -3,13 +3,13 @@
 WHY THE GRAPH SPLITS WHERE IT DOES. Three consumers want the same stream and
 they want it in three different forms:
 
-    rtspsrc ! rtph265depay ! h265parse ! tee name=enc
+    rtspsrc ! rtph264depay ! h264parse ! tee name=enc
       enc. ! queue ! matroskamux ! filesink        <- the recording
-      enc. ! queue ! nvv4l2decoder ! nvvidconv ! tee name=dec
+      enc. ! queue ! avdec_h264 ! videoconvert ! tee name=dec
            dec. ! queue ! appsink                  <- frames for processing
            dec. ! queue ! videorate ! jpegenc      <- the operator's view
 
-The split is AFTER h265parse and BEFORE the decoder on purpose. The file gets
+The split is AFTER h264parse and BEFORE the decoder on purpose. The file gets
 the camera's own encoded bytes -- full quality, and near zero CPU, because
 nothing re-encodes. Decoding first and re-encoding to disk would cost most of a
 core and lose detail, to produce a worse file. On a Jetson also running a
@@ -90,7 +90,7 @@ class Pipeline:
         parts = [
             "rtspsrc location=%s latency=%d protocols=tcp name=src"
             % (self.rtsp_url, self.latency_ms),
-            "! rtph265depay ! h265parse config-interval=-1 ! tee name=enc",
+            "! rtph264depay ! h264parse config-interval=-1 ! tee name=enc",
         ]
         if record_path:
             parts.append(
@@ -99,7 +99,7 @@ class Pipeline:
         if self.want_frames:
             parts.append(
                 "enc. ! queue max-size-buffers=8 leaky=downstream "
-                "! nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx "
+                "! avdec_h264 ! videoconvert ! video/x-raw,format=BGRx "
                 "! tee name=dec")
             parts.append(
                 "dec. ! queue max-size-buffers=%d leaky=downstream "
