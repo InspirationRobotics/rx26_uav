@@ -105,6 +105,12 @@ PARAM_SPEC = {
                       description="stills per second; NOT the video rate"),
     "stills_quality": dict(read_only=True, lo=50, hi=100,
                            description="JPEG quality for stills, 50-100"),
+    "gimbal_renadir_after_s": dict(read_only=True, lo=0.0, hi=600.0,
+                                   description="seconds of gimbal_cmd silence "
+                                               "before nadir is restored; "
+                                               "0 disables the hold"),
+    "gimbal_nadir_tol_deg": dict(read_only=True, lo=0.5, hi=30.0,
+                                 description="how far off nadir counts as off"),
     "mjpeg_port": dict(read_only=True, lo=1024, hi=65535,
                        description="viewer port; MUST differ from "
                                    "ground_station.port and ocs_client.ocs_port"),
@@ -179,6 +185,12 @@ MAX_PENDING_ROWS = 4096
 # must not be lost, and they share this process.
 MAX_PENDING_STILLS = 8
 
+# Minimum gap between nadir re-commands. The A8 mini takes a second or two to
+# travel 90 degrees, and the status tick runs at 5 Hz: without this the node
+# would re-command every tick of the slew and read "not at nadir" the whole way
+# there, which looks like a gimbal fighting itself in the log.
+RENADIR_MIN_INTERVAL_S = 4.0
+
 
 class CameraNode(Node):
 
@@ -226,6 +238,13 @@ class CameraNode(Node):
         self._gimbal_pitch = float("nan")
         self._gimbal_pitch_rate = float("nan")
         self._gimbal_ok = False
+        # 0.0 means "no gimbal_cmd has ever arrived", which must read as
+        # long-ago rather than just-now, so the hold is active from boot.
+        self._last_gimbal_cmd_t = 0.0
+        self._last_renadir_t = 0.0
+        self._renadir_after_s = float(p["gimbal_renadir_after_s"])
+        self._nadir_tol_deg = float(p["gimbal_nadir_tol_deg"])
+        self._off_nadir_since = None
 
         self.guard = recorder_core.DiskGuard(float(p["min_free_mb"]))
 
@@ -309,8 +328,10 @@ class CameraNode(Node):
                     self.get_logger().info(
                         "gimbal commanded to nadir (pitch %+.1f)" % nadir)
                 else:
-                    self.get_logger().error("gimbal did not accept the nadir "
-                                            "command; it is wherever it was")
+                    self.get_logger().error(
+                        "no ack for the startup nadir command -- it may still "
+                        "have moved; the ack is a UDP reply, not a "
+                        "confirmation. The nadir hold will retry if it did not.")
             except SiyiUnavailable as e:
                 self.get_logger().error("gimbal unavailable: %s" % e)
                 self.siyi = NullSiyiClient(nadir_pitch_deg=nadir)
@@ -416,12 +437,71 @@ class CameraNode(Node):
             self.get_logger().info(response.message)
         else:
             response.message = (
-                "gimbal did not accept the nadir command (pitch %+.1f); it is "
-                "still wherever it was. Last measured pitch was %s."
+                "no acknowledgement for the nadir command (pitch %+.1f). That "
+                "is NOT proof it was ignored -- set_angles reports whether a "
+                "reply frame came back over UDP, and the gimbal has been "
+                "observed to move on a command whose ack was lost. Last "
+                "measured pitch was %s; watch gimbal_pitch on "
+                "/uav/camera/status, and the nadir hold will retry."
                 % (target, where))
             self.get_logger().error(response.message)
         response.success = bool(ok)
         return response
+
+    def _hold_nadir(self, now):
+        """Put the camera back to nadir after anything moves it.
+
+        WHY THIS EXISTS. The gimbal is powered by the AIRCRAFT, not the Jetson.
+        A battery swap or an autopilot reboot power-cycles it, and the A8 mini
+        comes back at 0 degrees -- pointing at the horizon -- while this node
+        keeps running, never restarts, and so never re-sends the startup nadir
+        command. Observed on Ekko 2026-09-02: a 48-second hover recorded
+        ENTIRELY at the horizon while gimbal_ok was true, the stream was
+        healthy, the index was complete, and nothing in any log said the sortie
+        was worthless. The pictures are the only place it showed up.
+
+        It also covers a lost acknowledgement. set_angles reports whether a
+        reply frame came back over UDP, not whether the gimbal obeyed, so a
+        dropped ack looks identical to a refused command. Re-commanding from
+        the MEASURED angle makes that distinction stop mattering: if the gimbal
+        moved, there is nothing to correct; if it did not, this retries.
+
+        Gated on gimbal_cmd silence rather than switched off when
+        gimbal_control_enabled is true: aiming the camera by hand still works,
+        the aim just expires. Nadir is the resting state, not a startup event.
+        """
+        if self._renadir_after_s <= 0.0:
+            return                          # hold disabled by config
+        if now - self._last_gimbal_cmd_t < self._renadir_after_s:
+            return                          # someone is aiming it; leave it
+        if math.isnan(self._gimbal_pitch):
+            # Angle unknown. Commanding blind would move a gimbal that may be
+            # fine, and the stale-gimbal error above already says this loudly.
+            self._off_nadir_since = None
+            return
+        target = self.siyi.nadir_pitch_deg
+        if abs(self._gimbal_pitch - target) <= self._nadir_tol_deg:
+            if self._off_nadir_since is not None:
+                self.get_logger().info(
+                    "gimbal back at nadir (%+.1f)" % self._gimbal_pitch)
+                self._off_nadir_since = None
+            return
+        if now - self._last_renadir_t < RENADIR_MIN_INTERVAL_S:
+            return                          # still travelling from the last one
+        first = self._off_nadir_since is None
+        if first:
+            self._off_nadir_since = now
+        self._last_renadir_t = now
+        ok = self.siyi.set_nadir()
+        if first:
+            # Once per excursion, not per attempt: this fires after a power
+            # cycle, and a line per tick would bury the one that matters.
+            self.get_logger().warn(
+                "gimbal is at %+.1f, not nadir (%+.1f) -- re-commanding. "
+                "Usually means the aircraft was power-cycled under a running "
+                "camera_node.%s"
+                % (self._gimbal_pitch, target,
+                   "" if ok else " No ack came back; will retry."))
 
     def _on_gimbal_cmd(self, msg):
         """Point the gimbal. x = yaw, y = pitch, degrees. z ignored.
@@ -442,6 +522,12 @@ class CameraNode(Node):
                 "gimbal_cmd ignored: yaw=%r pitch=%r is not a finite angle"
                 % (msg.x, msg.y))
             return
+        # Recorded BEFORE the send and regardless of the result: the operator
+        # has expressed intent to aim the camera, and the nadir hold must back
+        # off for the full window whether or not this particular frame was
+        # acknowledged. Otherwise a lost ack lets the hold yank the camera back
+        # while someone is still pointing it.
+        self._last_gimbal_cmd_t = time.monotonic()
         if self.siyi.set_angles(yaw, pitch):
             self.get_logger().info("gimbal commanded to yaw %+.1f pitch %+.1f"
                                    % (yaw, pitch))
@@ -449,8 +535,9 @@ class CameraNode(Node):
             # Not an exception: a silent gimbal is degraded, not fatal, and the
             # same rule applies to a command as to the startup nadir.
             self.get_logger().error(
-                "gimbal did not accept yaw %+.1f pitch %+.1f; it is wherever "
-                "it was. Watch gimbal_pitch on /uav/camera/status."
+                "no ack for gimbal yaw %+.1f pitch %+.1f -- it may still have "
+                "moved; the ack is a UDP reply, not a confirmation. Watch "
+                "gimbal_pitch on /uav/camera/status."
                 % (yaw, pitch))
 
     # --------------------------------------------------------------- sessions
@@ -703,6 +790,8 @@ class CameraNode(Node):
             self._gimbal_ok = True
             self._gimbal_pitch = g[1]
             self._gimbal_pitch_rate = g[4]
+
+        self._hold_nadir(now)
 
         msg = CameraStatus()
         msg.header.stamp = self.get_clock().now().to_msg()

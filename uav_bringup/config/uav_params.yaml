@@ -371,6 +371,32 @@ camera_node:
                                            #   only ever send the one angle
                                            #   below and cannot aim the camera
                                            #   anywhere new.
+    gimbal_renadir_after_s: 15.0           # [RO] seconds of gimbal_cmd silence
+                                           #   before the camera is put back to
+                                           #   gimbal_pitch_deg. 0 disables.
+                                           #   THE GIMBAL IS POWERED BY THE
+                                           #   AIRCRAFT, not the Jetson: a
+                                           #   battery swap or an autopilot
+                                           #   reboot power-cycles it and the
+                                           #   A8 mini returns at 0 deg -- the
+                                           #   HORIZON -- while this node keeps
+                                           #   running and never re-sends its
+                                           #   startup nadir command. Ekko flew
+                                           #   a whole sortie that way on
+                                           #   2026-09-02 with gimbal_ok true
+                                           #   and nothing in any log to say
+                                           #   the footage was worthless.
+                                           #   Nadir is the RESTING STATE here,
+                                           #   not a startup event; a hand-aimed
+                                           #   angle simply expires after this
+                                           #   long. Raise it if you need to
+                                           #   hold an off-nadir aim for longer.
+    gimbal_nadir_tol_deg: 3.0              # [RO] how far off nadir counts as
+                                           #   off. Above the gimbal's own
+                                           #   settling jitter so a stationary
+                                           #   camera is never re-commanded,
+                                           #   well below the ~90 deg error a
+                                           #   power cycle produces.
     record_dir: "/root/robotx_ws/logs/video"
                                            # [RO] rides the workspace bind mount
                                            #      on purpose: a path inside the
