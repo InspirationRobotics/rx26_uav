@@ -132,6 +132,15 @@ PARAM_SPEC = {
 RELEASE_FRAMES = 5          # all-zero override frames sent on trip
 PUB_RATE_HZ = 20.0
 
+#: EXTENDED_SYS_STATE is in NO stream-rate group. No MAVn_* value (SRx_* before
+#: 4.7) will ever produce it -- it must be asked for per-message. 2 Hz matches
+#: what ocs_client reports at; flight phase does not change faster than that.
+EXT_STATE_INTERVAL_US = 500000
+#: How often to re-ask while it is still absent. The request lives on the MAVLink
+#: CHANNEL, so an autopilot reboot silently discards it -- one request at startup
+#: would leave /uav/flight_state dead for the rest of the sortie.
+EXT_STATE_REREQUEST_S = 30.0
+
 #: MISSION_* messages the fence dialog consumes. Routed off the RX thread into a
 #: queue rather than handled there, so a blocking request/response exchange
 #: never stalls telemetry republishing.
@@ -198,6 +207,7 @@ class TelemetryBridge(Node):
         self._mission_q = queue.Queue(maxsize=256)
         self._fence_lock = threading.Lock()
         self._ext_state_seen = False
+        self._ext_state_req_t = time.monotonic()
 
         from pymavlink import mavutil
         self._mavutil = mavutil
@@ -238,6 +248,7 @@ class TelemetryBridge(Node):
         else:
             return
         self.get_logger().info("heartbeat OK")
+        self._request_ext_sys_state()
         while not self._stop.is_set():
             msg = self.conn.recv_match(blocking=True, timeout=1.0)
             if msg is None:
@@ -332,9 +343,20 @@ class TelemetryBridge(Node):
             # than the autopilot's own, and it must be obvious which one is live.
             self.get_logger().warn(
                 "no EXTENDED_SYS_STATE yet — /uav/flight_state is silent and "
-                "flight_phase will fall back to armed+altitude. Set "
-                "SR0_EXT_STAT > 0 on the autopilot.",
+                "flight_phase will fall back to armed+altitude. This is NOT a "
+                "stream-rate parameter — no MAVn_*/SRx_* value produces it. It is "
+                "re-requested every %.0fs; if this persists the autopilot is not "
+                "answering SET_MESSAGE_INTERVAL." % EXT_STATE_REREQUEST_S,
                 throttle_duration_sec=30.0)
+        # Self-healing, and deliberately NOT gated on _ext_state_seen: the
+        # per-message request lives on the MAVLink CHANNEL, so an autopilot
+        # reboot discards it while this node stays up, connected, and with
+        # _ext_state_seen still True from before the reboot. Keying off the
+        # CACHE going cold covers both "never arrived" and "stopped arriving";
+        # the seen-flag alone would leave /uav/flight_state dead for the rest
+        # of the sortie after any in-air FC reset.
+        if flight is None and t - self._ext_state_req_t >= EXT_STATE_REREQUEST_S:
+            self._request_ext_sys_state()
         if pose is not None:
             m = GlobalPos()
             m.header.stamp = self._pose.stamp
@@ -362,6 +384,35 @@ class TelemetryBridge(Node):
 
     def _publish_drop_state(self):
         self.drop_pub.publish(Bool(data=not self.latch.allowed))
+
+    def _request_ext_sys_state(self):
+        """Ask the autopilot for EXTENDED_SYS_STATE explicitly.
+
+        EXTENDED_SYS_STATE belongs to no stream group, so it cannot be turned
+        on with a parameter -- scripts/start_mavproxy.sh's advice to raise
+        SR0_EXT_STAT for it is wrong on every firmware version, and SR0_* does
+        not even exist on 4.7 (it is MAV1_*). Verified on Ekko 2026-09-02:
+        MAV1_EXT_STAT=3 streams SYS_STATUS, GPS_RAW_INT and BATTERY_STATUS but
+        never EXTENDED_SYS_STATE; one SET_MESSAGE_INTERVAL produces it at once.
+
+        Read-only in effect: it changes what the autopilot SENDS to this
+        channel and nothing about how it flies.
+        """
+        self._ext_state_req_t = time.monotonic()
+        try:
+            self.conn.mav.command_long_send(
+                self.conn.target_system, self.conn.target_component,
+                self._mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                float(self._mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE),
+                float(EXT_STATE_INTERVAL_US), 0, 0, 0, 0, 0)
+            self.get_logger().info(
+                "requested EXTENDED_SYS_STATE at %.1f Hz"
+                % (1e6 / EXT_STATE_INTERVAL_US))
+        except Exception as e:
+            # Never fatal. Every other stream is unaffected, and the warning
+            # above already makes a silent /uav/flight_state obvious.
+            self.get_logger().warn(
+                "could not request EXTENDED_SYS_STATE: %s" % e)
 
     # ---------- override TX (the enforcement point) ----------
 
