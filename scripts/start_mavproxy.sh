@@ -3,6 +3,8 @@
 # open it). It rebroadcasts MAVLink over UDP to everything else:
 #   127.0.0.1:14541      -> telemetry_bridge (this repo's single ROS-side consumer)
 #   127.0.0.1:14540      -> spare local consumer (QGC on the Jetson itself)
+#   127.0.0.1:14542      -> ad-hoc TOOLING ONLY. Diagnostics, probes, scratch
+#                           scripts. Nothing in the flight stack may use it.
 #   <BCAST_ADDR>:14540   -> Mission Planner / QGC on ANY laptop on the field
 #                           WiFi (broadcast, not unicast), so nothing has to be
 #                           typed in on the laptop side and no per-laptop IP has
@@ -89,8 +91,20 @@ fi
 # it is the one output the aircraft cannot fly without: telemetry_bridge is the
 # sole ROS-side consumer, and everything downstream of it — the OCS heartbeat,
 # the ground station, the geofence uploader — goes dark if it is missing.
+# 14542 EXISTS SO THAT DIAGNOSTICS CANNOT STEAL A FLIGHT PORT. A `udpin` bind
+# is not polite: a second process binding a port MAVProxy is already feeding can
+# take the datagrams, and the displaced consumer sees silence rather than an
+# error. On 2026-09-02 a monitoring script bound 14541 for 100 seconds during a
+# climb to 18 m; telemetry_bridge received nothing, /uav/pose went stale, and
+# 1025 camera frames were written with BLANK position -- correctly, but the
+# sortie's geotagging was gone and only an independent log made it recoverable.
+#
+# So: 14541 is telemetry_bridge's and 14540 is the spare a GCS may take, while
+# ANYTHING ad hoc points at 14542 and can contend with nothing that matters.
+# Same reasoning that keeps the boat on 1455x and this aircraft on 1454x.
 OUTS=(--out=udp:127.0.0.1:14541
       --out=udp:127.0.0.1:14540
+      --out=udp:127.0.0.1:14542
       --out=udpbcast:"${BCAST_ADDR}":14540)
 
 # UNQUOTED on purpose: GCS_IPS is a space-separated list and this relies on word
