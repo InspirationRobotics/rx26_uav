@@ -279,6 +279,41 @@ camera_node:
     preview_fps: 5                         # [RO] operator view rate. NOT the
                                            #      record rate — the file gets
                                            #      every frame regardless.
+    stills_enabled: true                   # [RO] also write JPEG stills to
+                                           #      <session>_stills/, named by
+                                           #      frame_idx so they join
+                                           #      straight to _frames.csv.
+                                           #      A SECOND record path on
+                                           #      purpose: matroska is only
+                                           #      readable once EOS reaches the
+                                           #      muxer, and this directory
+                                           #      already holds 0-byte .mkv
+                                           #      files from unclean stops. A
+                                           #      JPEG is complete when written.
+                                           #      These do NOT improve colour —
+                                           #      the camera encodes H.264 4:2:0
+                                           #      upstream, so chroma is already
+                                           #      halved before the Jetson
+                                           #      decodes it. For colour, use
+                                           #      the camera's own 4K SD
+                                           #      recording or fly lower.
+                                           #      Needs cv2 + numpy; without
+                                           #      them the node logs an error
+                                           #      and carries on without stills.
+    stills_hz: 2.0                         # [RO] stills per second, NOT the
+                                           #      video rate. 2 Hz because
+                                           #      consecutive frames at 25 fps
+                                           #      are near-duplicates: they
+                                           #      inflate a dataset without
+                                           #      adding information, and every
+                                           #      one of them costs a human a
+                                           #      labelling decision.
+    stills_quality: 95                     # [RO] JPEG quality. Well above the
+                                           #      viewer's 70: this is training
+                                           #      data, and the artefacts of a
+                                           #      cheap encode look exactly like
+                                           #      real image features to a
+                                           #      detector.
     mjpeg_port: 8091                       # [RO] viewer port. MUST differ from
                                            #      ground_station.port (8090) and
                                            #      ocs_client.ocs_port (37564);

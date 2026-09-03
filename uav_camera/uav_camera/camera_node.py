@@ -61,6 +61,7 @@ also the one you cannot reach after the gimbal has lost nadir.
 """
 import math
 import os
+import queue
 import shutil
 import threading
 import time
@@ -97,6 +98,13 @@ PARAM_SPEC = {
                                     "record-only sortie, near-zero CPU"),
     "preview_fps": dict(read_only=True, lo=1, hi=15,
                         description="operator view rate; not the record rate"),
+    "stills_enabled": dict(read_only=True,
+                           description="write JPEG stills beside the video, "
+                                       "for labelling and training"),
+    "stills_hz": dict(read_only=True, lo=0.1, hi=25.0,
+                      description="stills per second; NOT the video rate"),
+    "stills_quality": dict(read_only=True, lo=50, hi=100,
+                           description="JPEG quality for stills, 50-100"),
     "mjpeg_port": dict(read_only=True, lo=1024, hi=65535,
                        description="viewer port; MUST differ from "
                                    "ground_station.port and ocs_client.ocs_port"),
@@ -163,6 +171,14 @@ PARAM_SPEC = {
 # backlog and anything beyond that is a fault, not a hiccup.
 MAX_PENDING_ROWS = 4096
 
+# Stills waiting on the writer thread. SMALL ON PURPOSE. The queue exists to
+# absorb a disk hiccup, not to buffer a sortie: each entry holds a full decoded
+# BGR frame (~6 MB at 1080p), so 8 is ~50 MB of worst-case RAM. A backlog deeper
+# than this means the disk cannot keep up with the requested rate, and the right
+# answer is to drop stills -- the video and the index are the artifacts that
+# must not be lost, and they share this process.
+MAX_PENDING_STILLS = 8
+
 
 class CameraNode(Node):
 
@@ -212,6 +228,48 @@ class CameraNode(Node):
         self._gimbal_ok = False
 
         self.guard = recorder_core.DiskGuard(float(p["min_free_mb"]))
+
+        # ---- stills. A SECOND, INDEPENDENT record path, and that is the point.
+        # Several 0-byte and index-less .mkv files exist in this directory from
+        # earlier bench runs: matroska only becomes readable when EOS reaches the
+        # muxer, so an unclean stop can cost the whole session. A JPEG is complete
+        # the instant it is written. Stills are also what a labelling tool wants,
+        # and the filename IS the frame_idx, which is the index CSV's join key --
+        # no timestamp matching, no guessing.
+        #
+        # What they do NOT do: recover colour. The camera encodes H.264 4:2:0
+        # before the Jetson ever sees the stream, so chroma is already halved by
+        # the time these frames are decoded. Re-encoding at quality 95 preserves
+        # what arrived; it cannot restore what the camera discarded. For real
+        # colour fidelity use the camera's own 4K SD recording, or fly lower.
+        self._stills_q = None
+        self._stills_thread = None
+        self._stills_dir = None
+        self._stills_written = 0
+        self._stills_dropped = 0
+        self._last_still_t = 0.0
+        self._stills_quality = int(p["stills_quality"])
+        self._stills_period = 1.0 / max(float(p["stills_hz"]), 1e-6)
+        self._cv2 = self._np = None
+        if p["stills_enabled"]:
+            try:
+                import cv2
+                import numpy
+                self._cv2, self._np = cv2, numpy
+            except ImportError as e:
+                # Degraded, never fatal -- same posture as the gimbal. Losing the
+                # sortie because an optional encoder is missing is the wrong trade.
+                self.get_logger().error(
+                    "stills_enabled but cv2/numpy are missing (%s) -- stills are "
+                    "OFF. Video and the frame index are unaffected." % e)
+        if self._cv2 is not None:
+            self._stills_q = queue.Queue(maxsize=MAX_PENDING_STILLS)
+            self._stills_thread = threading.Thread(
+                target=self._stills_writer, daemon=True, name="stills")
+            self._stills_thread.start()
+            self.get_logger().info(
+                "stills: %.1f Hz at quality %d -> <session>_stills/"
+                % (float(p["stills_hz"]), self._stills_quality))
 
         # ---- telemetry in. Same freshness discipline as every other consumer:
         # a stale pose is not a pose.
@@ -407,6 +465,17 @@ class CameraNode(Node):
         except OSError as e:
             self.get_logger().error("cannot open %s: %s" % (csv_path, e))
             return False
+        stills_dir = None
+        if self._stills_q is not None:
+            stills_dir = os.path.join(self.record_dir, stem + "_stills")
+            try:
+                os.makedirs(stills_dir, exist_ok=True)
+            except OSError as e:
+                # Degraded, not fatal: the video and index still record.
+                self.get_logger().error(
+                    "cannot create %s: %s -- stills off for this session"
+                    % (stills_dir, e))
+                stills_dir = None
         with self._lock:
             self._session = stem
             self._session_started_at = time.monotonic()
@@ -414,6 +483,8 @@ class CameraNode(Node):
             self._pending = []
             self._csv = csv
             self._mkv_path = os.path.join(self.record_dir, stem + ".mkv")
+            self._stills_dir = stills_dir
+            self._last_still_t = 0.0
         self.guard.reset()
         if self.p["record_sd"] and self.siyi.start_recording():
             self._recording_sd = True
@@ -428,6 +499,8 @@ class CameraNode(Node):
             self._session = ""
             self._session_started_at = None
             self._mkv_path = None
+            had_stills = self._stills_dir is not None
+            self._stills_dir = None
         if csv is not None:
             try:
                 for r in rows:
@@ -440,17 +513,27 @@ class CameraNode(Node):
             self._recording_sd = False
         if stem:
             self.get_logger().info("session %s closed" % stem)
+            if had_stills:
+                # Counted, because "the stills folder looked thin" is not
+                # something anyone can reconstruct after the flight.
+                self.get_logger().info(
+                    "stills: %d written, %d dropped"
+                    % (self._stills_written, self._stills_dropped))
 
     # -------------------------------------------------------------- callbacks
 
-    def _on_frame(self, _buf, _w, _h, pts_ns):
+    def _on_frame(self, buf, w, h, pts_ns):
         """GStreamer streaming thread. Keep this short -- upstream queues are
         bounded and a slow callback stalls the pipeline back to the socket.
 
-        The frame BYTES are deliberately dropped here. Nothing subscribes to
-        them yet, and holding them would be the memory cost of a consumer that
-        does not exist. What is kept is the row that makes the frame findable
-        later, which is the whole reason the recording is worth anything.
+        The frame BYTES are handed to the stills writer thread and otherwise
+        dropped. Nothing else subscribes to them. NO ENCODING HAPPENS HERE: a
+        1080p JPEG costs milliseconds, and milliseconds spent on this thread are
+        taken from the RTSP socket, which is shared with the recording branch.
+        The queue put is the whole cost, and it never blocks.
+
+        `buf` is safe to hand across threads -- pipeline._unpack copies it out
+        of the GStreamer buffer with bytes() before unmapping.
         """
         now = time.monotonic()
         ros_ns = self.get_clock().now().nanoseconds
@@ -468,6 +551,7 @@ class CameraNode(Node):
                 gimbal_pitch=(None if math.isnan(self._gimbal_pitch)
                               else self._gimbal_pitch),
                 pose_age_s=age)
+            idx = self._frame_idx
             self._frame_idx += 1
             if len(self._pending) < MAX_PENDING_ROWS:
                 self._pending.append(row)
@@ -475,6 +559,75 @@ class CameraNode(Node):
                 # Dropping the row is better than growing without bound, but it
                 # is a real hole in the index and must not be silent.
                 self.pipe.frames_dropped += 1
+            # Rate-gated INSIDE the lock so two frames cannot both pass the test,
+            # but enqueued outside it: queue.put must never be held under a lock
+            # the status tick also wants.
+            still_job = None
+            if (self._stills_q is not None and self._stills_dir is not None
+                    and now - self._last_still_t >= self._stills_period):
+                self._last_still_t = now
+                still_job = (self._stills_dir, idx, buf, w, h)
+        if still_job is not None:
+            try:
+                self._stills_q.put_nowait(still_job)
+            except queue.Full:
+                # The disk is behind. Stills are the expendable artifact here --
+                # see MAX_PENDING_STILLS.
+                self._stills_dropped += 1
+
+    def _stills_writer(self):
+        """Own thread. Encodes and writes; never touches node state under a lock.
+
+        Writes <frame_idx>.jpg, zero-padded so a directory listing sorts in
+        capture order. The name is the index CSV's frame_idx on purpose: joining
+        a still to its pose is a lookup, not a timestamp search.
+
+        Written to a .part file and renamed. os.replace is atomic within a
+        filesystem, so a power loss mid-write leaves a stray .part rather than a
+        truncated JPEG that a labelling tool will happily load as a grey smear.
+        That matters on an aircraft whose power can be cut by landing on it.
+        """
+        while True:
+            job = self._stills_q.get()
+            if job is None:                     # sentinel from destroy_node
+                return
+            stills_dir, idx, buf, w, h = job
+            try:
+                arr = self._np.frombuffer(buf, dtype=self._np.uint8)
+                expected = w * h * 3
+                if w <= 0 or h <= 0 or arr.size < expected:
+                    self._stills_dropped += 1
+                    continue
+                if arr.size == expected:
+                    img = arr.reshape((h, w, 3))
+                else:
+                    # GStreamer pads each row up to a 4-byte boundary, so a
+                    # width whose stride is not w*3 arrives larger than
+                    # w*h*3. Reshaping the flat buffer anyway produces an
+                    # image that looks progressively sheared -- recognisable
+                    # but useless, and easy to mistake for a camera fault.
+                    stride = arr.size // h
+                    if stride < w * 3:
+                        self._stills_dropped += 1
+                        continue
+                    img = (arr[:stride * h].reshape((h, stride))[:, :w * 3]
+                           .reshape((h, w, 3)))
+                ok, enc = self._cv2.imencode(
+                    ".jpg", img,
+                    [int(self._cv2.IMWRITE_JPEG_QUALITY), self._stills_quality])
+                if not ok:
+                    self._stills_dropped += 1
+                    continue
+                path = os.path.join(stills_dir, "%08d.jpg" % idx)
+                tmp = path + ".part"
+                with open(tmp, "wb") as f:
+                    f.write(enc.tobytes())
+                os.replace(tmp, path)
+                self._stills_written += 1
+            except Exception as e:
+                self._stills_dropped += 1
+                self.get_logger().warn(
+                    "still write failed: %s" % e, throttle_duration_sec=10.0)
 
     def _on_jpeg(self, jpeg):
         self.slot.put(jpeg)
@@ -606,6 +759,16 @@ class CameraNode(Node):
         except Exception:
             pass
         self._end_session()
+        # After _end_session, so the counts it logs are final. The sentinel is
+        # put with a timeout rather than blocking: a wedged writer must not hold
+        # shutdown open, and the thread is a daemon so the process still exits.
+        if self._stills_q is not None:
+            try:
+                self._stills_q.put(None, timeout=2.0)
+                if self._stills_thread is not None:
+                    self._stills_thread.join(timeout=5.0)
+            except Exception:
+                pass
         try:
             self.viewer.stop()
         except Exception:
