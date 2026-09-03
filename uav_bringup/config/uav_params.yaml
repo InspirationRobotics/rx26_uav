@@ -218,7 +218,7 @@ ground_station:
                                            #      for. Rides the workspace
                                            #      bind mount — no extra mount,
                                            #      no socket, no daemon.
-    allow_power: false                     # [RO] master switch for the power
+    allow_power: true                      # [RO] master switch for the power
                                            #      tab. FALSE by default: the
                                            #      host-side .path units must
                                            #      be installed first, and a
@@ -295,20 +295,29 @@ camera_node:
                                            #      as the RTSP stream, different
                                            #      protocol and port.
     siyi_port: 37260                       # [RO] gimbal SDK UDP port
-    gimbal_pitch_deg: 90.0                 # [RO] pitch commanded at startup =
+    gimbal_pitch_deg: -90.0                # [RO] pitch commanded at startup =
                                            #   NADIR. THE SIGN IS UNIT-SPECIFIC.
-                                           #   SIYI documents -90 as full-down;
-                                           #   this airframe's A8 mini aims at
-                                           #   the SKY when sent -90, so nadir
-                                           #   here is +90. Measure it with
-                                           #   tools/siyi_gimbal.py before
-                                           #   trusting either sign on a new
-                                           #   unit — a camera that films the
-                                           #   clouds for a whole sortie looks
-                                           #   exactly like one that works.
+                                           #   SIYI documents -90 as full-down.
+                                           #   CONFIRMED ON EKKO 2026-09-02:
+                                           #   -90 IS nadir on this unit. The
+                                           #   camera was observed by eye aimed
+                                           #   at the ground while
+                                           #   /uav/camera/status reported
+                                           #   gimbal_pitch -89.9.
+                                           #   An EARLIER COMMENT HERE CLAIMED
+                                           #   -90 AIMED AT THE SKY AND +90 WAS
+                                           #   NADIR. That was measured on a
+                                           #   DIFFERENT airframe (Fitz) and is
+                                           #   WRONG for Ekko — do not "restore"
+                                           #   it. Re-measure with
+                                           #   tools/siyi_gimbal.py on any new
+                                           #   unit before trusting either sign:
+                                           #   a camera that films the clouds
+                                           #   for a whole sortie looks exactly
+                                           #   like one that works.
     gimbal_control_enabled: true           # [RO] create the
                                            #   /uav/camera/gimbal_cmd
-                                           #   subscription. TRUE HERE: Fitz is
+                                           #   subscription. TRUE HERE: Ekko is
                                            #   the development airframe and the
                                            #   camera gets re-aimed by hand
                                            #   often enough that not being able
