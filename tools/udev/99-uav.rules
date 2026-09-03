@@ -5,39 +5,38 @@
 # not on the airframe is worse than no symlink: it makes a config file look
 # satisfied while pointing at whatever else happened to enumerate.
 #
-# !! NOT YET CONFIRMED ON THIS AIRFRAME. !!
-# The ASV's equivalent file carries a dated "confirmed aboard" line; this one
-# cannot until someone reads the real board's descriptors on the real Jetson.
-# The four Pixhawk rules below are a CANDIDATE LIST covering the boards we might
-# have, not a statement about the one we do. Confirm and prune it — a rule that
-# matches nothing is harmless, but four rules where one board is expected means
-# nobody has looked.
+# CONFIRMED ABOARD 2026-09-02 (Ekko): CubePilot CubeOrange+, 2dae:1058,
+# serial 430021000951343034383930. The earlier candidate list (26ac, 1209:5741,
+# 1209:5740) has been pruned — none of those boards is on this airframe.
 #
-# Discover attrs for a plugged-in device (install_udev.sh prints these for every
-# attached serial device, which is the fast way):
-#   udevadm info -a -n /dev/ttyACM0 | grep -E 'idVendor|idProduct|serial' | head
-
 # --- Pixhawk (autopilot). Owned EXCLUSIVELY by MAVProxy; everything else uses
 #     the UDP rebroadcast on 14541/14540. The symlink exists so
 #     uav-mavproxy.service never chases ttyACM numbering.
 #
-#     26ac leads because the HAWK'S WORK board in Project.md is a Pixhawk 2.4.8
-#     clone and those usually enumerate as 3DR (26ac:0011). The rest cover a
-#     swap: 1209:5741/5740 ArduPilot/Holybro, 2dae CubePilot.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="26ac", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5741", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5740", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2dae", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
+#     !! ENV{ID_USB_INTERFACE_NUM}=="00" IS LOAD-BEARING. !!
+#     The CubeOrange+ enumerates TWO CDC-ACM interfaces from ONE USB device:
+#       if00 -> the MAVLink port (SERIAL0). This is the one MAVProxy needs.
+#       if02 -> a second interface that answers no MAVLink at all.
+#     A rule matching only ATTRS{idVendor} matches BOTH, so both interfaces
+#     claim the symlink and whichever udev happens to process last wins. That
+#     is a coin flip ON EVERY BOOT. Observed 2026-09-02: before a reboot the
+#     symlink landed on if00 and the aircraft worked; after the reboot it
+#     landed on if02 and MAVProxy sat at "no link" forever with a perfectly
+#     healthy USB cable. Diagnosing that in a field is expensive.
+#
+#     Verify after any change to this file:
+#       ls -l /dev/uav-pixhawk        # must resolve to the if00 ttyACM
+#       udevadm info -q property -n /dev/uav-pixhawk | grep INTERFACE_NUM
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2dae", ATTRS{idProduct}=="1058", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="uav-pixhawk", MODE="0660", GROUP="dialout"
 
 # --- 915MHz telemetry radio (SiK, Silabs CP210x). OPTIONAL: the aircraft flies
-#     without it (the WiFi link carries telemetry), so install_udev.sh does not
-#     warn when it is absent.
+#     without it, so install_udev.sh does not warn when it is absent.
+#     NOTE: Ekko's ground-side radio is an FTDI FT231X (0403:6015), not CP210x.
+#     This rule is for a Silabs radio carried ON the aircraft, if one ever is.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="uav-telem", MODE="0660", GROUP="dialout"
 
-# --- NO RULE for the ELRS receiver. The RP3 talks CRSF to the Pixhawk's RC
-#     input, not USB to the Jetson — it never enumerates here. If something
-#     appears that looks like it, trace the cable before adding a rule.
+# --- NO RULE for the ELRS receiver. It talks CRSF to the Pixhawk's RC input,
+#     not USB to the Jetson — it never enumerates here.
 #
-# --- NO camera rule yet. There is no camera on this airframe; the ASV's OAK-D
-#     usbfs bump is deliberately not carried over. Add both together when one
-#     arrives.
+# --- NO camera rule. The SIYI A8 mini is an ETHERNET device (192.168.144.25 on
+#     enP8p1s0), not USB. Nothing to name here.
