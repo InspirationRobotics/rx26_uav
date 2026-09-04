@@ -322,6 +322,16 @@ function repaintLogs(){
 function clearLogs(){logs=[];logSeq=0;dropped=0;post('/logs/clear').then(repaintLogs)}
 
 /* ---- system ---- */
+/* #power carries the only text input on the page, and renderSys runs at the
+   poll rate. Rewriting its innerHTML destroys that input mid-keystroke: focus
+   goes, the typed text goes, and at POLL=200 the operator cannot land a second
+   character -- the hostname confirmation was impossible to complete. Same
+   hazard the camera <img> and the capture button already dodge. powerSig is
+   the signature of everything the block actually renders; when it is unchanged
+   the block is left completely alone, so the input keeps focus and content.
+   When it DOES change the rebuild is correct and wanted: the shutdown control
+   must vanish the moment the vehicle arms, even if someone is mid-type. */
+var powerSig=null;
 function renderSys(){
   var s=S.sys||{},o=[];
   o.push(card('hostname',esc(s.hostname||'—')));
@@ -333,6 +343,9 @@ function renderSys(){
   o.push(card('uptime',esc(s.uptime||'—')));
   el('sys').innerHTML=o.join('');
   var p=S.power||{},w=s.workspace||{},h=[];
+  var sig=[w.persists,w.source,w.mount,p.allowed,p.reason,s.hostname].join('');
+  if(sig===powerSig)return;
+  powerSig=sig;
   h.push('<div class="grp"><h2>workspace</h2><p class="why">'+
     (w.persists
       ? 'Bind-mounted from <b>'+esc(w.source||'?')+'</b> at <b>'+esc(w.mount||'?')+
