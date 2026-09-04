@@ -409,12 +409,33 @@ camera_node:
                                            #      aircraft to press record with,
                                            #      and an unrecorded flight is a
                                            #      flight flown twice.
-    record_sd: true                        # [RO] also drive the camera's own SD
-                                           #      recording, which is 4K where
-                                           #      the stream caps at 1080p. The
-                                           #      two record paths fail
-                                           #      independently; that is why
-                                           #      both exist.
+    record_sd: true                        # [RO] MAY the node drive the camera's
+                                           #      own SD recording at all. This
+                                           #      is the master enable, not the
+                                           #      switch — see
+                                           #      record_sd_on_start below.
+                                           #      That recording is 3840x2160
+                                           #      H264 at 20 Mbps; the Jetson
+                                           #      stream is 1080p. The two paths
+                                           #      fail independently, which is
+                                           #      why both exist.
+    record_sd_on_start: false              # [RO] begin SD recording the moment
+                                           #      a session opens. FALSE, which
+                                           #      is a change from the original
+                                           #      always-on behaviour: 4K at
+                                           #      20 Mbps is ~9 GB/hour, and the
+                                           #      camera was filling its card
+                                           #      with footage of the bench
+                                           #      whenever the aircraft was
+                                           #      powered.
+                                           #      Turn it on for a sortie with
+                                           #      the REC button on the ground
+                                           #      station's Camera tab, which
+                                           #      calls /uav/camera/sd_record.
+                                           #      The Jetson's own .mkv is NOT
+                                           #      gated by this — it is small
+                                           #      and it carries the geotagged
+                                           #      frame index, so it always runs.
     min_free_mb: 1024.0                    # [RO] stop recording above this
                                            #      floor. Not zero: the muxer
                                            #      still has to write the

@@ -69,7 +69,7 @@ from datetime import datetime, timezone
 
 from geometry_msgs.msg import Vector3
 from rclpy.node import Node
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 
 from uav_msgs.msg import Attitude, CameraStatus, GlobalPos
 
@@ -142,6 +142,10 @@ PARAM_SPEC = {
     "record_on_start": dict(read_only=True,
                             description="begin a session as soon as frames "
                                         "flow, rather than waiting to be asked"),
+    "record_sd_on_start": dict(read_only=True,
+                              description="begin the camera's own SD recording "
+                                          "as soon as a session opens. FALSE by "
+                                          "default: it writes 4K"),
     "record_sd": dict(read_only=True,
                       description="also drive the camera's own SD recording"),
     "min_free_mb": dict(read_only=True, lo=64.0, hi=1_000_000.0,
@@ -232,6 +236,12 @@ class CameraNode(Node):
         self._csv = None
         self._mkv_path = None
         self._recording_sd = False
+        # What the OPERATOR wants, as distinct from what is happening right now.
+        # Kept separate because sessions ROLL every max_session_s: _end_session
+        # stops SD recording, and without a remembered intent the next session
+        # would come up with it off. Someone who pressed REC once would get one
+        # session of footage and silence after that, with the button still lit.
+        self._sd_wanted = bool(p["record_sd_on_start"])
         self._last_frame_count = 0
         self._last_fps_t = None
         self._fps = float("nan")
@@ -376,6 +386,7 @@ class CameraNode(Node):
         # power blip on the camera, a knock while handling the aircraft, a
         # re-centre from UniGCS -- without restarting the node, which would end
         # the recording session to fix a pointing problem.
+        self.create_service(SetBool, "/uav/camera/sd_record", self._on_sd_record)
         self.create_service(Trigger, "/uav/camera/set_nadir",
                             self._on_set_nadir)
 
@@ -407,6 +418,47 @@ class CameraNode(Node):
                            time.monotonic(), msg.header.stamp)
 
     # ----------------------------------------------------------- gimbal in
+
+    def _on_sd_record(self, request, response):
+        """Start or stop the CAMERA's own SD recording. std_srvs/SetBool.
+
+        This gates the camera's 4K writes to its microSD, NOT the Jetson's .mkv.
+        They are separate paths on purpose and fail independently; the Jetson
+        recording is the one carrying the geotagged frame index, so it is never
+        touched here.
+
+        THE INTENT IS REMEMBERED, not just applied. Sessions roll every
+        max_session_s and _end_session stops SD recording, so a request that
+        only changed the current state would give the operator one session of
+        footage and then silence, with the button still lit.
+
+        THE UNDERLYING COMMAND IS A TOGGLE, NOT A SET. siyi_client's start and
+        stop send the identical frame on this firmware, so sending it while
+        already in the wanted state would flip the camera to the opposite of
+        what was asked. Hence the early return when nothing needs to change --
+        it is the difference between idempotent and actively wrong.
+        """
+        if not self.p["record_sd"]:
+            response.success = False
+            response.message = ("record_sd is false in uav_params.yaml; SD "
+                                "recording is disabled for this airframe")
+            return response
+        want = bool(request.data)
+        self._sd_wanted = want
+        if self._recording_sd == want:
+            response.success = True
+            response.message = "SD recording already %s" % ("ON" if want else "OFF")
+            return response
+        ok = self.siyi.start_recording() if want else self.siyi.stop_recording()
+        if ok:
+            self._recording_sd = want
+        response.success = bool(ok)
+        response.message = (
+            "SD recording %s" % ("ON" if want else "OFF") if ok else
+            "no ack for the SD record toggle -- it may still have taken. Watch "
+            "recording_sd on /uav/camera/status, which is measured.")
+        self.get_logger().info("sd_record request %s: %s" % (want, response.message))
+        return response
 
     def _on_set_nadir(self, request, response):
         """Re-command the configured nadir angle. std_srvs/Trigger.
@@ -573,7 +625,7 @@ class CameraNode(Node):
             self._stills_dir = stills_dir
             self._last_still_t = 0.0
         self.guard.reset()
-        if self.p["record_sd"] and self.siyi.start_recording():
+        if self.p["record_sd"] and self._sd_wanted and self.siyi.start_recording():
             self._recording_sd = True
         self.get_logger().info("recording session %s" % stem)
         return True

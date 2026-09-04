@@ -128,7 +128,7 @@ select,input{font:inherit;background:#232a34;color:var(--fg);
     misses output written straight to stdout, and anything printed before a node
     finished constructing, which is exactly when a bad parameter kills one.</p>
   </section>
-  <section id="s-cam"><div id="cam"></div>
+  <section id="s-cam"><div id="camrec"></div><div id="cam"></div>
     <p class="hint">The video is served by <code>camera_node</code> on its own
     port, not proxied through this one — megabytes of MJPEG through the
     ground station's snapshot path would make a stalled camera look like a
@@ -361,7 +361,26 @@ function power(v){post('/power',{verb:v,confirm:(el('pwconf')||{}).value||''})}
    tear the stream down and rebuild it five times a second. camSrc remembers
    what is already showing so the common case touches nothing. */
 var camSrc=null;
+/* The REC control lives in its OWN div, deliberately not inside #cam. That box
+   is rewritten whenever the video source changes, and a button rebuilt under
+   the operator's cursor mid-press is a button that misses the press. */
+function sdRecord(on){post('/camera/sd_record',{on:on}).then(poll)}
+function renderCamRec(){
+  var c=S.cam||{},b=el('camrec'); if(!b)return;
+  if(!c.source){b.innerHTML='';return}
+  var r=c.recording_sd;
+  if(r===null||r===undefined){
+    b.innerHTML='<span class="note">SD recording state unknown — '
+      +'/uav/camera/status is stale</span>';
+    return;
+  }
+  b.innerHTML='<button onclick="sdRecord('+(r?'false':'true')+')">'
+    +(r?'■ stop SD recording':'● start SD recording')+'</button> '
+    +'<span class="note">camera 4K → microSD: <b>'+(r?'RECORDING':'off')
+    +'</b> — the Jetson .mkv and the frame index record regardless</span>';
+}
 function renderCam(){
+  renderCamRec();
   var c=S.cam||{},host=location.hostname,box=el('cam');
   if(!c.source){
     camSrc=null;

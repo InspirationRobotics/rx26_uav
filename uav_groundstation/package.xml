@@ -22,6 +22,7 @@
        journalctl, which a container cannot reach. -->
   <depend>rcl_interfaces</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>uav_msgs</depend>
   <depend>uav_common</depend>
 

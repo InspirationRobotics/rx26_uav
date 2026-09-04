@@ -43,7 +43,9 @@ from rclpy.node import Node
 
 from rcl_interfaces.msg import Log
 
-from uav_msgs.msg import Attitude, FcuStatus, FlightState, GlobalPos
+from std_srvs.srv import SetBool
+from uav_msgs.msg import (Attitude, CameraStatus, FcuStatus, FlightState,
+                          GlobalPos)
 
 from uav_common import config as uav_config
 from uav_common import geo
@@ -152,6 +154,19 @@ class GroundStation(Node):
         self.create_subscription(FcuStatus, "/uav/fcu_status", self._on_status, 10)
         self.create_subscription(FlightState, "/uav/flight_state",
                                  self._on_flight, 10)
+
+        # Camera status is read ONLY so the REC button can show what is actually
+        # happening. recording_sd on this topic is MEASURED by camera_node, not
+        # the last thing anybody asked for, and the A8 mini's record command is a
+        # toggle whose ack can be lost -- so a button driven by intent rather
+        # than by this would eventually show the opposite of the truth.
+        self._cam_status = StreamCache(float(p["status_timeout_s"]))
+        self.create_subscription(CameraStatus, "/uav/camera/status",
+                                 self._on_cam_status, 10)
+        # Created eagerly, called rarely. A client that is only built on first
+        # use makes the first press of REC slower than every later one, which
+        # reads as the button being broken.
+        self._sd_record_cli = self.create_client(SetBool, "/uav/camera/sd_record")
 
         self._workspace = self._check_workspace(p["workspace_path"])
 
@@ -330,6 +345,9 @@ class GroundStation(Node):
             "cam": self._cam_state(running),
         }
 
+    def _on_cam_status(self, msg):
+        self._cam_status.set(bool(msg.recording_sd), time.monotonic())
+
     def _cam_state(self, running):
         """What the Camera tab should point at, if anything.
 
@@ -345,11 +363,15 @@ class GroundStation(Node):
             return {"source": None, "starting": False}
         serving = {spec.name} if self._port_open(spec.port) else set()
         name, starting = reg.tab_source((spec.name,), running, serving)
+        rec = self._cam_status.get(time.monotonic())
         return {
             "source": name,
             "starting": starting,
             "port": spec.port,
             "path": spec.stream_path,
+            # None (not False) when the status topic is stale, so the page can
+            # grey the button out rather than assert a state it cannot see.
+            "recording_sd": rec,
         }
 
     def _port_open(self, port):
@@ -482,9 +504,44 @@ class GroundStation(Node):
         if path == "/map/clear_trail":
             self._trail.clear()
             return {"ok": True, "message": "trail cleared"}
+        if path == "/camera/sd_record":
+            return self._act_sd_record(payload)
         if path == "/power":
             return self._act_power(payload)
         return {"ok": False, "message": "unknown action %s" % path}
+
+    def _act_sd_record(self, payload):
+        """Turn the CAMERA's own 4K SD recording on or off.
+
+        Gates only the camera's microSD writes. The Jetson's .mkv and the frame
+        index are never affected -- they are small and they are what makes a
+        sortie geo-referenceable, so they always run.
+
+        WAITING ON THE FUTURE HERE IS SAFE, AND ONLY HERE. This runs on the HTTP
+        server's thread, never inside a ROS callback, so the executor spinning in
+        the main thread is free to complete the call. That is also why it polls
+        done() instead of spin_until_future_complete: spinning from this thread
+        would fight the executor that already owns this node.
+        """
+        if "on" not in payload:
+            return {"ok": False, "message": 'expected {"on": true} or {"on": false}'}
+        want = bool(payload["on"])
+        if not self._sd_record_cli.service_is_ready():
+            return {"ok": False,
+                    "message": "camera_node is not offering /uav/camera/sd_record"
+                               " — is it running?"}
+        req = SetBool.Request()
+        req.data = want
+        fut = self._sd_record_cli.call_async(req)
+        deadline = time.monotonic() + 5.0
+        while not fut.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not fut.done():
+            return {"ok": False,
+                    "message": "camera_node did not answer within 5s; SD state "
+                               "is unchanged as far as this page knows"}
+        res = fut.result()
+        return {"ok": bool(res.success), "message": res.message}
 
     def _act_start(self, name):
         spec = reg.BY_NAME.get(name)
