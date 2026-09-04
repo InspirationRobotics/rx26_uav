@@ -166,7 +166,7 @@ class GroundStation(Node):
         # Created eagerly, called rarely. A client that is only built on first
         # use makes the first press of REC slower than every later one, which
         # reads as the button being broken.
-        self._sd_record_cli = self.create_client(SetBool, "/uav/camera/sd_record")
+        self._capture_cli = self.create_client(SetBool, "/uav/camera/capture")
 
         self._workspace = self._check_workspace(p["workspace_path"])
 
@@ -504,18 +504,18 @@ class GroundStation(Node):
         if path == "/map/clear_trail":
             self._trail.clear()
             return {"ok": True, "message": "trail cleared"}
-        if path == "/camera/sd_record":
-            return self._act_sd_record(payload)
+        if path == "/camera/capture":
+            return self._act_capture(payload)
         if path == "/power":
             return self._act_power(payload)
         return {"ok": False, "message": "unknown action %s" % path}
 
-    def _act_sd_record(self, payload):
-        """Turn the CAMERA's own 4K SD recording on or off.
+    def _act_capture(self, payload):
+        """Turn CAPTURE on or off: the camera's 4K SD recording and the stills.
 
-        Gates only the camera's microSD writes. The Jetson's .mkv and the frame
-        index are never affected -- they are small and they are what makes a
-        sortie geo-referenceable, so they always run.
+        Not the .mkv and not the frame index -- those are the flight record and
+        always run, because a sortie nobody can diagnose is worse than a few
+        hundred MB.
 
         WAITING ON THE FUTURE HERE IS SAFE, AND ONLY HERE. This runs on the HTTP
         server's thread, never inside a ROS callback, so the executor spinning in
@@ -526,13 +526,13 @@ class GroundStation(Node):
         if "on" not in payload:
             return {"ok": False, "message": 'expected {"on": true} or {"on": false}'}
         want = bool(payload["on"])
-        if not self._sd_record_cli.service_is_ready():
+        if not self._capture_cli.service_is_ready():
             return {"ok": False,
-                    "message": "camera_node is not offering /uav/camera/sd_record"
+                    "message": "camera_node is not offering /uav/camera/capture"
                                " — is it running?"}
         req = SetBool.Request()
         req.data = want
-        fut = self._sd_record_cli.call_async(req)
+        fut = self._capture_cli.call_async(req)
         deadline = time.monotonic() + 5.0
         while not fut.done() and time.monotonic() < deadline:
             time.sleep(0.05)

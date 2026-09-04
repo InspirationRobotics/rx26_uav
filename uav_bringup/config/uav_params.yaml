@@ -419,7 +419,7 @@ camera_node:
                                            #      stream is 1080p. The two paths
                                            #      fail independently, which is
                                            #      why both exist.
-    record_sd_on_start: false              # [RO] begin SD recording the moment
+    capture_on_start: false                # [RO] begin CAPTURE the moment
                                            #      a session opens. FALSE, which
                                            #      is a change from the original
                                            #      always-on behaviour: 4K at
@@ -428,10 +428,15 @@ camera_node:
                                            #      with footage of the bench
                                            #      whenever the aircraft was
                                            #      powered.
+                                           #      CAPTURE = the camera's 4K SD
+                                           #      recording AND the JPEG stills,
+                                           #      the two things that cost real
+                                           #      storage (~9 and ~0.9 GB/hour).
                                            #      Turn it on for a sortie with
-                                           #      the REC button on the ground
-                                           #      station's Camera tab, which
-                                           #      calls /uav/camera/sd_record.
+                                           #      the capture button on the
+                                           #      ground station's Camera tab,
+                                           #      which calls
+                                           #      /uav/camera/capture.
                                            #      The Jetson's own .mkv is NOT
                                            #      gated by this — it is small
                                            #      and it carries the geotagged

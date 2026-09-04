@@ -142,10 +142,10 @@ PARAM_SPEC = {
     "record_on_start": dict(read_only=True,
                             description="begin a session as soon as frames "
                                         "flow, rather than waiting to be asked"),
-    "record_sd_on_start": dict(read_only=True,
-                              description="begin the camera's own SD recording "
-                                          "as soon as a session opens. FALSE by "
-                                          "default: it writes 4K"),
+    "capture_on_start": dict(read_only=True,
+                             description="begin CAPTURE (camera SD recording + "
+                                         "JPEG stills) as soon as a session "
+                                         "opens. FALSE by default"),
     "record_sd": dict(read_only=True,
                       description="also drive the camera's own SD recording"),
     "min_free_mb": dict(read_only=True, lo=64.0, hi=1_000_000.0,
@@ -241,7 +241,7 @@ class CameraNode(Node):
         # stops SD recording, and without a remembered intent the next session
         # would come up with it off. Someone who pressed REC once would get one
         # session of footage and silence after that, with the button still lit.
-        self._sd_wanted = bool(p["record_sd_on_start"])
+        self._capture_wanted = bool(p["capture_on_start"])
         self._last_frame_count = 0
         self._last_fps_t = None
         self._fps = float("nan")
@@ -386,7 +386,7 @@ class CameraNode(Node):
         # power blip on the camera, a knock while handling the aircraft, a
         # re-centre from UniGCS -- without restarting the node, which would end
         # the recording session to fix a pointing problem.
-        self.create_service(SetBool, "/uav/camera/sd_record", self._on_sd_record)
+        self.create_service(SetBool, "/uav/camera/capture", self._on_capture)
         self.create_service(Trigger, "/uav/camera/set_nadir",
                             self._on_set_nadir)
 
@@ -419,13 +419,19 @@ class CameraNode(Node):
 
     # ----------------------------------------------------------- gimbal in
 
-    def _on_sd_record(self, request, response):
-        """Start or stop the CAMERA's own SD recording. std_srvs/SetBool.
+    def _on_capture(self, request, response):
+        """Start or stop CAPTURE. std_srvs/SetBool.
 
-        This gates the camera's 4K writes to its microSD, NOT the Jetson's .mkv.
-        They are separate paths on purpose and fail independently; the Jetson
-        recording is the one carrying the geotagged frame index, so it is never
-        touched here.
+        Capture means the two things that exist to collect a dataset and cost
+        real storage:
+
+          * the camera's own 4K SD recording   ~9 GB/hour
+          * the Jetson's JPEG stills           ~0.9 GB/hour at 1080p
+
+        It does NOT gate the .mkv or the frame index. Those are the flight
+        record: ~0.7 GB/hour between them, and the index is what makes any of
+        this geo-referenceable. They always run, so a sortie is never
+        undiagnosable because somebody forgot to press a button.
 
         THE INTENT IS REMEMBERED, not just applied. Sessions roll every
         max_session_s and _end_session stops SD recording, so a request that
@@ -444,7 +450,11 @@ class CameraNode(Node):
                                 "recording is disabled for this airframe")
             return response
         want = bool(request.data)
-        self._sd_wanted = want
+        self._capture_wanted = want
+        # Stills follow the same intent, and take effect on the NEXT session so
+        # the current session's index and its stills folder stay consistent with
+        # each other -- a folder that starts or stops filling mid-session makes
+        # frame_idx gaps that look like dropped frames.
         if self._recording_sd == want:
             response.success = True
             response.message = "SD recording already %s" % ("ON" if want else "OFF")
@@ -457,7 +467,7 @@ class CameraNode(Node):
             "SD recording %s" % ("ON" if want else "OFF") if ok else
             "no ack for the SD record toggle -- it may still have taken. Watch "
             "recording_sd on /uav/camera/status, which is measured.")
-        self.get_logger().info("sd_record request %s: %s" % (want, response.message))
+        self.get_logger().info("capture request %s: %s" % (want, response.message))
         return response
 
     def _on_set_nadir(self, request, response):
@@ -605,7 +615,10 @@ class CameraNode(Node):
             self.get_logger().error("cannot open %s: %s" % (csv_path, e))
             return False
         stills_dir = None
-        if self._stills_q is not None:
+        # Gated on the SAME operator intent as the SD recording. Stills cost
+        # ~0.9 GB/hour at 1080p and, left always-on, fill the disk with pictures
+        # of whatever the aircraft was parked over.
+        if self._stills_q is not None and self._capture_wanted:
             stills_dir = os.path.join(self.record_dir, stem + "_stills")
             try:
                 os.makedirs(stills_dir, exist_ok=True)
@@ -625,7 +638,7 @@ class CameraNode(Node):
             self._stills_dir = stills_dir
             self._last_still_t = 0.0
         self.guard.reset()
-        if self.p["record_sd"] and self._sd_wanted and self.siyi.start_recording():
+        if self.p["record_sd"] and self._capture_wanted and self.siyi.start_recording():
             self._recording_sd = True
         self.get_logger().info("recording session %s" % stem)
         return True

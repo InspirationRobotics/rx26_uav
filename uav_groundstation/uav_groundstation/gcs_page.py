@@ -364,20 +364,21 @@ var camSrc=null;
 /* The REC control lives in its OWN div, deliberately not inside #cam. That box
    is rewritten whenever the video source changes, and a button rebuilt under
    the operator's cursor mid-press is a button that misses the press. */
-function sdRecord(on){post('/camera/sd_record',{on:on}).then(poll)}
+function setCapture(on){post('/camera/capture',{on:on}).then(poll)}
 function renderCamRec(){
   var c=S.cam||{},b=el('camrec'); if(!b)return;
   if(!c.source){b.innerHTML='';return}
   var r=c.recording_sd;
   if(r===null||r===undefined){
-    b.innerHTML='<span class="note">SD recording state unknown — '
+    b.innerHTML='<span class="note">capture state unknown — '
       +'/uav/camera/status is stale</span>';
     return;
   }
-  b.innerHTML='<button onclick="sdRecord('+(r?'false':'true')+')">'
-    +(r?'■ stop SD recording':'● start SD recording')+'</button> '
-    +'<span class="note">camera 4K → microSD: <b>'+(r?'RECORDING':'off')
-    +'</b> — the Jetson .mkv and the frame index record regardless</span>';
+  b.innerHTML='<button onclick="setCapture('+(r?'false':'true')+')">'
+    +(r?'■ stop capture':'● start capture')+'</button> '
+    +'<span class="note">camera 4K to microSD + JPEG stills: <b>'
+    +(r?'CAPTURING':'off')+'</b> — stills follow on the next session. '
+    +'The .mkv and frame index always record.</span>';
 }
 function renderCam(){
   renderCamRec();
