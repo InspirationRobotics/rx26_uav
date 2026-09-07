@@ -419,6 +419,26 @@ class CameraNode(Node):
 
     # ----------------------------------------------------------- gimbal in
 
+    def _apply_stills_intent(self, want):
+        """Start or stop stills on the CURRENTLY OPEN session.
+
+        Reads and mutates _stills_dir under the lock because _on_frame consults
+        it on the capture thread; this runs on the executor thread.
+        """
+        with self._lock:
+            stem = self._session
+            have = self._stills_dir is not None
+        if stem is None or want == have:
+            return                      # no session yet, or already as asked
+        d = self._open_stills_dir(stem) if want else None
+        with self._lock:
+            self._stills_dir = d
+            # Write the first still on the very next frame rather than waiting
+            # out a stills_period that started counting long ago.
+            self._last_still_t = 0.0
+        self.get_logger().info(
+            "stills %s for session %s" % ("ON" if d else "OFF", stem))
+
     def _on_capture(self, request, response):
         """Start or stop CAPTURE. std_srvs/SetBool.
 
@@ -451,10 +471,15 @@ class CameraNode(Node):
             return response
         want = bool(request.data)
         self._capture_wanted = want
-        # Stills follow the same intent, and take effect on the NEXT session so
-        # the current session's index and its stills folder stay consistent with
-        # each other -- a folder that starts or stops filling mid-session makes
-        # frame_idx gaps that look like dropped frames.
+        # Stills follow the same intent and take effect ON THE LIVE SESSION.
+        # They used to wait for the next session so a stills folder always
+        # spanned its whole index; that cost the operator up to max_session_s
+        # (600 s) standing at the field after pressing the button, which is a
+        # far worse problem than a tidy index. Starting mid-session leaves the
+        # folder covering only part of the frame range -- that is expected, not
+        # dropped frames: every frame is still in the CSV, and stills are named
+        # by frame_idx, so where they begin is exactly where capture was armed.
+        self._apply_stills_intent(want)
         if self._recording_sd == want:
             response.success = True
             response.message = "SD recording already %s" % ("ON" if want else "OFF")
@@ -604,6 +629,25 @@ class CameraNode(Node):
 
     # --------------------------------------------------------------- sessions
 
+    def _open_stills_dir(self, stem):
+        """Create (or reuse) the stills folder for `stem`. None if unusable.
+
+        Shared by session start and the live capture toggle, which must agree:
+        the operator pressing the button mid-session has to land in exactly the
+        same folder the session would have opened for itself.
+        """
+        if self._stills_q is None:
+            return None
+        d = os.path.join(self.record_dir, stem + "_stills")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as e:
+            # Degraded, not fatal: the video and index still record.
+            self.get_logger().error(
+                "cannot create %s: %s -- stills off for this session" % (d, e))
+            return None
+        return d
+
     def _start_session(self):
         """Open a new .mkv + _frames.csv pair sharing one UTC stem."""
         stem = recorder_core.session_stem(datetime.now(timezone.utc))
@@ -618,16 +662,8 @@ class CameraNode(Node):
         # Gated on the SAME operator intent as the SD recording. Stills cost
         # ~0.9 GB/hour at 1080p and, left always-on, fill the disk with pictures
         # of whatever the aircraft was parked over.
-        if self._stills_q is not None and self._capture_wanted:
-            stills_dir = os.path.join(self.record_dir, stem + "_stills")
-            try:
-                os.makedirs(stills_dir, exist_ok=True)
-            except OSError as e:
-                # Degraded, not fatal: the video and index still record.
-                self.get_logger().error(
-                    "cannot create %s: %s -- stills off for this session"
-                    % (stills_dir, e))
-                stills_dir = None
+        if self._capture_wanted:
+            stills_dir = self._open_stills_dir(stem)
         with self._lock:
             self._session = stem
             self._session_started_at = time.monotonic()

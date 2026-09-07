@@ -390,7 +390,7 @@ function renderCamRec(){
   b.innerHTML='<button onclick="setCapture('+(r?'false':'true')+')">'
     +(r?'■ stop capture':'● start capture')+'</button> '
     +'<span class="note">camera 4K to microSD + JPEG stills: <b>'
-    +(r?'CAPTURING':'off')+'</b> — stills follow on the next session. '
+    +(r?'CAPTURING':'off')+'</b> — takes effect immediately. '
     +'The .mkv and frame index always record.</span>';
 }
 function renderCam(){
