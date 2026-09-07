@@ -162,6 +162,18 @@ function show(t){tab=t;TABS.forEach(function(p){
   }).join('')})();
 
 /* ---- nodes ---- */
+/* Every render below runs at the poll rate. Assigning innerHTML destroys and
+   rebuilds the whole subtree, and a control rebuilt between mousedown and
+   mouseup never fires its click. That is not theoretical: it is how the capture
+   button and the shutdown hostname field both became unusable, five rebuilds a
+   second each. paint() writes only when the markup actually changed, so a
+   control the operator is touching is left completely alone. Use it for
+   ANY block containing a button or an input. */
+function paint(id,html){
+  var e=el(id); if(!e)return;
+  if(e.__html===html)return;
+  e.__html=html; e.innerHTML=html;
+}
 function renderNodes(){
   var g=S.groups||[],out=[];
   g.forEach(function(grp){
@@ -177,7 +189,7 @@ function renderNodes(){
     });
     out.push('</div>');
   });
-  el('nodes').innerHTML=out.join('')||'<p class="hint">no registry</p>';
+  paint('nodes',out.join('')||'<p class="hint">no registry</p>');
 }
 function nodeAct(v,n){post('/node/'+v,{name:n}).then(poll)}
 
@@ -322,16 +334,10 @@ function repaintLogs(){
 function clearLogs(){logs=[];logSeq=0;dropped=0;post('/logs/clear').then(repaintLogs)}
 
 /* ---- system ---- */
-/* #power carries the only text input on the page, and renderSys runs at the
-   poll rate. Rewriting its innerHTML destroys that input mid-keystroke: focus
-   goes, the typed text goes, and at POLL=200 the operator cannot land a second
-   character -- the hostname confirmation was impossible to complete. Same
-   hazard the camera <img> and the capture button already dodge. powerSig is
-   the signature of everything the block actually renders; when it is unchanged
-   the block is left completely alone, so the input keeps focus and content.
-   When it DOES change the rebuild is correct and wanted: the shutdown control
+/* #power carries the only text input on the page. It goes through paint() for
+   the same reason the buttons do -- see the note there. The rebuild that DOES
+   happen when the markup changes is correct and wanted: the shutdown control
    must vanish the moment the vehicle arms, even if someone is mid-type. */
-var powerSig=null;
 function renderSys(){
   var s=S.sys||{},o=[];
   o.push(card('hostname',esc(s.hostname||'—')));
@@ -343,9 +349,6 @@ function renderSys(){
   o.push(card('uptime',esc(s.uptime||'—')));
   el('sys').innerHTML=o.join('');
   var p=S.power||{},w=s.workspace||{},h=[];
-  var sig=[w.persists,w.source,w.mount,p.allowed,p.reason,s.hostname].join('');
-  if(sig===powerSig)return;
-  powerSig=sig;
   h.push('<div class="grp"><h2>workspace</h2><p class="why">'+
     (w.persists
       ? 'Bind-mounted from <b>'+esc(w.source||'?')+'</b> at <b>'+esc(w.mount||'?')+
@@ -363,7 +366,7 @@ function renderSys(){
       '<button class="danger" onclick="power(\'reboot\')">reboot</button></div>');
   }
   h.push('</div>');
-  el('power').innerHTML=h.join('');
+  paint('power',h.join(''));
 }
 function power(v){post('/power',{verb:v,confirm:(el('pwconf')||{}).value||''})}
 
@@ -379,19 +382,20 @@ var camSrc=null;
    the operator's cursor mid-press is a button that misses the press. */
 function setCapture(on){post('/camera/capture',{on:on}).then(poll)}
 function renderCamRec(){
-  var c=S.cam||{},b=el('camrec'); if(!b)return;
-  if(!c.source){b.innerHTML='';return}
-  var r=c.recording_sd;
-  if(r===null||r===undefined){
-    b.innerHTML='<span class="note">capture state unknown — '
+  var c=S.cam||{},r=c.recording_sd,html;
+  if(!c.source){
+    html='';
+  }else if(r===null||r===undefined){
+    html='<span class="note">capture state unknown — '
       +'/uav/camera/status is stale</span>';
-    return;
+  }else{
+    html='<button onclick="setCapture('+(r?'false':'true')+')">'
+      +(r?'■ stop capture':'● start capture')+'</button> '
+      +'<span class="note">camera 4K to microSD + JPEG stills: <b>'
+      +(r?'CAPTURING':'off')+'</b> — takes effect immediately. '
+      +'The .mkv and frame index always record.</span>';
   }
-  b.innerHTML='<button onclick="setCapture('+(r?'false':'true')+')">'
-    +(r?'■ stop capture':'● start capture')+'</button> '
-    +'<span class="note">camera 4K to microSD + JPEG stills: <b>'
-    +(r?'CAPTURING':'off')+'</b> — takes effect immediately. '
-    +'The .mkv and frame index always record.</span>';
+  paint('camrec',html);
 }
 function renderCam(){
   renderCamRec();
