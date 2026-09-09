@@ -236,7 +236,7 @@ echo "== [5/7] systemd units =="
 echo "   container:  $UAV_CONTAINER"
 # FULL FILENAMES, because the power pair are .path units, not .service ones.
 UNITS=(uav-mavproxy.service uav-container.service uav-groundstation.service
-       uav-ocs-client.service uav-camera.service
+       uav-ocs-client.service uav-camera.service uav-telemetry-bridge.service
        uav-shutdown.path uav-shutdown.service
        uav-reboot.path uav-reboot.service)
 # ENABLE IS A DIFFERENT LIST. uav-shutdown.service and uav-reboot.service are
@@ -244,10 +244,12 @@ UNITS=(uav-mavproxy.service uav-container.service uav-groundstation.service
 # enabling them directly would power the Jetson off, or reboot it, every single
 # time it finished booting.
 ENABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client uav-camera
+        uav-telemetry-bridge
         uav-shutdown.path uav-reboot.path)
 # The long-running ones, for the "start now" hint. `enable` is what arms a .path
 # unit; starting the oneshot it triggers would BE the shutdown.
-STARTABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client uav-camera)
+STARTABLE=(uav-mavproxy uav-container uav-groundstation uav-ocs-client uav-camera
+           uav-telemetry-bridge)
 for unit in "${UNITS[@]}"; do
   sed -e "s|__UAV_USER__|$UAV_USER|g" \
       -e "s|__UAV_REPO__|$UAV_REPO|g" \

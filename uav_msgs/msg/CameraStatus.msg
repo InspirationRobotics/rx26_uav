@@ -57,6 +57,23 @@ uint64 frame_index
 # discovered afterwards in an empty file.
 float64 disk_free_mb
 
+# WHY THIS SESSION IS BEING KEPT, OR WHY IT WILL BE THROWN AWAY.
+#
+# Recording always runs; what varies is whether the files SURVIVE. A session is
+# kept if the aircraft was armed at any point during it, or if the operator
+# asked for capture. Anything else is bench footage and is deleted when the
+# session closes, which is what stops hours of the aircraft sitting still from
+# filling the card.
+#
+# This is a human-readable reason rather than a bool because the interesting
+# case is not "keeping or discarding" but WHY -- and the worst version of this
+# feature is one that silently throws away a sortie because telemetry_bridge
+# was not running. That case says so here, in those words, and the ground
+# station shows it.
+#
+# Empty string when no session is open.
+string record_gate
+
 # ---------------------------------------------------------------- gimbal
 
 # MEASURED gimbal pitch in degrees, not the commanded value. Nadir is -90.

@@ -71,7 +71,7 @@ from geometry_msgs.msg import Vector3
 from rclpy.node import Node
 from std_srvs.srv import SetBool, Trigger
 
-from uav_msgs.msg import Attitude, CameraStatus, GlobalPos
+from uav_msgs.msg import Attitude, CameraStatus, FcuStatus, GlobalPos
 
 from uav_common import config as uav_config
 from uav_common.node_main import run_node
@@ -242,6 +242,26 @@ class CameraNode(Node):
         # would come up with it off. Someone who pressed REC once would get one
         # session of footage and silence after that, with the button still lit.
         self._capture_wanted = bool(p["capture_on_start"])
+
+        # ---- what decides whether a session's files are KEPT
+        #
+        # Recording always runs. These decide whether it survives.
+        #
+        # _fcu_seen is deliberately separate from "armed right now". Never
+        # having heard from the autopilot at all means telemetry_bridge is not
+        # running, which on this aircraft means somebody is at the bench -- the
+        # bridge has no systemd unit and is started by hand from the ground
+        # station. Treating that as "not flying" is what makes the space saving
+        # real; treating it as "unknown, keep everything" would preserve exactly
+        # the bench sessions this exists to remove.
+        #
+        # Latched per session rather than sampled at close: a sortie that armed,
+        # flew and disarmed before the session rolled must still be kept, and
+        # the state at the closing instant would say disarmed.
+        self._fcu_seen = False
+        self._session_saw_armed = False
+        self._session_saw_capture = bool(self._capture_wanted)
+        self._discard_queue = []
         self._last_frame_count = 0
         self._last_fps_t = None
         self._fps = float("nan")
@@ -314,6 +334,7 @@ class CameraNode(Node):
         self.gimbal_cache = StreamCache(float(p["gimbal_timeout_s"]))
         self.create_subscription(GlobalPos, "/uav/pose", self._on_pose, 10)
         self.create_subscription(Attitude, "/uav/attitude", self._on_att, 10)
+        self.create_subscription(FcuStatus, "/uav/fcu_status", self._on_fcu, 10)
 
         self.status_pub = self.create_publisher(
             CameraStatus, "/uav/camera/status", 10)
@@ -398,7 +419,8 @@ class CameraNode(Node):
             on_error=self._on_pipeline_error,
             want_frames=bool(p["want_frames"]),
             preview_fps=int(p["preview_fps"]),
-            latency_ms=int(p["rtsp_latency_ms"]))
+            latency_ms=int(p["rtsp_latency_ms"]),
+            next_record_path=self._next_record_path)
 
         if p["record_on_start"]:
             self._start_session()
@@ -471,6 +493,12 @@ class CameraNode(Node):
             return response
         want = bool(request.data)
         self._capture_wanted = want
+        # Latch on the open session too. Pressing the button is the operator
+        # saying "this one matters", and it has to save the session already in
+        # progress -- not merely the next one -- or the footage they pressed it
+        # for is the footage that gets discarded.
+        if want:
+            self._session_saw_capture = True
         # Stills follow the same intent and take effect ON THE LIVE SESSION.
         # They used to wait for the next session so a stills folder always
         # spanned its whole index; that cost the operator up to max_session_s
@@ -679,7 +707,81 @@ class CameraNode(Node):
         self.get_logger().info("recording session %s" % stem)
         return True
 
+    def _on_fcu(self, msg):
+        """Autopilot heartbeat. The only thing read here is `armed`.
+
+        Latches rather than tracks: once a session has seen the aircraft armed
+        it is a flight, and nothing later in that session can make it bench
+        footage again.
+        """
+        self._fcu_seen = True
+        if msg.armed:
+            self._session_saw_armed = True
+
+    def _record_gate(self):
+        """Why the open session will be kept, or why it will be discarded.
+
+        Returns (keep, reason). The reason is published and shown to the
+        operator, so it is written for someone standing at the field rather
+        than for a log reader.
+        """
+        if self._session_saw_armed:
+            return True, "keeping: aircraft armed"
+        if self._session_saw_capture:
+            return True, "keeping: capture requested"
+        if not self._fcu_seen:
+            return False, ("will discard: no FCU status -- is telemetry_bridge "
+                           "running?")
+        return False, "will discard: never armed"
+
+    def _drain_discards(self):
+        """Delete the files of sessions that closed as bench footage.
+
+        Deferred by a tick on purpose. _end_session runs BEFORE splitmuxsink is
+        told to split, so at that moment the .mkv is still open and being
+        written; deleting it there removes a file the muxer then finalises,
+        which on some filesystems resurrects a zero-length ghost and on all of
+        them loses the error. One tick later the split has completed.
+        """
+        if not self._discard_queue:
+            return
+        stems, self._discard_queue = self._discard_queue, []
+        for stem in stems:
+            freed = 0
+            for path in (os.path.join(self.record_dir, stem + ".mkv"),
+                         os.path.join(self.record_dir, stem + "_frames.csv"),
+                         os.path.join(self.record_dir, stem + "_stills")):
+                try:
+                    if os.path.isdir(path):
+                        for root, _, files in os.walk(path):
+                            for f in files:
+                                fp = os.path.join(root, f)
+                                freed += os.path.getsize(fp)
+                        shutil.rmtree(path)
+                    elif os.path.exists(path):
+                        freed += os.path.getsize(path)
+                        os.remove(path)
+                except OSError as e:
+                    self.get_logger().warning(
+                        "could not discard %s: %s" % (path, e))
+            self.get_logger().info(
+                "discarded bench session %s (%.0f MB)" % (stem, freed / 1e6))
+
+    def _next_record_path(self):
+        """Filename for the recording file splitmuxsink is about to open.
+
+        Called on GStreamer's thread, so it takes the lock and returns fast.
+        The node is the only thing that knows the session stem, which is why
+        the pipeline asks rather than deriving a name of its own -- two counters
+        agreeing is a weaker guarantee than one value read twice.
+        """
+        with self._lock:
+            return self._mkv_path
+
     def _end_session(self):
+        # Decide BEFORE the lock clears the latches, and queue rather than
+        # delete: at this instant splitmuxsink still has the .mkv open.
+        keep, reason = self._record_gate()
         with self._lock:
             csv, stem = self._csv, self._session
             rows, self._pending = self._pending, []
@@ -689,6 +791,14 @@ class CameraNode(Node):
             self._mkv_path = None
             had_stills = self._stills_dir is not None
             self._stills_dir = None
+            self._session_saw_armed = False
+            # The operator's intent OUTLIVES the session -- a pressed button
+            # stays pressed across a roll -- so this re-seeds from it rather
+            # than clearing to False.
+            self._session_saw_capture = bool(self._capture_wanted)
+        if stem and not keep:
+            self._discard_queue.append(stem)
+            self.get_logger().info("%s -- %s" % (stem, reason))
         if csv is not None:
             try:
                 for r in rows:
@@ -828,6 +938,10 @@ class CameraNode(Node):
     def _status_tick(self):
         now = time.monotonic()
 
+        # First thing in the tick: by now any split requested last tick has
+        # completed and the file is closed.
+        self._drain_discards()
+
         if self.frame_cache.went_stale(now):
             self.get_logger().error(
                 "no frame for %.1fs -- video is down. The recording file stays "
@@ -861,11 +975,18 @@ class CameraNode(Node):
             self._end_session()
 
         # Roll the session so a crash costs one segment, not the sortie.
+        #
+        # split_now() AFTER _start_session(), never before: the new stem has to
+        # be on _mkv_path when splitmuxsink asks for it via format-location, or
+        # the video keeps the previous session's name and the pair stops
+        # matching. That mismatch is the failure this whole rotation fix exists
+        # to remove, so the ordering is the point rather than a detail.
         if (may_record and csv is not None and started is not None
                 and recorder_core.should_rotate(
                     started, now, float(self.p["max_session_s"]))):
             self._end_session()
-            self._start_session()
+            if self._start_session():
+                self.pipe.split_now()
 
         # Ask the gimbal, then read the answer back OUT OF THE CACHE rather
         # than using it directly. The extra hop is what separates a lost
@@ -905,6 +1026,7 @@ class CameraNode(Node):
         msg.session = session
         msg.frame_index = int(frame_idx)
         msg.disk_free_mb = float(free_mb)
+        msg.record_gate = self._record_gate()[1] if session else ""
         msg.gimbal_pitch = float(self._gimbal_pitch)
         msg.gimbal_pitch_rate = float(self._gimbal_pitch_rate)
         msg.gimbal_ok = bool(self._gimbal_ok)

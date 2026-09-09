@@ -1,0 +1,82 @@
+# /etc/systemd/system/uav-telemetry-bridge.service  (Jetson host)
+#
+# TEMPLATE: __UAV_USER__ / __UAV_REPO__ / __UAV_CONTAINER__ are substituted by
+# setup/install_jetson_host.sh at install time.
+#
+# Runs telemetry_bridge — the only thing on this aircraft that speaks MAVLink —
+# inside the container. It consumes MAVProxy's UDP rebroadcast on 14541 and
+# publishes /uav/pose, /uav/attitude, /uav/fcu_status and /uav/flight_state.
+#
+# WHY THIS UNIT NOW EXISTS, HAVING DELIBERATELY NOT EXISTED.
+#
+# The gateway was started by hand from the ground station page. node_registry's
+# PROTECTION RULE is about the page, not about systemd: a web page must never be
+# able to STOP the gateway, because WiFi is a convenience and never a safety
+# mechanism. That rule is untouched here — systemctl still needs a terminal and
+# sudo, and the page still cannot stop it.
+#
+# What changed is that forgetting to start it stopped being free. camera_node
+# now decides whether a session's recording survives by whether the aircraft was
+# ever armed, and it learns that from /uav/fcu_status — which only exists when
+# this node runs. A sortie flown without the gateway is a sortie whose footage
+# is discarded as bench time. The registry's own words settle the direction:
+# "starting the gateway can only ever move the aircraft toward observable, so it
+# needs no guard."
+#
+# The page may still start it. That is now a fallback rather than the path.
+#
+# ORDERING. After the container (it is a ROS node and cannot exist before its
+# container) and after MAVProxy, which owns /dev/uav-pixhawk and produces the
+# UDP stream this consumes. It does NOT open the serial device itself, so it
+# races nothing: starting early only means it sees no datagrams until MAVProxy
+# is up, and StreamCache reports that honestly as stale rather than inventing
+# values.
+#
+# Restart=on-failure, RestartSec=5: a dead gateway blinds the OCS heartbeat, the
+# RC-override gate and the geofence uploader at once. It staying dead for the
+# rest of a flight is the outcome worth spending a restart loop to avoid.
+#
+# THE THREE-LAYER STOP is the same one uav-camera.service documents at length:
+# `docker exec` does not propagate termination, so without ExecStartPre a
+# restart leaves a second copy holding the 14541 socket, and the new one dies
+# with a bind error that reads like MAVProxy is broken. The pkill pattern is the
+# INSTALL-SPACE PATH, not the node name, and must match the marker
+# run_in_container.sh prints at startup.
+#
+# The leading `-` on both pkill lines is load-bearing: pkill exits 1 when it
+# matches nothing, and without it a perfectly clean start or stop fails.
+#
+# Verify with pgrep, not with "the banner went green":
+#     systemctl restart uav-telemetry-bridge
+#     docker exec uav_ekko pgrep -fc install/uav_fcu/lib/uav_fcu/telemetry_bridge
+#   must print exactly 1. Two = the sweep is not matching. Zero = wrong marker.
+#
+#     systemctl disable uav-telemetry-bridge     # is the way back
+[Unit]
+Description=UAV telemetry_bridge (MAVLink gateway: pose, attitude, arming)
+After=uav-container.service uav-mavproxy.service
+Requires=uav-container.service
+Wants=uav-mavproxy.service
+# BindsTo, so stopping the container stops this too rather than leaving the unit
+# restart-looping against a container that is gone.
+BindsTo=uav-container.service
+
+[Service]
+Type=simple
+User=__UAV_USER__
+EnvironmentFile=-/etc/default/uav
+Environment=UAV_CONTAINER=__UAV_CONTAINER__
+ExecStartPre=-/usr/bin/docker exec __UAV_CONTAINER__ pkill -f install/uav_fcu/lib/uav_fcu/telemetry_bridge
+ExecStart=__UAV_REPO__/scripts/run_in_container.sh uav_fcu telemetry_bridge
+ExecStop=-/usr/bin/docker exec __UAV_CONTAINER__ pkill -f install/uav_fcu/lib/uav_fcu/telemetry_bridge
+# Shorter than the camera's 20 s: this node holds no muxer to finalise and no
+# file to leave unseekable. It has a UDP socket and ROS publishers, both of
+# which close immediately.
+TimeoutStopSec=10
+# mixed: SIGTERM the wrapper (firing its trap), escalate to the cgroup after.
+KillMode=mixed
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
