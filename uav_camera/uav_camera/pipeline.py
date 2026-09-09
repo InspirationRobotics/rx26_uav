@@ -4,7 +4,7 @@ WHY THE GRAPH SPLITS WHERE IT DOES. Three consumers want the same stream and
 they want it in three different forms:
 
     rtspsrc ! rtph264depay ! h264parse ! tee name=enc        (avc)
-      enc. ! queue ! matroskamux ! filesink                  <- the recording
+      enc. ! queue ! splitmuxsink (matroskamux)              <- the recording
       enc. ! queue ! h264parse ! byte-stream                 <- convert, see below
            ! nvv4l2decoder ! nvvidconv ! tee name=dec
            dec. ! queue ! appsink                            <- frames to process
@@ -30,6 +30,20 @@ file, or whether the disk is full -- recorder_core decides those and the node
 applies them. What lives here is the part that cannot be tested without
 GStreamer, kept as small as possible for that reason.
 
+WHY splitmuxsink AND NOT matroskamux ! filesink. The filesink's location is
+fixed when the graph is built, and this pipeline is built exactly once. Sessions
+roll every max_session_s, so every session after the first opened a new
+_frames.csv, set a new mkv path, and wrote its video into the FIRST session's
+file -- which is why 11 of 17 sessions on the aircraft had an index and no video
+at all, including two park flights. splitmuxsink owns the file itself and can
+close one and open the next on command, without rebuilding the graph or dropping
+the RTSP connection.
+
+Automatic splitting is DISABLED (max-size-time=0, max-size-bytes=0). The node
+decides when a session ends; a muxer that also rotated on its own schedule would
+produce files that do not line up with the index, which is the bug this replaces
+wearing a different hat.
+
 gi is imported inside start(), not at module scope, so this file imports on a
 laptop with no GStreamer and the node's own import errors stay legible.
 """
@@ -54,10 +68,16 @@ class Pipeline:
                     and act on. Never raises out of the bus thread.
       want_frames:  build the decode branch at all.
       preview_fps:  rate for the jpeg branch.
+      next_record_path: callable() -> str, asked for the filename EVERY time a
+                    recording file is opened -- at start and at each split. The
+                    node owns session naming, so it answers this; the pipeline
+                    never invents a name. Returning None or raising ends the
+                    recording rather than writing somewhere unexpected.
     """
 
     def __init__(self, rtsp_url, *, on_frame=None, on_jpeg=None, on_error=None,
-                 want_frames=True, preview_fps=5, latency_ms=0):
+                 want_frames=True, preview_fps=5, latency_ms=0,
+                 next_record_path=None):
         if not rtsp_url.startswith("rtsp://"):
             # Fail here rather than inside GStreamer, where a typo surfaces as
             # "could not link element" three elements away from the cause.
@@ -70,6 +90,7 @@ class Pipeline:
         self.want_frames = want_frames
         self.preview_fps = int(preview_fps)
         self.latency_ms = int(latency_ms)
+        self.next_record_path = next_record_path
 
         self._gst = None
         self._pipeline = None
@@ -77,6 +98,7 @@ class Pipeline:
         self._loop_thread = None
         self._lock = threading.Lock()
         self._recording_to = None
+        self._splitmux = None
 
         # Counters are read by the node's status tick from another thread. Plain
         # ints under the GIL are safe to read torn-free here; they are only ever
@@ -116,9 +138,24 @@ class Pipeline:
             "! rtph264depay ! h264parse config-interval=-1 ! tee name=enc",
         ]
         if record_path:
+            # location= is a FALLBACK only: the format-location handler wired up
+            # in start() overrides it for every file. It is still set because
+            # splitmuxsink refuses to go to PLAYING without one, and a graph
+            # that fails to start is worse than a name nobody uses.
+            #
+            # muxer-factory rather than muxer=: the string form does not need
+            # parse_launch to build a sub-element, so a typo names the muxer
+            # instead of producing a link error further down.
+            #
+            # async-finalize=false keeps each file's finalisation on the
+            # streaming thread, so a split completes before the next one starts.
+            # With it true, two files can be finalising at once and a fast
+            # rotation loses the matroska index on the earlier one.
             parts.append(
                 "enc. ! queue max-size-buffers=200 leaky=no "
-                "! matroskamux ! filesink location=%s sync=false" % record_path)
+                "! splitmuxsink name=rec muxer-factory=matroskamux "
+                "max-size-time=0 max-size-bytes=0 async-finalize=false "
+                "location=%s" % record_path)
         if self.want_frames:
             # HARDWARE decode. nvv4l2decoder is not in any GStreamer package
             # in the image -- it arrives from the L4T host through
@@ -178,6 +215,15 @@ class Pipeline:
         self._pipeline = Gst.parse_launch(desc)
         self._recording_to = record_path
 
+        # format-location fires every time a file is opened -- once at PLAYING
+        # and once per split-now. Asking the node each time is what keeps the
+        # video filename and the index filename derived from the SAME session
+        # stem, rather than two counters that agree until one of them slips.
+        if record_path:
+            self._splitmux = self._pipeline.get_by_name("rec")
+            if self._splitmux is not None:
+                self._splitmux.connect("format-location", self._on_format_location)
+
         if self.want_frames:
             if self.on_frame is not None:
                 sink = self._pipeline.get_by_name("frames")
@@ -198,6 +244,45 @@ class Pipeline:
         self._loop_thread.start()
         return desc
 
+    def split_now(self):
+        """Close the current recording file and open the next one.
+
+        Returns True if the split was requested. False means there is no
+        recording branch -- the caller asked to rotate something that is not
+        being written, which is a caller bug worth seeing rather than a no-op
+        to swallow.
+
+        The new file's name comes from next_record_path via format-location, so
+        set the node's session stem BEFORE calling this.
+        """
+        with self._lock:
+            mux = self._splitmux
+        if mux is None:
+            return False
+        try:
+            mux.emit("split-now")
+            return True
+        except Exception as e:
+            self.on_error("split-now failed: %s" % e)
+            return False
+
+    def _on_format_location(self, _splitmux, _fragment_id):
+        """Name the file about to be opened. Runs on GStreamer's thread.
+
+        Never raises into GStreamer: an exception here aborts the split and
+        leaves the recording branch in a state the node cannot see. On failure
+        it falls back to the path the graph was built with, so the worst case is
+        a file with a stale name rather than no file.
+        """
+        if self.next_record_path is not None:
+            try:
+                p = self.next_record_path()
+                if p:
+                    return p
+            except Exception as e:
+                self.on_error("next_record_path failed: %s" % e)
+        return self._recording_to
+
     def stop(self):
         """Idempotent. Sends EOS first so the muxer can finalise the file.
 
@@ -217,6 +302,7 @@ class Pipeline:
                 except Exception:
                     pass
                 self._pipeline = None
+            self._splitmux = None
             if self._loop is not None:
                 try:
                     self._loop.quit()
