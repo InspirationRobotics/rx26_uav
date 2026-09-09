@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uav_perception</name>
+  <version>0.1.0</version>
+  <description>
+    What the camera sees, interpreted. detector_node runs the trained YOLO11n
+    buoy detector and serves an annotated view for the operator.
+
+    It OWNS NO DEVICE. uav_camera holds the one RTSP connection, the one SIYI
+    socket and the one recording writer; this package consumes the MJPEG stream
+    that node already serves. That separation is the point, and uav_camera's own
+    description asks for it: a detector that crashes or exhausts the GPU must
+    not be able to stop the recording, which is the artifact a flight exists to
+    produce.
+
+    It writes nothing to disk. Annotated frames live only in the stream —
+    burning boxes into saved imagery would teach the next model that a buoy is a
+    thing with a rectangle around it.
+
+    Needs torch and ultralytics, so it runs on the uav:ml image and import-fails
+    loudly anywhere else. That is preferable to falling back to CPU and looking
+    like a broken camera.
+  </description>
+  <maintainer email="chase001cz@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_uav</url>
+
+  <depend>rclpy</depend>
+  <depend>uav_common</depend>
+  <depend>uav_camera</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

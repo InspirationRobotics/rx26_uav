@@ -94,6 +94,16 @@ REGISTRY = (
              note="owns the A8 mini: RTSP in, MJPEG out on :8091, records to "
                   "the Jetson and the camera's SD card, holds the gimbal at "
                   "nadir"),
+    # NOT tagged exclusive="camera", and that is the whole design. This node
+    # consumes camera_node's MJPEG rather than opening the A8 mini, so the two
+    # co-run by construction -- which is what the exclusive tag on camera_node
+    # exists to protect. Stoppable, unprotected: nothing safety-related reads
+    # it, and an operator who wants the GPU back should be able to take it.
+    NodeSpec("detector_node", "detector_node", "uav_perception",
+             "detector_node", "perception",
+             port=8092, stream_path="/stream.mjpg",
+             note="runs the trained buoy model on camera_node's stream and "
+                  "serves an annotated view on :8092; writes nothing"),
 )
 
 BY_NAME = {n.name: n for n in REGISTRY}
@@ -105,6 +115,10 @@ PROFILES = {
     # sortie flown twice, and the recordings are the training data the
     # perception work depends on. It is not in the bench profile: that one runs
     # without a Pixhawk, and usually without a camera too.
+    # detector_node is NOT in the flight profile. It is a view, not a
+    # requirement: a sortie with no detector still produces the recording and
+    # the stills, and starting it by default would put inference on the GPU for
+    # every flight whether anyone is watching or not.
     "flight": ("Flight profile",
                ("telemetry_bridge", "ocs_client", "camera_node")),
     "bench": ("Bench profile", ("telemetry_bridge",)),

@@ -377,6 +377,12 @@ function power(v){post('/power',{verb:v,confirm:(el('pwconf')||{}).value||''})}
    tear the stream down and rebuild it five times a second. camSrc remembers
    what is already showing so the common case touches nothing. */
 var camSrc=null;
+/* Which stream the Camera tab is showing. Survives the 5 Hz poll because
+   renderCam only touches the <img> when the URL actually changes -- assigning
+   src restarts the MJPEG connection, and doing that at the poll rate would
+   tear the stream down five times a second. */
+var showDet=false;
+function toggleDet(){showDet=!showDet;renderCam();}
 /* The REC control lives in its OWN div, deliberately not inside #cam. That box
    is rewritten whenever the video source changes, and a button rebuilt under
    the operator's cursor mid-press is a button that misses the press. */
@@ -389,11 +395,34 @@ function renderCamRec(){
     html='<span class="note">capture state unknown — '
       +'/uav/camera/status is stale</span>';
   }else{
+    // The gate line is the important half. Recording ALWAYS runs; what this
+    // says is whether the session will be kept, and a discarded sortie must
+    // never be a silent surprise -- so a session heading for the bin is
+    // called out in warning colour rather than left to be inferred.
+    var g=c.record_gate||'', keep=g.indexOf('keeping')===0;
     html='<button onclick="setCapture('+(r?'false':'true')+')">'
-      +(r?'■ stop capture':'● start capture')+'</button> '
-      +'<span class="note">camera 4K to microSD + JPEG stills: <b>'
-      +(r?'CAPTURING':'off')+'</b> — takes effect immediately. '
-      +'The .mkv and frame index always record.</span>';
+      +(r?'■ stop capture':'● keep this session')+'</button> '
+      +'<span class="note">camera 4K + JPEG stills: <b>'
+      +(r?'ON':'off')+'</b></span>'
+      +(g?('<div class="note" style="margin-top:.35rem;color:'
+           +(keep?'var(--ok,#5fd16a)':'var(--bad,#ff6b6b)')+'">'
+           +esc(g)+'</div>'):'');
+  }
+  // The detector toggle rides in the same block. Offered only when
+  // detector_node is actually serving: a button that points the <img> at a
+  // closed port yields connection-refused and stays on that error until
+  // someone reloads by hand.
+  var d=c.det;
+  if(d&&!d.starting){
+    html+='<div style="margin-top:.45rem">'
+      +'<button onclick="toggleDet()">'
+      +(showDet?'\u25a0 hide detections':'\u25c9 show detections')+'</button> '
+      +'<span class="note">boxes are drawn on this view ONLY \u2014 '
+      +'the recorded stills stay clean, or the next model learns that a buoy '
+      +'is a thing with a rectangle on it</span></div>';
+  }else if(d&&d.starting){
+    html+='<div class="note" style="margin-top:.45rem">detector_node is up; '
+      +'loading the model\u2026</div>';
   }
   paint('camrec',html);
 }
@@ -417,7 +446,13 @@ function renderCam(){
      TLS — and it keeps the page free of an absolute URL, which bench_gcs
      checks for because a page that can fetch from elsewhere is a page that can
      fail on a field network with no route off the subnet. */
-  var url='//'+host+':'+c.port+c.path;
+  var d=c.det, url;
+  if(showDet&&d&&!d.starting){
+    url='//'+host+':'+d.port+d.path;
+  }else{
+    if(showDet&&(!d||d.starting))showDet=false;  /* nothing to show yet */
+    url='//'+host+':'+c.port+c.path;
+  }
   if(camSrc!==url){
     camSrc=url;
     box.innerHTML='<img id="camimg" alt="camera" style="max-width:100%;'

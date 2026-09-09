@@ -487,3 +487,62 @@ camera_node:
     status_rate_hz: 2.0                    # [RO] /uav/camera/status rate. A
                                            #      heartbeat about the pipeline,
                                            #      not a per-frame record.
+
+detector_node:
+  ros__parameters:
+    # The trained buoy detector, and the operator's view of it. This node owns
+    # NO device: it consumes the MJPEG stream camera_node already serves, so a
+    # detector that crashes or fills the GPU cannot stop the recording.
+    model_path: "/root/robotx_ws/models/buoy_yolo11n_v1.pt"
+                                           # [RO] YOLO11n, one class `buoy`,
+                                           #      trained 8 Sep 2026 on 436
+                                           #      frames from two park flights.
+                                           #      Holdout: 95% of airborne
+                                           #      frames on a day it never saw.
+                                           #      A TensorRT .engine goes here
+                                           #      too — but engines are built on
+                                           #      THIS device and are not
+                                           #      portable between Jetsons or
+                                           #      TensorRT versions.
+    source_url: "http://127.0.0.1:8091/stream.mjpg"
+                                           # [RO] camera_node's viewer, NOT the
+                                           #      camera. A second RTSP client
+                                           #      on the A8 mini is the failure
+                                           #      node_registry's exclusive tag
+                                           #      exists to prevent. Loopback
+                                           #      because both run in the same
+                                           #      host-network container.
+    mjpeg_port: 8092                       # [RO] this node's annotated view.
+                                           #      MUST differ from
+                                           #      camera_node.mjpeg_port (8091)
+                                           #      and ground_station.port
+                                           #      (8090). The Camera tab
+                                           #      switches its <img> between
+                                           #      8091 and this.
+    bind_host: "0.0.0.0"                   # [RO] must NOT be 127.0.0.1 or the
+                                           #      view is unreachable from the
+                                           #      laptop.
+    infer_hz: 4.0                          # [RO] DELIBERATELY LOW. Inference
+                                           #      shares the GPU with
+                                           #      camera_node's hardware
+                                           #      decoder, and that decoder
+                                           #      feeds the recording. Measured
+                                           #      8.1 fps at imgsz 1920 with
+                                           #      nothing else running, so 4 Hz
+                                           #      leaves real headroom. Raise it
+                                           #      only after checking the frame
+                                           #      index for drops.
+    imgsz: 1920                            # [RO] native. A 0.46 m buoy at 20 m
+                                           #      is 26 px here, 17 px at 1280
+                                           #      and 8.7 px at the 640 default
+                                           #      — below what YOLO detects
+                                           #      reliably. Smaller loses the
+                                           #      buoy before it saves time.
+    conf: 0.25                             # [RO] confidence floor. Low on
+                                           #      purpose for a viewer: seeing
+                                           #      a weak detection is
+                                           #      informative, and nothing acts
+                                           #      on it.
+    reconnect_s: 3.0                       # [RO] wait before retrying a dropped
+                                           #      source. camera_node restarts
+                                           #      take a few seconds to rebind.

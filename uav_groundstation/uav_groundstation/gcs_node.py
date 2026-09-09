@@ -346,7 +346,10 @@ class GroundStation(Node):
         }
 
     def _on_cam_status(self, msg):
-        self._cam_status.set(bool(msg.recording_sd), time.monotonic())
+        # Cached as a pair so one staleness timeout covers both. Splitting them
+        # would let the page show a fresh reason beside a stale record state.
+        self._cam_status.set((bool(msg.recording_sd), str(msg.record_gate)),
+                             time.monotonic())
 
     def _cam_state(self, running):
         """What the Camera tab should point at, if anything.
@@ -363,7 +366,9 @@ class GroundStation(Node):
             return {"source": None, "starting": False}
         serving = {spec.name} if self._port_open(spec.port) else set()
         name, starting = reg.tab_source((spec.name,), running, serving)
-        rec = self._cam_status.get(time.monotonic())
+        st = self._cam_status.get(time.monotonic())
+        rec = st[0] if st else None
+        gate = st[1] if st else ""
         return {
             "source": name,
             "starting": starting,
@@ -372,7 +377,31 @@ class GroundStation(Node):
             # None (not False) when the status topic is stale, so the page can
             # grey the button out rather than assert a state it cannot see.
             "recording_sd": rec,
+            # Why the open session will be kept or discarded, in the camera
+            # node's own words. Shown verbatim: this is the line that stops a
+            # discarded sortie from being a silent surprise.
+            "record_gate": gate,
+            # The detector's annotated stream, if that node is up. Reported
+            # separately from the camera so the tab can offer the toggle only
+            # when there is something to toggle TO -- a button that points an
+            # <img> at a closed port produces connection-refused and sits on
+            # that error until someone reloads by hand.
+            "det": self._det_state(running),
         }
+
+    def _det_state(self, running):
+        """Where the annotated view lives, if it is being served.
+
+        Same running/serving distinction as the camera: detector_node appears
+        in /proc immediately and then spends several seconds loading a model
+        and connecting to the source before its port binds.
+        """
+        spec = reg.BY_NAME.get("detector_node")
+        if spec is None or not spec.port or "detector_node" not in running:
+            return None
+        if not self._port_open(spec.port):
+            return {"starting": True}
+        return {"starting": False, "port": spec.port, "path": spec.stream_path}
 
     def _port_open(self, port):
         """Is something accepting on this port, checked at most once a second.
