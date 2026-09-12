@@ -270,6 +270,20 @@ camera_node:
                                            #      scheme (main.264 / sub.264);
                                            #      ZT30 and later use video1 /
                                            #      video2. Manual v1.10 p63.
+    rtsp_codec: "h264"                     # [RO] MUST match what the camera
+                                           #      is actually SERVING. This is
+                                           #      not a preference: set it
+                                           #      wrong and the stream decodes
+                                           #      to PURE WHITE while stream_ok
+                                           #      and fps both look healthy.
+                                           #      Change it in the SAME step as
+                                           #      the camera's own encoding
+                                           #      (cmd 0x21, stream_type 1).
+                                           #      h265 at the camera's ~1.5
+                                           #      Mbps ceiling carries roughly
+                                           #      what h264 needs 2.5-3 Mbps
+                                           #      for; that headroom is the
+                                           #      whole reason it is set here.
     rtsp_latency_ms: 0                     # [RO] rtspsrc jitter buffer. 0 on a
                                            #      wired link; raise only if the
                                            #      stream tears.

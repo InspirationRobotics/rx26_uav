@@ -61,6 +61,8 @@ class Pipeline:
 
     Args:
       rtsp_url:     the camera's main stream.
+      rtsp_codec:   'h264' or 'h265' -- what the camera is SERVING, not a
+                    preference. Wrong value = white frames, not an error.
       on_frame:     callable(bytes, width, height, pts_ns) or None. Called on the
                     streaming thread. Keep it short.
       on_jpeg:      callable(bytes) or None. The operator's view.
@@ -77,13 +79,30 @@ class Pipeline:
 
     def __init__(self, rtsp_url, *, on_frame=None, on_jpeg=None, on_error=None,
                  want_frames=True, preview_fps=5, latency_ms=0,
-                 next_record_path=None):
+                 next_record_path=None, rtsp_codec="h264"):
         if not rtsp_url.startswith("rtsp://"):
             # Fail here rather than inside GStreamer, where a typo surfaces as
             # "could not link element" three elements away from the cause.
             raise ValueError(
                 "rtsp_url must start with rtsp:// -- got %r" % (rtsp_url,))
         self.rtsp_url = rtsp_url
+        # MUST match what the camera is actually serving. A mismatch is
+        # NOT an error and does not raise: rtspsrc connects, the
+        # depayloader silently discards payloads it cannot parse, and the
+        # decoder emits PURE WHITE frames while stream_ok, gimbal_ok and
+        # the fps counter all stay healthy. That combination has already
+        # cost a sortie.
+        #
+        # This is a PARAMETER and is deliberately not read back from the
+        # camera. The camera has reported H264 while serving H265, and
+        # reported 1080p while serving 720p, so its own answer is the one
+        # input that cannot be trusted to build a pipeline from.
+        codec = str(rtsp_codec).lower()
+        if codec not in ("h264", "h265"):
+            raise ValueError(
+                "rtsp_codec must be 'h264' or 'h265' -- got %r"
+                % (rtsp_codec,))
+        self.rtsp_codec = codec
         self.on_frame = on_frame
         self.on_jpeg = on_jpeg
         self.on_error = on_error or (lambda msg: None)
@@ -115,6 +134,15 @@ class Pipeline:
         is the form a person can paste into gst-launch-1.0 on the Jetson when
         the node will not start, which is when they most need to bisect it.
         """
+        # The three codec-dependent names. Everything structural below --
+        # the tee, both branches, which one converts caps for itself -- is
+        # identical for H.264 and H.265, because the constraint that
+        # shaped it is the same: matroskamux takes only the packetised
+        # form (avc / hvc1) and nvv4l2decoder takes only byte-stream.
+        h265 = self.rtsp_codec == "h265"
+        depay = "rtph265depay" if h265 else "rtph264depay"
+        parse = "h265parse" if h265 else "h264parse"
+        media = "video/x-h265" if h265 else "video/x-h264"
         parts = [
             "rtspsrc location=%s latency=%d protocols=tcp name=src"
             % (self.rtsp_url, self.latency_ms),
@@ -135,7 +163,7 @@ class Pipeline:
             # branch converts for itself with a second h264parse. Software
             # decoders took either format, which is why this conflict did not
             # exist before the switch to hardware decode.
-            "! rtph264depay ! h264parse config-interval=-1 ! tee name=enc",
+            "! %s ! %s config-interval=-1 ! tee name=enc" % (depay, parse),
         ]
         if record_path:
             # location= is a FALLBACK only: the format-location handler wired up
@@ -176,12 +204,29 @@ class Pipeline:
             # any frame rather than waiting for the next parameter set -- it
             # matters here because this branch can be torn down and rebuilt on
             # a reconnect while the recording branch keeps running.
+            # QUEUE DEPTH IS LOAD-BEARING AND 8 WAS TOO SMALL. This queue
+            # carries COMPRESSED H.264, so a leak here is not a dropped
+            # frame, it is a missing REFERENCE frame: every P-frame after
+            # it decodes into garbage that propagates until the next IDR.
+            # That is what shredded the 11 Sep park stills -- smeared
+            # grass and coloured vertical banding in the decoded output,
+            # while the recording branch (leaky=no, 200) and the camera
+            # app's own view were both clean. Only a branch downstream of
+            # the tee can produce that split, and this is the only element
+            # in it allowed to lose data. 8 buffers is 320 ms at 25 fps,
+            # so any brief stall in this branch tripped it.
+            #
+            # leaky=downstream STAYS, deliberately. A tee stalls EVERY
+            # branch when one blocks, and the recording branch must never
+            # stall, so this branch has to be able to give up under a
+            # sustained overload. 200 only moves that from a 320 ms
+            # hair-trigger to about 8 s.
             parts.append(
-                "enc. ! queue max-size-buffers=8 leaky=downstream "
-                "! h264parse config-interval=-1 "
-                "! video/x-h264,stream-format=byte-stream,alignment=au "
+                "enc. ! queue max-size-buffers=200 leaky=downstream "
+                "! %s config-interval=-1 "
+                "! %s,stream-format=byte-stream,alignment=au "
                 "! nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx "
-                "! tee name=dec")
+                "! tee name=dec" % (parse, media))
             parts.append(
                 "dec. ! queue max-size-buffers=%d leaky=downstream "
                 "! videoconvert ! video/x-raw,format=BGR "

@@ -90,6 +90,10 @@ from uav_camera.siyi_client import NullSiyiClient, SiyiClient, SiyiUnavailable
 PARAM_SPEC = {
     "rtsp_url": dict(read_only=True,
                      description="camera main stream; rtsp:// only"),
+    "rtsp_codec": dict(read_only=True,
+                       description="h264 or h265; MUST match what the "
+                                   "camera is serving -- a mismatch "
+                                   "shows as white frames, not an error"),
     "rtsp_latency_ms": dict(read_only=True, lo=0, hi=2000,
                             description="rtspsrc jitter buffer; 0 for lowest "
                                         "latency on a wired link"),
@@ -260,6 +264,11 @@ class CameraNode(Node):
         # the state at the closing instant would say disarmed.
         self._fcu_seen = False
         self._session_saw_armed = False
+        # The LIVE arm state, as distinct from _session_saw_armed above. That
+        # one latches for the whole session and answers "was this a flight";
+        # this one tracks and answers "is it flying right now", which is what
+        # the stills follow.
+        self._armed_now = False
         self._session_saw_capture = bool(self._capture_wanted)
         self._discard_queue = []
         self._last_frame_count = 0
@@ -414,6 +423,7 @@ class CameraNode(Node):
         # ---- pipeline last: everything it calls back into must already exist.
         self.pipe = Pipeline(
             str(p["rtsp_url"]),
+            rtsp_codec=str(p["rtsp_codec"]),
             on_frame=self._on_frame,
             on_jpeg=self._on_jpeg,
             on_error=self._on_pipeline_error,
@@ -425,7 +435,8 @@ class CameraNode(Node):
         if p["record_on_start"]:
             self._start_session()
         desc = self.pipe.start(self._mkv_path)
-        self.get_logger().info("pipeline: %s" % desc)
+        self.get_logger().info(
+            "pipeline [%s]: %s" % (self.pipe.rtsp_codec, desc))
 
         self.create_timer(1.0 / float(p["status_rate_hz"]), self._status_tick)
 
@@ -440,6 +451,24 @@ class CameraNode(Node):
                            time.monotonic(), msg.header.stamp)
 
     # ----------------------------------------------------------- gimbal in
+
+    def _stills_wanted(self):
+        """Whether stills should be running at this instant.
+
+        Two independent reasons -- the aircraft is ARMED, or the operator
+        forced them on for a bench session -- resolved in ONE place, so a
+        session roll, an arm transition and a button press can never disagree
+        about it. Three callers previously each decided for themselves and a
+        roll mid-flight would have silently dropped the stills.
+
+        ARMED WINS. Pressing stop while airborne does not stop the stills of
+        the sortie in progress; it only stops the 4K SD recording.
+
+        Deliberately NOT gated on p["record_sd"]. That parameter governs the
+        camera's own 4K SD recording, which stills do not use and which this
+        airframe does not want started on every arm.
+        """
+        return bool(self._armed_now or self._capture_wanted)
 
     def _apply_stills_intent(self, want):
         """Start or stop stills on the CURRENTLY OPEN session.
@@ -507,7 +536,7 @@ class CameraNode(Node):
         # folder covering only part of the frame range -- that is expected, not
         # dropped frames: every frame is still in the CSV, and stills are named
         # by frame_idx, so where they begin is exactly where capture was armed.
-        self._apply_stills_intent(want)
+        self._apply_stills_intent(self._stills_wanted())
         if self._recording_sd == want:
             response.success = True
             response.message = "SD recording already %s" % ("ON" if want else "OFF")
@@ -687,10 +716,12 @@ class CameraNode(Node):
             self.get_logger().error("cannot open %s: %s" % (csv_path, e))
             return False
         stills_dir = None
-        # Gated on the SAME operator intent as the SD recording. Stills cost
-        # ~0.9 GB/hour at 1080p and, left always-on, fill the disk with pictures
-        # of whatever the aircraft was parked over.
-        if self._capture_wanted:
+        # Stills run while ARMED, or while the operator forced them on -- see
+        # _stills_wanted. They are no longer tied to the 4K SD recording: this
+        # airframe wants 1080p stills on every arm and does not want 4K at all.
+        # Still not always-on: at ~0.9 GB/hour they would otherwise fill the
+        # disk with pictures of whatever the aircraft was parked over.
+        if self._stills_wanted():
             stills_dir = self._open_stills_dir(stem)
         with self._lock:
             self._session = stem
@@ -715,8 +746,17 @@ class CameraNode(Node):
         footage again.
         """
         self._fcu_seen = True
-        if msg.armed:
+        armed = bool(msg.armed)
+        if armed:
             self._session_saw_armed = True
+        # Stills FOLLOW the arm switch, and only on an actual CHANGE of it.
+        # Edge-triggered for a reason that matters in flight: a telemetry link
+        # that goes quiet produces no messages at all, so silence can never be
+        # read as a disarm and stop the stills of the sortie in progress. It
+        # also keeps one log line per arm instead of one per heartbeat.
+        if armed != self._armed_now:
+            self._armed_now = armed
+            self._apply_stills_intent(self._stills_wanted())
 
     def _record_gate(self):
         """Why the open session will be kept, or why it will be discarded.
