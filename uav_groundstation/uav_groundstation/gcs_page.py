@@ -128,7 +128,7 @@ select,input{font:inherit;background:#232a34;color:var(--fg);
     misses output written straight to stdout, and anything printed before a node
     finished constructing, which is exactly when a bad parameter kills one.</p>
   </section>
-  <section id="s-cam"><div id="camrec"></div><div id="cam"></div>
+  <section id="s-cam"><div id="camalt"></div><div id="camrec"></div><div id="cam"></div>
     <p class="hint">The video is served by <code>camera_node</code> on its own
     port, not proxied through this one — megabytes of MJPEG through the
     ground station's snapshot path would make a stalled camera look like a
@@ -387,8 +387,40 @@ function toggleDet(){showDet=!showDet;renderCam();}
    is rewritten whenever the video source changes, and a button rebuilt under
    the operator's cursor mid-press is a button that misses the press. */
 function setCapture(on){post('/camera/capture',{on:on}).then(poll)}
+/* Altitude gets its OWN div, and that is not cosmetic. This number changes at
+   the poll rate, and paint() skips a rewrite only when the markup is
+   byte-identical -- so a value ticking five times a second rewrites whatever
+   div it shares five times a second. Putting it in #camrec would therefore
+   destroy the capture and detector buttons under the operator's cursor, which
+   is precisely how the capture button and the shutdown hostname field both
+   became unusable. #camalt holds no controls, so rewriting it costs nothing. */
+function renderCamAlt(){
+  var t=S.tel||{},v,bad;
+  if(!t.pose_ok||t.alt_rel===null||t.alt_rel===undefined){
+    /* Blanks over guesses. A stale altitude that looks live is worse than none
+       at all here: the whole purpose of this readout is holding a step, and a
+       frozen number reads as a rock-steady hold. */
+    v='\u2014'; bad=true;
+  }else{
+    v=(+t.alt_rel).toFixed(1); bad=false;
+  }
+  paint('camalt',
+    '<div style="display:flex;align-items:baseline;gap:.45rem;'
+    +'margin-bottom:.45rem">'
+    +'<span style="font-size:2.2rem;line-height:1;font-weight:600;'
+    +'font-variant-numeric:tabular-nums;color:'
+    +(bad?'var(--bad,#ff6b6b)':'inherit')+'">'+v+'</span>'
+    +'<span class="note">'
+    +(bad?'altitude unavailable \u2014 pose is stale'
+         :'m above takeoff')+'</span></div>');
+}
 function renderCamRec(){
   var c=S.cam||{},r=c.recording_sd,html;
+  /* Stills and the 4K SD recording are separate now: stills follow the ARM
+     switch, the button drives the 4K. Reported separately because one control
+     showing one state for two things is how "stills: off" ended up on screen
+     while stills were being written. */
+  var armed=(S.tel||{}).armed, stills=armed||r;
   if(!c.source){
     html='';
   }else if(r===null||r===undefined){
@@ -402,8 +434,9 @@ function renderCamRec(){
     var g=c.record_gate||'', keep=g.indexOf('keeping')===0;
     html='<button onclick="setCapture('+(r?'false':'true')+')">'
       +(r?'■ stop capture':'● keep this session')+'</button> '
-      +'<span class="note">camera 4K + JPEG stills: <b>'
-      +(r?'ON':'off')+'</b></span>'
+      +'<span class="note">stills: <b>'+(stills?'ON':'off')+'</b>'
+      +(armed?' (armed)':(r?' (forced)':''))
+      +' \u00b7 4K SD: <b>'+(r?'ON':'off')+'</b></span>'
       +(g?('<div class="note" style="margin-top:.35rem;color:'
            +(keep?'var(--ok,#5fd16a)':'var(--bad,#ff6b6b)')+'">'
            +esc(g)+'</div>'):'');
@@ -427,6 +460,7 @@ function renderCamRec(){
   paint('camrec',html);
 }
 function renderCam(){
+  renderCamAlt();
   renderCamRec();
   var c=S.cam||{},host=location.hostname,box=el('cam');
   if(!c.source){
