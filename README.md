@@ -1,15 +1,17 @@
 # RobotX 2026 — UAV Software Package (v0.1)
 
 Team Inspiration's codebase for the aircraft in the 2026 RobotX system-of-systems.
-A Pixhawk-based multirotor with a Jetson Orin Nano companion computer running
+Ekko, a CubeOrange+ multirotor with a Jetson Orin Nano companion computer running
 ROS 2 Humble in the `uav_ekko` Docker container, reporting to the team's Operator
 Control Station over field WiFi.
 
-**What this is:** the minimum that makes the UAV a real member of the fleet —
-stable device names, the single MAVLink gateway, a geofence the autopilot
-enforces, an operator page, and the 2 Hz heartbeat the OCS is already waiting
-for. **What it is not:** perception, a world model, missions, or anything that
-has flown. Nothing in this repo has been in the air.
+**What this is:** what makes the UAV a real member of the fleet — stable
+device names, the single MAVLink gateway, a geofence the autopilot enforces, an
+operator page, the 2 Hz heartbeat the OCS is waiting for — plus the gimbal
+camera gateway and the Task 1 buoy map (position and light state of each buoy).
+**What it is not:** missions, autonomous search, or a world model beyond that
+buoy map. The camera, telemetry, operator page and buoy map have all flown; the
+buoy map was verified at the park on 2026-09-13.
 
 The fleet's other two vehicles are built:
 [rx26_asv](https://github.com/InspirationRobotics/rx26_asv) (the boat, whose
@@ -27,10 +29,10 @@ autopilot, one that faces the operator, and a data-only package on top.
 |---|---|---|
 | [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 10 msgs |
 | [`uav_common`](uav_common/) | Params loader, node lifecycle, stream cache, drop latch, geodesy, the geofence protocol. No nodes | library |
-| [`uav_fcu`](uav_fcu/) | `telemetry_bridge` — the only thing that speaks MAVLink. Also uploads the geofence | **untested in flight** |
-| [`uav_groundstation`](uav_groundstation/) | `ground_station` (one web page on `:8090`) and `ocs_client` (the OCS heartbeat) | **untested in flight** |
-| [`uav_camera`](uav_camera/) | `camera_node` — the SIYI A8 mini gateway: RTSP in, MJPEG out on `:8091`, records to the Jetson and the camera's SD card, holds the gimbal at nadir | **untested in flight** |
-| [`uav_perception`](uav_perception/) | `detector_node` — runs the colour-buoy model on `camera_node`'s stream, annotated view on `:8092`, publishes each frame's boxes with its pose. `buoy_mapper` — the Task 1 buoy map: positions by ray projection, each buoy's state decided over 4 s of full-view watching; downloads on `:8093`. Replay with `tools/scripts/map_session.py` | **untested in flight** |
+| [`uav_fcu`](uav_fcu/) | `telemetry_bridge` — the only thing that speaks MAVLink. Also uploads the geofence | flown |
+| [`uav_groundstation`](uav_groundstation/) | `ground_station` (one web page on `:8090`) and `ocs_client` (the OCS heartbeat) | `ground_station` flown; `ocs_client` ran aboard, not yet checked against RoboNation's stub |
+| [`uav_camera`](uav_camera/) | `camera_node` — the SIYI A8 mini gateway: RTSP in, MJPEG out on `:8091`, records to the Jetson and the camera's SD card, holds the gimbal at nadir | flown |
+| [`uav_perception`](uav_perception/) | `detector_node` — runs the colour-buoy model on `camera_node`'s stream, annotated view on `:8092`, publishes each frame's boxes with its pose. `buoy_mapper` — the Task 1 buoy map: positions by ray projection, each buoy's state decided over 4 s of full-view watching; downloads on `:8093`. Replay with `tools/scripts/map_session.py` | flown 2026-09-13: all 10 buoy states correct over 5 map runs |
 | [`uav_bringup`](uav_bringup/) | Launch file + the params YAML. Ships no code; build entry point | — |
 
 **A new package must be added to `uav_bringup/package.xml`'s exec_depends** or it
@@ -225,9 +227,9 @@ until you log out and back in.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ERROR: Pixhawk device /dev/uav-pixhawk not found` | the udev rule does not match this board. `99-uav.rules` says outright that its four Pixhawk lines are a **candidate list**, not a confirmed one | `udevadm info -a -n /dev/ttyACM0 \| grep -E 'idVendor\|idProduct' \| head -4`, add the line, `sudo bash tools/udev/install_udev.sh` |
+| `ERROR: Pixhawk device /dev/uav-pixhawk not found` | the udev rule does not match this board. `99-uav.rules` has one confirmed rule, for Ekko's CubeOrange+ (`2dae:1058`, interface `00`); a different flight controller needs its own | `udevadm info -a -n /dev/ttyACM0 \| grep -E 'idVendor\|idProduct' \| head -4`, add the line, `sudo bash tools/udev/install_udev.sh` |
 | Works under `sudo`, fails as the service user | device is `MODE=0660 GROUP=dialout` and the user is not in `dialout` | the `usermod` above |
-| `install_udev.sh` refuses with a collision | two names resolve to one tty — **this aliases the autopilot** | prune the candidate rules to the board actually aboard |
+| `install_udev.sh` refuses with a collision | two names resolve to one tty — **this aliases the autopilot** | keep exactly one rule per device actually aboard |
 | Symlink exists but dangles | stale rule or unplugged device | replug, then `sudo udevadm trigger` |
 
 ### The container
@@ -256,7 +258,7 @@ until you log out and back in.
 | `TypeError: The given value is not a list of one of the allowed types` | a **nested** value in `uav_params.yaml`. ROS 2 parameters cannot nest — scalars and flat homogeneous arrays only | write it flat. The geofence is `[lat, lon, lat, lon, …]`; `fence_core.polygon_from_flat` pairs it back |
 | `Couldn't parse params file`, every node dies at `rclpy.init()` | a YAML anchor/alias, or a top-level key without `ros__parameters` | `python3 tools/scripts/check_config.py` |
 | `could not declare parameter … outside [lo, hi]` | the YAML and the node's `PARAM_SPEC` are different ages | almost always a stale install space — `rebuild.sh` |
-| `still no heartbeat — is MAVProxy running?` | the bridge is up, MAVProxy is not, or `SR0_*` are all 0 | check the unit; then check stream rates in QGC |
+| `still no heartbeat — is MAVProxy running?` | the bridge is up, MAVProxy is not, or the `MAV1_*` stream rates are all 0 (ArduPilot 4.7 renamed `SR0_*` to `MAV1_*`) | check the unit; then check stream rates in QGC |
 
 ### Reporting to the OCS
 
@@ -264,7 +266,7 @@ until you log out and back in.
 |---|---|---|
 | `cannot reach 192.168.8.107:37564`, every 5 s | the OCS laptop is not up | **benign and self-healing** — the link retries and names the address. Not an error |
 | OCS shows rising silence | `ocs_client` is refusing to invent telemetry | the log says which input is missing: pose, `fcu_status`, or flight phase |
-| `flight_phase source: fallback` in the log | `/uav/flight_state` is stale or absent | set `SR0_EXT_STAT > 0` in QGC. The fallback is a real derivation but a worse answer than the autopilot's own |
+| `flight_phase source: fallback` in the log | `/uav/flight_state` is stale or absent | no parameter fixes this: `EXTENDED_SYS_STATE` is in no stream group, so `telemetry_bridge` requests it itself and re-asks every 30 s. Look for `no EXTENDED_SYS_STATE yet` in its log. The fallback is a real derivation but a worse answer than the autopilot's own |
 | OCS drops every frame: "not a configured vehicle" | `vehicle_id` / `team_id` disagree with `bridge.toml` | `check_config.py` compares them when `rx26_ocs` is checked out beside this repo |
 | OCS refuses a frame as `UNKNOWN` | a UAV may not send `FLIGHT_PHASE_UNKNOWN` | that is the net working. Find why the phase was unknown |
 
@@ -381,29 +383,29 @@ package count.
 
 ## Dependencies
 
-**Hardware:** Jetson Orin Nano; Pixhawk (HAWK'S WORK 2.4.8-class board — **its
-USB VID/PID is not yet confirmed**, see `tools/udev/99-uav.rules`); RadioMaster
-Pocket + RP3 ELRS receiver (CRSF to the Pixhawk, not USB to the Jetson); WiFi to
-the team subnet.
+**Hardware:** Jetson Orin Nano; CubePilot CubeOrange+ on ArduCopter 4.7.0 (USB
+`2dae:1058`, confirmed aboard 2026-09-02, see `tools/udev/99-uav.rules`); SIYI A8
+mini gimbal camera (Ethernet, `192.168.144.25`); RadioMaster Pocket + RP3 ELRS
+receiver (CRSF to the flight controller, not USB to the Jetson); WiFi to the team
+subnet.
 
 **Software:** ROS 2 Humble + pymavlink inside the `uav_ekko` container; MAVProxy on
 the **host**, never in the container. Python ≥3.10 + pyyaml for the off-board
-tools. No device SDKs, by design — there is no camera or LiDAR on this airframe.
+tools. GStreamer for the camera stream and Ultralytics for `detector_node`, both in
+the container. No vendor device SDKs, by design — `camera_node` speaks the SIYI
+wire protocol itself.
 
 ## What is deliberately absent
 
-Perception, world model, missions, LED status stack, session recording, camera
-and LiDAR viewer tabs, and any simulator. Each is a real gap, not an oversight;
+Missions and autonomous search, a world model beyond the Task 1 buoy map, LED
+status stack, LiDAR, and any simulator. Each is a real gap, not an oversight;
 naming them here is cheaper than a stub that looks like progress.
 
 ## Next
 
-- **Confirm the Pixhawk's VID/PID** on the real airframe and prune
-  `99-uav.rules` to the board actually aboard. One `udevadm info` away.
-- **Set `SR0_EXT_STAT > 0`** in QGC. Without it `/uav/flight_state` never
-  publishes and `ocs_client` falls back to an armed+altitude guess for
-  `flight_phase` — it says so loudly, but the fallback is a worse answer than
-  the autopilot's own.
+- **Measure `mount_yaw_offset_deg` on the bench** and re-check it before mapping
+  flights: it has moved with no remount before. Hovering over each buoy hides a
+  wrong value; a faster mapping pass will not.
 - **Check `geoid_separation_m` against the real course.** −24.6 m is Sarasota;
   Singapore differs. It is silently wrong by tens of metres until someone
   measures it.
