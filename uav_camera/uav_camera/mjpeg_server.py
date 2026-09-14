@@ -26,6 +26,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BOUNDARY = "uavframe"
+
+# Per-part header carrying one JSON object about the frame that follows: its
+# frame index, arrival time, pose and gimbal angles (recorder_core.frame_values).
+# Browsers ignore part headers they do not know, so the Camera tab is unaffected;
+# detector_node reads it so the buoy mapper can place a detection using the pose
+# the aircraft held when THAT frame arrived, not whenever inference finished.
+META_HEADER = "X-Frame-Meta"
 # A viewer or two on a field laptop is the whole use case. The cap exists so a
 # page left reloading in a broken tab cannot accumulate threads on a flight
 # computer that also has to keep a telemetry gateway alive.
@@ -43,18 +50,46 @@ class FrameSlot:
     frames went past in between.
     """
 
-    __slots__ = ("_cv", "_jpeg", "_seq")
+    __slots__ = ("_cv", "_jpeg", "_meta", "_seq")
 
     def __init__(self):
         self._cv = threading.Condition()
         self._jpeg = None
+        self._meta = None
         self._seq = 0
 
-    def put(self, jpeg: bytes):
+    def put(self, jpeg: bytes, meta_json=None):
+        """`meta_json` is an already-serialised one-line JSON string, or None.
+
+        Serialised by the producer, once, rather than per viewer: every client
+        of the stream writes the same header, and re-encoding it for each would
+        be work on the thread that also serves the video.
+
+        A value containing a line break is refused, because it would end the
+        part's header block early and turn the rest of the header into garbage
+        at the top of the JPEG.
+        """
+        if meta_json is not None:
+            if "\r" in meta_json or "\n" in meta_json:
+                raise ValueError("frame metadata must be a single line")
+            # HTTP headers are ASCII. Checked here, at the producer, so a bad
+            # value fails once and loudly instead of inside every viewer thread.
+            meta_json.encode("ascii")
         with self._cv:
             self._jpeg = jpeg
+            self._meta = meta_json
             self._seq += 1
             self._cv.notify_all()
+
+    def wait_next_meta(self, since_seq: int, timeout: float):
+        """-> (seq, jpeg, meta_json), or (since_seq, None, None) if nothing
+        newer arrived. See wait_next() for why both halves of the test exist."""
+        with self._cv:
+            if self._jpeg is None or self._seq <= since_seq:
+                self._cv.wait(timeout)
+            if self._jpeg is None or self._seq <= since_seq:
+                return since_seq, None, None
+            return self._seq, self._jpeg, self._meta
 
     def wait_next(self, since_seq: int, timeout: float):
         """-> (seq, jpeg), or (since_seq, None) if nothing newer arrived.
@@ -67,12 +102,8 @@ class FrameSlot:
         had not yet delivered its first frame looked like a camera that was not
         there.
         """
-        with self._cv:
-            if self._jpeg is None or self._seq <= since_seq:
-                self._cv.wait(timeout)
-            if self._jpeg is None or self._seq <= since_seq:
-                return since_seq, None
-            return self._seq, self._jpeg
+        seq, jpeg, _ = self.wait_next_meta(since_seq, timeout)
+        return seq, jpeg
 
     @property
     def seq(self) -> int:
@@ -163,16 +194,20 @@ class MjpegServer:
                     self.end_headers()
                     seq = -1
                     while True:
-                        seq, jpeg = outer.slot.wait_next(seq, FRAME_WAIT_S)
+                        seq, jpeg, meta = outer.slot.wait_next_meta(
+                            seq, FRAME_WAIT_S)
                         if jpeg is None:
                             # No new frame. Keep the connection open rather than
                             # closing it: the camera coming back should resume
                             # the existing tab, not require a reload.
                             continue
+                        extra = (b"" if meta is None else
+                                 b"%s: %s\r\n" % (META_HEADER.encode(),
+                                                  meta.encode("ascii")))
                         self.wfile.write(
                             b"--%s\r\nContent-Type: image/jpeg\r\n"
-                            b"Content-Length: %d\r\n\r\n"
-                            % (BOUNDARY.encode(), len(jpeg)))
+                            b"Content-Length: %d\r\n%s\r\n"
+                            % (BOUNDARY.encode(), len(jpeg), extra))
                         self.wfile.write(jpeg)
                         self.wfile.write(b"\r\n")
                 except (ConnectionError, BrokenPipeError, OSError):

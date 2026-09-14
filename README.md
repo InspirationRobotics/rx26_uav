@@ -25,11 +25,12 @@ autopilot, one that faces the operator, and a data-only package on top.
 
 | Package | Contains | State |
 |---|---|---|
-| [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 5 msgs |
+| [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 10 msgs |
 | [`uav_common`](uav_common/) | Params loader, node lifecycle, stream cache, drop latch, geodesy, the geofence protocol. No nodes | library |
 | [`uav_fcu`](uav_fcu/) | `telemetry_bridge` — the only thing that speaks MAVLink. Also uploads the geofence | **untested in flight** |
 | [`uav_groundstation`](uav_groundstation/) | `ground_station` (one web page on `:8090`) and `ocs_client` (the OCS heartbeat) | **untested in flight** |
 | [`uav_camera`](uav_camera/) | `camera_node` — the SIYI A8 mini gateway: RTSP in, MJPEG out on `:8091`, records to the Jetson and the camera's SD card, holds the gimbal at nadir | **untested in flight** |
+| [`uav_perception`](uav_perception/) | `detector_node` — runs the colour-buoy model on `camera_node`'s stream, annotated view on `:8092`, publishes each frame's boxes with its pose. `buoy_mapper` — the Task 1 buoy map: positions by ray projection, each buoy's state decided over 4 s of full-view watching; downloads on `:8093`. Replay with `tools/scripts/map_session.py` | **untested in flight** |
 | [`uav_bringup`](uav_bringup/) | Launch file + the params YAML. Ships no code; build entry point | — |
 
 **A new package must be added to `uav_bringup/package.xml`'s exec_depends** or it
@@ -48,6 +49,8 @@ not like two vehicles.
 | MAVProxy → GCS (loopback + subnet broadcast) | 14550 | **14540** |
 | Ground station HTTP | 8090 | 8090 (different machine) |
 | Camera MJPEG viewer | — | **8091** |
+| Detector annotated view | — | **8092** |
+| Buoy map downloads (GET only) | — | **8093** |
 | Camera (SIYI SDK, UDP) | — | **37260** on `192.168.144.25` |
 | OCS vehicle link | 37564 | 37564 (outbound to `192.168.8.107`) |
 

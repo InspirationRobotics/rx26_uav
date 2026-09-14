@@ -121,6 +121,32 @@ def case_gimbal_unknown_blank():
     return check("gimbal unknown -> blank", row[9] == "", "gimbal=%r" % row[9])
 
 
+def case_old_columns_unmoved():
+    """The gimbal yaw columns were APPENDED. Every index labelled before they
+    existed is read by position, so the first eleven names must not move."""
+    old = ("frame_idx", "pts_ns", "ros_time_ns", "lat", "lon", "alt_rel",
+           "roll", "pitch", "yaw", "gimbal_pitch", "pose_age_s")
+    return check("original 11 columns unmoved", FRAME_FIELDS[:11] == old,
+                 ",".join(FRAME_FIELDS[11:]))
+
+
+def case_gimbal_yaw_columns():
+    """Known gimbal yaw is written; unknown is blank, independently of pitch."""
+    row = csv_row(4, 1, 2, pose=POSE, attitude=ATT, gimbal_pitch=-89.9,
+                  gimbal_yaw=-12.34, gimbal_yaw_rate=31.25, gimbal_age_s=0.08,
+                  pose_age_s=0.01).split(",")
+    blank = csv_row(5, 1, 2, pose=POSE, attitude=ATT, gimbal_pitch=-89.9,
+                    pose_age_s=0.01).split(",")
+    i = FRAME_FIELDS.index
+    ok = (row[i("gimbal_yaw")] == "-12.34" and row[i("gimbal_yaw_rate")] == "31.2"
+          and row[i("gimbal_age_s")] == "0.080"
+          and blank[i("gimbal_yaw")] == "" and blank[i("gimbal_age_s")] == ""
+          and blank[i("gimbal_pitch")] == "-89.90")
+    return check("gimbal yaw written, blank if unknown", ok,
+                 "%s %s %s" % (row[i("gimbal_yaw")], row[i("gimbal_yaw_rate")],
+                               row[i("gimbal_age_s")]))
+
+
 def case_latlon_precision():
     """7 dp keeps ~11 mm; fewer would quantise below the projection error."""
     row = csv_row(0, 1, 2, pose=(1.28010005, 103.85520009, 1.0)).split(",")
@@ -182,8 +208,10 @@ DEPAY, PARSE, DECODER = "rtph264depay", "h264parse", "nvv4l2decoder"
 
 def case_pipeline_full():
     d = Pipeline(RTSP, want_frames=True, preview_fps=5).describe("/tmp/a.mkv")
+    # splitmuxsink, not filesink: the recording rotates since 8 Sep 2026, and
+    # this case went on expecting the old sink for five days afterwards.
     need = ("rtspsrc", DEPAY, PARSE, "tee name=enc",
-            "matroskamux", "filesink", DECODER, "tee name=dec",
+            "matroskamux", "splitmuxsink", DECODER, "tee name=dec",
             "appsink name=frames", "appsink name=preview", "framerate=5/1")
     missing = [n for n in need if n not in d]
     return check("pipeline has every branch", not missing, ",".join(missing))
@@ -197,7 +225,7 @@ def case_pipeline_record_only():
     only pass while the name is still the one pipeline.py actually uses.
     """
     d = Pipeline(RTSP, want_frames=False).describe("/tmp/a.mkv")
-    ok = DECODER not in d and "appsink" not in d and "filesink" in d
+    ok = DECODER not in d and "appsink" not in d and "splitmuxsink" in d
     return check("record-only omits decode", ok)
 
 
@@ -272,6 +300,8 @@ def main():
         case_stale_attitude_independent(),
         case_no_pose_ever(),
         case_gimbal_unknown_blank(),
+        case_old_columns_unmoved(),
+        case_gimbal_yaw_columns(),
         case_latlon_precision(),
         case_disk_room(),
         case_disk_trips_once(),

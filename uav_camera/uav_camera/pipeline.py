@@ -65,7 +65,7 @@ class Pipeline:
                     preference. Wrong value = white frames, not an error.
       on_frame:     callable(bytes, width, height, pts_ns) or None. Called on the
                     streaming thread. Keep it short.
-      on_jpeg:      callable(bytes) or None. The operator's view.
+      on_jpeg:      callable(bytes, pts_ns) or None. The operator's view.
       on_error:     callable(str). Pipeline-level failures, for the node to log
                     and act on. Never raises out of the bus thread.
       want_frames:  build the decode branch at all.
@@ -377,11 +377,16 @@ class Pipeline:
         return self._gst.FlowReturn.OK
 
     def _on_jpeg_sample(self, sink):
-        buf, _, _, _ = self._unpack(sink)
+        # The pts goes along with the JPEG so the node can match this preview
+        # image to the decoded frame -- and so to the index row and pose -- it
+        # came from. Both appsinks hang off the same decoder tee, so the same
+        # frame carries the same timestamp on both branches (videorate may nudge
+        # it onto its own 1/preview_fps grid, which the node's match tolerates).
+        buf, _, _, pts = self._unpack(sink)
         if buf is None:
             return self._gst.FlowReturn.OK
         try:
-            self.on_jpeg(buf)
+            self.on_jpeg(buf, pts)
         except Exception as e:
             self.on_error("preview callback raised: %s" % e)
         return self._gst.FlowReturn.OK

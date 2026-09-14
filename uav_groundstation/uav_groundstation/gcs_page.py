@@ -86,6 +86,7 @@ button.go{border-color:var(--ok);color:var(--ok)}
 select,input{font:inherit;background:#232a34;color:var(--fg);
              border:1px solid var(--line);border-radius:5px;padding:4px 7px}
 .hint{color:var(--dim);font-size:12px;margin:8px 0 0}
+#buoylist td{padding:2px 14px 2px 0;white-space:nowrap}
 </style></head><body>
 <header>
   <h1>rx26_uav</h1>
@@ -104,13 +105,22 @@ select,input{font:inherit;background:#232a34;color:var(--fg);
         <button onclick="zoom(1.4)">+</button><button onclick="zoom(0.71)">−</button>
         <button id="followb" onclick="toggleFollow()">follow: on</button>
         <button onclick="clearTrail()">clear trail</button>
+        <button onclick="clearBuoys()">clear buoys</button>
+        <span id="mapexp"></span>
         <span id="mapinfo" class="note"></span>
       </div>
       <canvas id="map"></canvas>
     </div>
+    <div id="buoylist"></div>
     <p class="hint">The polygon is the <b>same <code>geofence</code> parameter
     telemetry_bridge uploads</b> — what you see is what the autopilot was told.
     Drag to pan. The autopilot enforces the fence; this is a readout.</p>
+    <p class="hint">Buoys come from <code>buoy_mapper</code>. A buoy reads
+    <b>UNKNOWN</b> until it has been watched in full view for 4 s — one frame
+    cannot tell flashing from solid or off. The dashed ring is its
+    <b>spread</b>: a small ring means its sightings agree; a large one means the
+    position is not to be trusted. Downloads are the map as it is right now;
+    the same files are also written on the Jetson on every disarm.</p>
   </section>
   <section id="s-logs">
     <div class="bar">
@@ -242,6 +252,14 @@ function zoom(k){scale=Math.max(0.05,Math.min(200,scale*k));draw()}
 function toggleFollow(){follow=!follow;
   el('followb').textContent='follow: '+(follow?'on':'off');draw()}
 function clearTrail(){trail=[];post('/map/clear_trail');draw()}
+/* Confirmed, because a clear mid-flight throws away the watch time every buoy
+   has built up. It never loses the MAP: buoy_mapper writes the files first. */
+function clearBuoys(){
+  if(!confirm('Clear the buoy map? It is saved on the Jetson first, but every '
+     +'buoy starts watching again from zero.'))return;
+  post('/map/clear_buoys').then(poll)}
+var BCOL={RED:'#e2564a',GREEN:'#4ec27b',BLUE:'#57a6ff'};
+function buoyShort(b){return b.label.replace('FLASHING','FLASH')}
 (function(){var c=el('map');
   c.addEventListener('mousedown',function(e){drag={x:e.clientX,y:e.clientY};
     follow=false;el('followb').textContent='follow: off';c.style.cursor='grabbing'});
@@ -274,6 +292,24 @@ function draw(){
     trail.forEach(function(p,i){i?g.lineTo(sx(p[0]),sy(p[1])):g.moveTo(sx(p[0]),sy(p[1]))});
     g.strokeStyle='rgba(78,194,123,.55)';g.lineWidth=1.4;g.stroke();
   }
+  /* buoys: filled in their colour once decided, black for OFF, hollow grey
+     while UNKNOWN; dashed ring = spread of the sightings */
+  var bm=m.buoys;
+  if(bm&&bm.buoys){
+    bm.buoys.forEach(function(b){
+      var X=sx(b.x),Y=sy(b.y),r=Math.max(5,0.23*scale);
+      if(b.spread_m>0){g.beginPath();g.arc(X,Y,Math.max(r+2,b.spread_m*scale),0,6.284);
+        g.setLineDash([3,3]);g.strokeStyle='rgba(223,230,239,.35)';g.lineWidth=1;
+        g.stroke();g.setLineDash([])}
+      g.beginPath();g.arc(X,Y,r,0,6.284);
+      if(b.state==='UNKNOWN'){g.strokeStyle='#8b97a8';g.lineWidth=2;g.stroke()}
+      else{g.fillStyle=b.state==='OFF'?'#000':(BCOL[b.colour]||'#fff');g.fill();
+        g.strokeStyle=b.state==='SOLID'?'#fff':'#8b97a8';
+        g.lineWidth=b.state==='SOLID'?2.5:1;g.stroke()}
+      g.fillStyle='#dfe6ef';g.font='11px monospace';
+      g.fillText('B'+b.id+' '+buoyShort(b),X+r+4,Y+4);
+    });
+  }
   /* vehicle */
   if(v){
     var X=sx(v.x),Y=sy(v.y),a=(v.heading||0)*Math.PI/180;
@@ -303,7 +339,41 @@ function renderMap(){
     ?((m.inside===false?'OUTSIDE FENCE  ':'inside fence  ')+
       'alt '+fmt((S.tel||{}).alt_rel,1)+' m  ·  '+trail.length+' trail pts')
     :'no pose';
-  if(tab==='map')draw();
+  if(tab==='map'){renderBuoys();draw();}
+}
+/* Export links and the buoy table. paint() rewrites a div only when its markup
+   changes, and these hold no buttons, so a poll-rate rewrite costs nothing. */
+function renderBuoys(){
+  var m=S.map||{},mp=m.mapper,bm=m.buoys,x;
+  if(mp&&mp.serving){
+    /* Protocol-relative, like the video: no absolute URL in the page. */
+    var base='//'+location.hostname+':'+mp.port+'/buoys.';
+    x='download: '+['kml','csv','plan','json'].map(function(f){
+      return '<a href="'+base+f+'" download style="color:var(--accent)">'+f+'</a>'
+    }).join(' · ');
+  }else if(mp){x='buoy_mapper starting…'}
+  else{x='buoy_mapper not running'}
+  paint('mapexp','<span class="note" style="flex:none">'+x+'</span>');
+  if(!bm){
+    paint('buoylist',mp?'<p class="hint">no buoy map received in the last 3 s</p>':'');
+    return;
+  }
+  var rows=bm.buoys.slice().sort(function(a,b){return a.id-b.id}).map(function(b){
+    return '<tr><td>B'+b.id+'</td><td style="color:'+(BCOL[b.colour]||'var(--fg)')
+      +'"><b>'+esc(b.label)+'</b>'+(b.locked?'':' <span class="note">watching</span>')
+      +'</td><td>'+b.lat.toFixed(7)+', '+b.lon.toFixed(7)
+      +'</td><td>±'+fmt(b.spread_m,2)+' m</td><td>'+b.sightings
+      +'</td><td>'+fmt(b.observed_s,1)+' s</td><td>'+Math.round(100*b.lit_fraction)
+      +'%</td></tr>';
+  }).join('');
+  paint('buoylist',
+    '<table style="margin-top:8px;border-collapse:collapse;font-size:12.5px">'
+    +'<tr style="color:var(--dim)"><td>buoy</td><td>state</td><td>lat, lon</td>'
+    +'<td>spread</td><td>sightings</td><td>watched</td><td>lit</td></tr>'
+    +(rows||'<tr><td colspan="7" class="note">no buoys yet</td></tr>')
+    +'</table><p class="note">map '+esc(bm.stem)+' · used '+bm.used
+    +' · edge '+bm.partial+' · low conf '+bm.low_conf+' · frames refused '
+    +bm.rejected+(bm.reject_reason?' (last: '+esc(bm.reject_reason)+')':'')+'</p>');
 }
 
 /* ---- logs ---- */

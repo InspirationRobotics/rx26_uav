@@ -4,8 +4,12 @@
   <name>uav_perception</name>
   <version>0.1.0</version>
   <description>
-    What the camera sees, interpreted. detector_node runs the trained YOLO11n
-    buoy detector and serves an annotated view for the operator.
+    What the camera sees, interpreted. detector_node runs the trained colour-buoy
+    model, serves an annotated view for the operator, and publishes each frame's
+    boxes with the pose camera_node recorded for that frame. buoy_mapper turns
+    those into a map of Task 1 buoys: positions by ray projection, and each
+    buoy's state (OFF, FLASHING, SOLID) decided over several seconds of watching,
+    because one frame cannot tell a flashing beacon from a steady or unlit one.
 
     It OWNS NO DEVICE. uav_camera holds the one RTSP connection, the one SIYI
     socket and the one recording writer; this package consumes the MJPEG stream
@@ -27,6 +31,9 @@
   <url type="repository">https://github.com/InspirationRobotics/rx26_uav</url>
 
   <depend>rclpy</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>std_srvs</depend>
+  <depend>uav_msgs</depend>
   <depend>uav_common</depend>
   <depend>uav_camera</depend>
 
