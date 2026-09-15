@@ -87,8 +87,9 @@ string record_gate
 # NaN when the gimbal has not answered. Do not substitute the commanded angle.
 #
 # "Has not answered" is a real measurement, not an inference. The node asks the
-# gimbal for this on every status tick over its own socket and holds the reply
-# in a StreamCache, so silence becomes NaN once gimbal_timeout_s has elapsed.
+# gimbal for this gimbal_poll_hz times a second, on its own thread and socket,
+# and holds the reply in a StreamCache, so silence becomes NaN once
+# gimbal_timeout_s has elapsed.
 # It does NOT come from the SIYI SDK's cached copy, which has no arrival time
 # and hands back its last value forever after the gimbal stops talking.
 float64 gimbal_pitch

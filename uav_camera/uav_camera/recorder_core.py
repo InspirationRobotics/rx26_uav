@@ -44,7 +44,27 @@ FRAME_FIELDS = (
     "yaw",
     "gimbal_pitch",  # degrees, MEASURED, nadir is -90. Blank when unknown
     "pose_age_s",    # age of the pose at frame receipt; blank if none ever seen
+    # ---- appended 2026-09-13 for buoy geolocation. APPENDED, not inserted, so
+    # every index written before this still parses column-for-column.
+    #
+    # The camera's heading is NOT the aircraft's. In follow mode the gimbal
+    # trails a fast yaw and catches up a moment later, so projecting a pixel
+    # with the aircraft heading alone puts buoys in the wrong place exactly
+    # while the pilot is turning. The gimbal reports where it is; record it.
+    "gimbal_yaw",       # degrees, as the gimbal reports it. Blank when unknown
+    "gimbal_yaw_rate",  # degrees/s; large = the camera is still swinging round
+    "gimbal_age_s",     # age of the gimbal sample at frame receipt
 )
+
+# How each column is written. Kept beside FRAME_FIELDS so a new column cannot be
+# added without saying how it is formatted.
+FIELD_FORMAT = {
+    "lat": ".7f", "lon": ".7f",   # 7 dp is ~11 mm: below the GPS's own error
+    "alt_rel": ".3f",
+    "roll": ".6f", "pitch": ".6f", "yaw": ".6f",
+    "gimbal_pitch": ".2f", "gimbal_yaw": ".2f", "gimbal_yaw_rate": ".1f",
+    "pose_age_s": ".3f", "gimbal_age_s": ".3f",
+}
 
 # Stems sort lexicographically into chronological order, which is the only
 # property that matters when someone is looking for "the flight after lunch" in
@@ -86,9 +106,10 @@ def _fmt(value, spec):
     return "" if value is None else format(value, spec)
 
 
-def csv_row(frame_idx, pts_ns, ros_time_ns, *, pose=None, attitude=None,
-            gimbal_pitch=None, pose_age_s=None) -> str:
-    """One index row, without a trailing newline.
+def frame_values(frame_idx, pts_ns, ros_time_ns, *, pose=None, attitude=None,
+                 gimbal_pitch=None, pose_age_s=None, gimbal_yaw=None,
+                 gimbal_yaw_rate=None, gimbal_age_s=None) -> dict:
+    """Every FRAME_FIELDS value for one frame, None where unknown.
 
     `pose` is (lat, lon, alt_rel) or None when the pose cache was stale.
     `attitude` is (roll, pitch, yaw) or None, independently -- the two arrive on
@@ -96,26 +117,41 @@ def csv_row(frame_idx, pts_ns, ros_time_ns, *, pose=None, attitude=None,
     separately, which is the same reason uav_msgs keeps GlobalPos and Attitude
     as different messages.
 
+    ONE FUNCTION FEEDS BOTH the CSV row and the metadata camera_node stamps onto
+    the viewer stream. The live buoy mapper reads the stream; the replay tool
+    reads the CSV. They must see the same numbers for the same frame, and two
+    code paths that "compute the same thing" are how that stops being true.
+
     Passing a stale value here instead of None defeats the entire file. There is
     no parameter to turn that behaviour on.
     """
     lat, lon, alt = pose if pose is not None else (None, None, None)
     roll, pitch, yaw = attitude if attitude is not None else (None, None, None)
-    return ",".join((
-        str(int(frame_idx)),
-        str(int(pts_ns)),
-        str(int(ros_time_ns)),
-        # 7 decimal places on lat/lon is ~11 mm at the equator: below the GPS's
-        # own error, and well below the projection error the geolocation carries.
-        _fmt(lat, ".7f"),
-        _fmt(lon, ".7f"),
-        _fmt(alt, ".3f"),
-        _fmt(roll, ".6f"),
-        _fmt(pitch, ".6f"),
-        _fmt(yaw, ".6f"),
-        _fmt(gimbal_pitch, ".2f"),
-        _fmt(pose_age_s, ".3f"),
-    ))
+    return {
+        "frame_idx": int(frame_idx), "pts_ns": int(pts_ns),
+        "ros_time_ns": int(ros_time_ns),
+        "lat": lat, "lon": lon, "alt_rel": alt,
+        "roll": roll, "pitch": pitch, "yaw": yaw,
+        "gimbal_pitch": gimbal_pitch, "pose_age_s": pose_age_s,
+        "gimbal_yaw": gimbal_yaw, "gimbal_yaw_rate": gimbal_yaw_rate,
+        "gimbal_age_s": gimbal_age_s,
+    }
+
+
+def row_from_values(values: dict) -> str:
+    """frame_values() output -> one index row, without a trailing newline."""
+    out = []
+    for name in FRAME_FIELDS:
+        v = values.get(name)
+        spec = FIELD_FORMAT.get(name)
+        out.append(str(int(v)) if spec is None else _fmt(v, spec))
+    return ",".join(out)
+
+
+def csv_row(frame_idx, pts_ns, ros_time_ns, **kwargs) -> str:
+    """One index row, without a trailing newline. See frame_values()."""
+    return row_from_values(frame_values(frame_idx, pts_ns, ros_time_ns,
+                                        **kwargs))
 
 
 class DiskGuard:

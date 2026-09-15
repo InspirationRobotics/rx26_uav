@@ -1,11 +1,16 @@
-"""detector_node — the operator's view of what the buoy model sees.
+"""detector_node — what the buoy model sees, for the operator AND for the mapper.
 
     ros2 run uav_perception detector_node
 
 It pulls frames from camera_node's EXISTING viewer stream, runs the trained
-YOLO11n buoy detector on them, draws boxes, and serves the annotated result as
-its own MJPEG stream. The ground station's Camera tab switches its <img> between
-the two.
+colour-buoy model on them, and does two things with the result:
+
+  * serves an annotated MJPEG view on its own port (the Camera tab switches to
+    it): boxes in the class colour, clipped boxes in grey, and a legend of the
+    mapped buoys' decided states in the corner;
+  * publishes every frame's boxes on /uav/perception/buoy_detections, WITH the
+    pose and gimbal angles camera_node attached to that frame, for
+    buoy_mapper_node to place on the map.
 
 WHY IT CONSUMES MJPEG INSTEAD OF OPENING THE CAMERA. uav_camera's package.xml
 already settled this:
@@ -20,15 +25,19 @@ for the A8 mini. So this node holds no RTSP session, no SIYI socket and no
 recording writer. Everything it touches is a copy. If it dies, hangs, or fills
 the GPU, the .mkv, the frame index and the stills carry on.
 
+WHY THE POSE COMES FROM THE STREAM. camera_node stamps each preview JPEG with the
+same values it wrote to that frame's _frames.csv row (X-Frame-Meta). Copying
+those onto the detections -- rather than reading /uav/pose when inference
+finishes, a few hundred ms later -- places each box with the pose the aircraft
+held when the frame arrived, and makes the live map and a replay of the CSV read
+identical inputs.
+
 IT WRITES NOTHING TO DISK, AND THAT IS DELIBERATE. The annotated frames exist
 only in this stream. Burning boxes into saved imagery would poison the next
 training round -- the model would learn that a buoy is a thing with a rectangle
 drawn on it, score beautifully on our own data, and detect nothing at the
-competition. The stills camera_node writes stay clean 1920x1080.
-
-The useful thing to persist is detections AS DATA -- frame index, box,
-confidence, beside _frames.csv. That is the shape mapping needs and it does not
-touch a pixel. Not built yet.
+competition. The stills camera_node writes stay clean 1920x1080. Detections are
+persisted AS DATA, by buoy_mapper_node's sightings log.
 
 CUDA COMES FROM THE IMAGE, NOT FROM HERE. uav:ml carries torch, ultralytics and
 a matched CUDA. On uav:latest this node will import-fail at startup, loudly,
@@ -40,12 +49,16 @@ import threading
 import time
 import urllib.request
 
+from builtin_interfaces.msg import Time
 from rclpy.node import Node
+
+from uav_msgs.msg import BuoyDetection, BuoyDetections, BuoyMap
 
 from uav_camera.mjpeg_server import FrameSlot, MjpegServer
 from uav_common import config as uav_config
 from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config
+from uav_common.stream_cache import StreamCache
 from uav_perception import detector_core as core
 
 PARAM_SPEC = {
@@ -60,16 +73,38 @@ PARAM_SPEC = {
                                    "camera_node.mjpeg_port and ground_station.port"),
     "bind_host": dict(read_only=True, description="viewer bind address"),
     "infer_hz": dict(read_only=True, lo=0.2, hi=30.0,
-                     description="inference rate. Deliberately low: this shares "
-                                 "a GPU with the decoder that feeds the recording"),
+                     description="inference rate. Sets how many colour samples "
+                                 "the mapper gets per second of watching"),
     "imgsz": dict(read_only=True, lo=320, hi=1920,
                   description="inference input size. 1920 is native; smaller "
                               "shrinks the buoy and loses it before it loses speed"),
     "conf": dict(read_only=True, lo=0.05, hi=0.95,
-                 description="detection confidence floor"),
+                 description="detection confidence floor for the VIEW and the "
+                             "topic; the mapper applies its own, higher one"),
+    "edge_margin_px": dict(read_only=True, lo=0, hi=200,
+                           description="a box within this many px of the image "
+                                       "border is a clipped buoy: shown grey, "
+                                       "never mapped"),
     "reconnect_s": dict(read_only=True, lo=0.5, hi=30.0,
                         description="wait before retrying a dropped source"),
 }
+
+# How long the mapper's last BuoyMap stays on the legend. Beyond this the legend
+# says the mapper is silent rather than showing states it is no longer vouching for.
+MAP_LEGEND_TIMEOUT_S = 3.0
+
+
+def _stamp_from_ns(ns):
+    t = Time()
+    t.sec, t.nanosec = divmod(int(ns), 1_000_000_000)
+    return t
+
+
+def _f(meta, key):
+    """A metadata number as float, NaN when absent. NaN, not a default: the
+    message spells "unknown" that way and the mapper refuses it."""
+    v = None if meta is None else meta.get(key)
+    return float("nan") if v is None else float(v)
 
 
 class DetectorNode(Node):
@@ -92,6 +127,7 @@ class DetectorNode(Node):
         self._period = 1.0 / float(p["infer_hz"])
         self._imgsz = int(p["imgsz"])
         self._conf = float(p["conf"])
+        self._margin = int(p["edge_margin_px"])
         self._src = str(p["source_url"])
         self._reconnect_s = float(p["reconnect_s"])
 
@@ -101,6 +137,7 @@ class DetectorNode(Node):
         self._infers = 0
         self._last_dets = 0
         self._last_ms = 0.0
+        self._meta_missing = 0
         self._connected = False
         self._last_err = ""
 
@@ -114,9 +151,20 @@ class DetectorNode(Node):
         self.get_logger().info("loading %s ..." % self.model_path)
         t0 = time.monotonic()
         self._model = YOLO(self.model_path)
+        # Class names come FROM THE WEIGHTS, never from a list written here. The
+        # Roboflow export orders them alphabetically, and a hand-written list
+        # would silently relabel every buoy the day someone retrains.
+        self._names = dict(self._model.names)
         self.get_logger().info(
-            "model ready in %.1fs, inference at %.1f Hz, imgsz %d"
-            % (time.monotonic() - t0, float(p["infer_hz"]), self._imgsz))
+            "model ready in %.1fs, classes %s, inference at %.1f Hz, imgsz %d"
+            % (time.monotonic() - t0, self._names, float(p["infer_hz"]),
+               self._imgsz))
+
+        self.det_pub = self.create_publisher(
+            BuoyDetections, "/uav/perception/buoy_detections", 10)
+        self._map = StreamCache(MAP_LEGEND_TIMEOUT_S)
+        self.create_subscription(BuoyMap, "/uav/perception/buoy_map",
+                                 self._on_map, 10)
 
         self.slot = FrameSlot()
         self.viewer = MjpegServer(self.slot, self._viewer_state)
@@ -129,6 +177,9 @@ class DetectorNode(Node):
         self._worker = threading.Thread(
             target=self._run, daemon=True, name="detector")
         self._worker.start()
+
+    def _on_map(self, msg):
+        self._map.set(msg, time.monotonic())
 
     # ------------------------------------------------------------------ loop
 
@@ -162,20 +213,21 @@ class DetectorNode(Node):
                     raise IOError(
                         "no complete frame in %d bytes -- source is stalled"
                         % len(buf))
-                frames, buf = core.split_jpegs(buf)
-                if not frames:
+                parts, buf = core.split_parts(buf)
+                if not parts:
                     continue
                 # Only the NEWEST frame. Falling behind and then working through
                 # a backlog would show the operator the past, and the whole
                 # point of this view is what the model sees right now.
-                self._frames_in += len(frames)
+                self._frames_in += len(parts)
                 now = time.monotonic()
                 if not core.should_run(now, last, self._period):
                     continue
                 last = now
-                self._handle(frames[-1])
+                meta, jpeg = parts[-1]
+                self._handle(jpeg, meta)
 
-    def _handle(self, jpeg: bytes):
+    def _handle(self, jpeg: bytes, meta):
         import numpy as np
         img = self._cv2.imdecode(
             np.frombuffer(jpeg, dtype=np.uint8), self._cv2.IMREAD_COLOR)
@@ -190,18 +242,16 @@ class DetectorNode(Node):
         self._infers += 1
 
         boxes = []
-        for b, c in zip(res.boxes.xyxy.cpu().numpy(),
-                        res.boxes.conf.cpu().numpy()):
-            boxes.append((float(b[0]), float(b[1]), float(b[2]), float(b[3]),
-                          float(c)))
+        for b, c, k in zip(res.boxes.xyxy.cpu().numpy(),
+                           res.boxes.conf.cpu().numpy(),
+                           res.boxes.cls.cpu().numpy()):
+            box = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+            cid = int(k)
+            boxes.append((box, float(c), cid, self._names.get(cid, str(cid)),
+                          core.full_view(box, w, h, self._margin)))
         self._last_dets = len(boxes)
 
-        # predict() ran on the image as given, so the boxes are already in its
-        # coordinates -- scale_boxes is identity here. It stays in the call
-        # because the moment someone resizes before inference for speed, the
-        # boxes silently land in the wrong place, and a no-op that documents the
-        # assumption is cheaper than the afternoon that costs.
-        boxes = core.scale_boxes(boxes, (w, h), (w, h))
+        self._publish(boxes, meta, w, h)
         self._draw(img, boxes)
 
         ok, enc = self._cv2.imencode(".jpg", img,
@@ -209,21 +259,83 @@ class DetectorNode(Node):
         if ok:
             self.slot.put(enc.tobytes())
 
+    def _publish(self, boxes, meta, w, h):
+        """Every inferred frame is published, including frames with no boxes.
+
+        An empty frame is information too: it tells the mapper the camera looked
+        and saw nothing, which is different from the detector having stopped.
+        """
+        msg = BuoyDetections()
+        ok = meta is not None and meta.get("ros_time_ns") is not None
+        if not ok:
+            self._meta_missing += 1
+        msg.header.stamp = (_stamp_from_ns(meta["ros_time_ns"]) if ok
+                            else self.get_clock().now().to_msg())
+        msg.frame_meta_ok = bool(ok)
+        msg.session = str((meta or {}).get("session") or "")
+        idx = (meta or {}).get("frame_idx")
+        msg.frame_idx = int(idx) if idx is not None and idx >= 0 else 0
+        msg.image_width, msg.image_height = int(w), int(h)
+        msg.latitude = _f(meta, "lat")
+        msg.longitude = _f(meta, "lon")
+        msg.altitude_rel = _f(meta, "alt_rel")
+        msg.roll, msg.pitch, msg.yaw = (_f(meta, "roll"), _f(meta, "pitch"),
+                                        _f(meta, "yaw"))
+        msg.pose_age_s = _f(meta, "pose_age_s")
+        msg.gimbal_pitch = _f(meta, "gimbal_pitch")
+        msg.gimbal_yaw = _f(meta, "gimbal_yaw")
+        msg.gimbal_yaw_rate = _f(meta, "gimbal_yaw_rate")
+        msg.gimbal_age_s = _f(meta, "gimbal_age_s")
+        for (x0, y0, x1, y1), conf, cid, name, full in boxes:
+            d = BuoyDetection()
+            d.class_name, d.class_id, d.confidence = name, cid, conf
+            d.x0, d.y0, d.x1, d.y1 = x0, y0, x1, y1
+            d.full_view = bool(full)
+            msg.detections.append(d)
+        self.det_pub.publish(msg)
+
     def _draw(self, img, boxes):
         cv2 = self._cv2
-        for x0, y0, x1, y1, c in boxes:
-            p0 = (int(x0), int(y0))
-            p1 = (int(x1), int(y1))
-            cv2.rectangle(img, p0, p1, (0, 255, 0), 2)
-            cv2.putText(img, core.box_label(c), (p0[0], max(14, p0[1] - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
-                        cv2.LINE_AA)
+        for (x0, y0, x1, y1), conf, _cid, name, full in boxes:
+            colour = core.class_bgr(name) if full else core.PARTIAL_BGR
+            p0, p1 = (int(x0), int(y0)), (int(x1), int(y1))
+            cv2.rectangle(img, p0, p1, colour, 2 if full else 1)
+            text = core.box_label(conf, name) + ("" if full else " (edge)")
+            cv2.putText(img, text, (p0[0], max(14, p0[1] - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2, cv2.LINE_AA)
         # A corner readout, because "no boxes" has two very different causes and
         # the operator cannot tell them apart from an empty frame: the model
         # ran and found nothing, or nothing is running at all.
         cv2.putText(img, "%d det  %.0f ms" % (len(boxes), self._last_ms),
                     (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
                     cv2.LINE_AA)
+        self._draw_legend(img)
+
+    def _draw_legend(self, img):
+        """The mapper's decided state per buoy, top-left, under the readout.
+
+        This is where FLASHING vs SOLID vs OFF is shown -- never on a box. A box
+        is one frame, and one frame cannot tell those apart.
+        """
+        cv2 = self._cv2
+        m = self._map.get(time.monotonic())
+        y = 54
+        if m is None:
+            cv2.putText(img, "map: buoy_mapper silent", (10, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2,
+                        cv2.LINE_AA)
+            return
+        for b in sorted(m.buoys, key=lambda b: b.id)[:12]:
+            text = "B%d %s  %.1fs  +/-%.1fm%s" % (
+                b.id, b.label, b.observed_s, b.spread_m,
+                "" if b.locked else "  watching")
+            colour = core.class_bgr(b.colour.lower()) if b.colour else (
+                (40, 40, 40) if b.state == "OFF" else (200, 200, 200))
+            cv2.putText(img, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(img, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        colour, 2, cv2.LINE_AA)
+            y += 24
 
     # ----------------------------------------------------------------- state
 
@@ -236,6 +348,10 @@ class DetectorNode(Node):
             "detections": self._last_dets,
             "infer_ms": round(self._last_ms, 1),
             "model": os.path.basename(self.model_path),
+            "classes": self._names,
+            # Frames published without camera_node's pose metadata. Every one is
+            # a frame the mapper cannot use; this should stay near zero.
+            "frames_without_meta": self._meta_missing,
             "error": self._last_err,
         }
 

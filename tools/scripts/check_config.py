@@ -99,6 +99,14 @@ PINNED = [
         ("telemetry_bridge", "geofence"),
         ("ground_station", "geofence"),
     ]),
+    # The mapper refuses frames whose MEASURED gimbal pitch is far from nadir.
+    # If its idea of nadir differed from the angle camera_node commands, it
+    # would either refuse every frame of a perfectly pointed camera or accept a
+    # camera that is off by the difference -- and the second one puts every buoy
+    # out by altitude*tan(difference) with nothing to say so.
+    (("camera_node", "gimbal_pitch_deg"), [
+        ("buoy_mapper", "nadir_pitch_deg"),
+    ]),
 ]
 
 
@@ -238,6 +246,8 @@ def check_ports(cfg):
         ("ocs_client.ocs_port", get(cfg, "ocs_client", "ocs_port")),
         ("camera_node.mjpeg_port", get(cfg, "camera_node", "mjpeg_port")),
         ("camera_node.siyi_port", get(cfg, "camera_node", "siyi_port")),
+        ("detector_node.mjpeg_port", get(cfg, "detector_node", "mjpeg_port")),
+        ("buoy_mapper.http_port", get(cfg, "buoy_mapper", "http_port")),
     ]
     seen = {}
     for name, value in ports:

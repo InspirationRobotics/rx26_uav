@@ -14,12 +14,14 @@ setup(
     zip_safe=False,
     maintainer="Team Inspiration",
     maintainer_email="chase001cz@gmail.com",
-    description="Buoy detection: the trained model, and the operator's view of it",
+    description="Buoy detection and mapping: the trained model, the operator's "
+                "view of it, and the Task 1 buoy map",
     url="https://github.com/InspirationRobotics/rx26_uav",
     license="MIT",
     entry_points={
         "console_scripts": [
             "detector_node = uav_perception.detector_node:main",
+            "buoy_mapper = uav_perception.buoy_mapper_node:main",
         ],
     },
 )

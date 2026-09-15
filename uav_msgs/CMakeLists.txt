@@ -14,6 +14,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FcuStatus.msg"
   "msg/RcChannels.msg"
   "msg/CameraStatus.msg"
+  # Buoy mapping (uav_perception). BuoyDetections contains BuoyDetection and
+  # BuoyMap contains Buoy, so all four must be listed or the import fails.
+  "msg/BuoyDetection.msg"
+  "msg/BuoyDetections.msg"
+  "msg/Buoy.msg"
+  "msg/BuoyMap.msg"
   DEPENDENCIES std_msgs
 )
 

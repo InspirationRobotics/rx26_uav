@@ -10,9 +10,11 @@ back.
     # then, on the laptop:  http://<JETSON_IP>:8090
 
 Subscribes (read-only): /uav/pose, /uav/attitude, /uav/fcu_status,
-/uav/flight_state. Publishes nothing. Its only outward effects are the processes
-it spawns and the two power verbs it can hand to the host helper — both gated,
-both re-checked server-side.
+/uav/flight_state, /uav/camera/status, /uav/perception/buoy_map. Publishes
+nothing. Its only outward effects are the processes it spawns, the two power
+verbs it can hand to the host helper — both gated, both re-checked server-side —
+and two services it can call: camera capture, and clearing the buoy map (which
+saves the map before clearing it, so neither can lose data).
 
 THE TWO RULES THIS NODE HOLDS, and holds again on every request no matter what
 the page rendered:
@@ -43,9 +45,9 @@ from rclpy.node import Node
 
 from rcl_interfaces.msg import Log
 
-from std_srvs.srv import SetBool
-from uav_msgs.msg import (Attitude, CameraStatus, FcuStatus, FlightState,
-                          GlobalPos)
+from std_srvs.srv import SetBool, Trigger
+from uav_msgs.msg import (Attitude, BuoyMap, CameraStatus, FcuStatus,
+                          FlightState, GlobalPos)
 
 from uav_common import config as uav_config
 from uav_common import geo
@@ -97,6 +99,14 @@ PARAM_SPEC = {
 
 _LANDED_NAME = {0: "UNDEFINED", 1: "ON_GROUND", 2: "IN_AIR", 3: "TAKEOFF",
                 4: "LANDING"}
+
+# buoy_mapper publishes the whole map once a second. Three missed maps and the
+# page greys the buoys out rather than drawing positions nobody is vouching for.
+BUOY_MAP_TIMEOUT_S = 3.0
+
+# How long the page waits on a service it calls. The HTTP thread blocks for this
+# at most; see _call_service for why waiting there is safe.
+SERVICE_TIMEOUT_S = 5.0
 
 
 class GroundStation(Node):
@@ -167,6 +177,14 @@ class GroundStation(Node):
         # use makes the first press of REC slower than every later one, which
         # reads as the button being broken.
         self._capture_cli = self.create_client(SetBool, "/uav/camera/capture")
+
+        # The buoy map, drawn on the Map tab. Kept whole (the mapper never sends
+        # deltas), and aged like every other stream.
+        self._buoy_map = StreamCache(BUOY_MAP_TIMEOUT_S)
+        self.create_subscription(BuoyMap, "/uav/perception/buoy_map",
+                                 self._on_buoy_map, 10)
+        self._clear_map_cli = self.create_client(
+            Trigger, "/uav/perception/clear_buoy_map")
 
         self._workspace = self._check_workspace(p["workspace_path"])
 
@@ -339,11 +357,52 @@ class GroundStation(Node):
                 "inside": tel.get("inside"),
                 "trail_gate": self.p["trail_min_move_m"],
                 "trail_max": int(self.p["trail_length"]),
+                "buoys": self._buoy_state(now),
+                "mapper": self._mapper_state(running),
             },
             "sys": self._sys_state(),
             "power": self._power_state(known, armed),
             "cam": self._cam_state(running),
         }
+
+    def _on_buoy_map(self, msg):
+        self._buoy_map.set(msg, time.monotonic())
+
+    def _buoy_state(self, now):
+        """Buoys for the Map tab, in the same local metres as the fence and trail.
+
+        None when the map is stale -- the page then says the mapper is silent
+        instead of drawing the last positions it heard as if they were current.
+        """
+        m = self._buoy_map.get(now)
+        if m is None:
+            return None
+        out = []
+        for b in m.buoys:
+            x, y = geo.latlon_to_xy(b.latitude, b.longitude, self._origin)
+            out.append({
+                "id": b.id, "x": x, "y": y, "lat": b.latitude,
+                "lon": b.longitude, "label": b.label, "state": b.state,
+                "colour": b.colour, "locked": b.locked,
+                "spread_m": b.spread_m, "sightings": b.sightings,
+                "observed_s": b.observed_s, "lit_fraction": b.lit_fraction,
+            })
+        return {"buoys": out, "stem": m.export_stem,
+                "used": m.detections_used, "partial": m.detections_partial,
+                "low_conf": m.detections_low_conf,
+                "rejected": m.frames_rejected,
+                "reject_reason": m.last_reject_reason}
+
+    def _mapper_state(self, running):
+        """Where buoy_mapper's downloads are, if it is serving them.
+
+        Same running/serving distinction as the camera: a download link to a
+        port that has not bound yet is a link that fails.
+        """
+        spec = reg.BY_NAME.get("buoy_mapper")
+        if spec is None or not spec.port or "buoy_mapper" not in running:
+            return None
+        return {"serving": self._port_open(spec.port), "port": spec.port}
 
     def _on_cam_status(self, msg):
         # Cached as a pair so one staleness timeout covers both. Splitting them
@@ -533,6 +592,9 @@ class GroundStation(Node):
         if path == "/map/clear_trail":
             self._trail.clear()
             return {"ok": True, "message": "trail cleared"}
+        if path == "/map/clear_buoys":
+            return self._call_service(self._clear_map_cli, Trigger.Request(),
+                                      "buoy_mapper", "clear_buoy_map")
         if path == "/camera/capture":
             return self._act_capture(payload)
         if path == "/power":
@@ -545,6 +607,16 @@ class GroundStation(Node):
         Not the .mkv and not the frame index -- those are the flight record and
         always run, because a sortie nobody can diagnose is worse than a few
         hundred MB.
+        """
+        if "on" not in payload:
+            return {"ok": False, "message": 'expected {"on": true} or {"on": false}'}
+        req = SetBool.Request()
+        req.data = bool(payload["on"])
+        return self._call_service(self._capture_cli, req, "camera_node",
+                                  "capture")
+
+    def _call_service(self, cli, req, who, what):
+        """Call a service from an HTTP action; -> {ok, message}.
 
         WAITING ON THE FUTURE HERE IS SAFE, AND ONLY HERE. This runs on the HTTP
         server's thread, never inside a ROS callback, so the executor spinning in
@@ -552,23 +624,19 @@ class GroundStation(Node):
         done() instead of spin_until_future_complete: spinning from this thread
         would fight the executor that already owns this node.
         """
-        if "on" not in payload:
-            return {"ok": False, "message": 'expected {"on": true} or {"on": false}'}
-        want = bool(payload["on"])
-        if not self._capture_cli.service_is_ready():
+        if not cli.service_is_ready():
             return {"ok": False,
-                    "message": "camera_node is not offering /uav/camera/capture"
-                               " — is it running?"}
-        req = SetBool.Request()
-        req.data = want
-        fut = self._capture_cli.call_async(req)
-        deadline = time.monotonic() + 5.0
+                    "message": "%s is not offering %s — is it running?"
+                               % (who, cli.srv_name)}
+        fut = cli.call_async(req)
+        deadline = time.monotonic() + SERVICE_TIMEOUT_S
         while not fut.done() and time.monotonic() < deadline:
             time.sleep(0.05)
         if not fut.done():
             return {"ok": False,
-                    "message": "camera_node did not answer within 5s; SD state "
-                               "is unchanged as far as this page knows"}
+                    "message": "%s did not answer %s within %.0fs; nothing has "
+                               "changed as far as this page knows"
+                               % (who, what, SERVICE_TIMEOUT_S)}
         res = fut.result()
         return {"ok": bool(res.success), "message": res.message}
 

@@ -59,12 +59,14 @@ node was not already exercising, and it cannot point the camera anywhere wrong.
 Gating it would mean the one recovery action that is safe by construction is
 also the one you cannot reach after the gimbal has lost nadir.
 """
+import json
 import math
 import os
 import queue
 import shutil
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 from geometry_msgs.msg import Vector3
@@ -177,6 +179,11 @@ PARAM_SPEC = {
     "status_rate_hz": dict(read_only=True, lo=0.2, hi=10.0,
                            description="/uav/camera/status rate. A heartbeat "
                                        "about the pipeline, not per frame"),
+    "gimbal_poll_hz": dict(read_only=True, lo=1.0, hi=25.0,
+                           description="how often the gimbal is asked for its "
+                                       "attitude, on its own thread. Sets how "
+                                       "old the gimbal yaw written beside each "
+                                       "frame can be"),
 }
 
 # Rows accumulated between status ticks before being written. Bounded because a
@@ -198,6 +205,18 @@ MAX_PENDING_STILLS = 8
 # would re-command every tick of the slew and read "not at nadir" the whole way
 # there, which looks like a gimbal fighting itself in the log.
 RENADIR_MIN_INTERVAL_S = 4.0
+
+# Recent frames kept so a preview JPEG can find the index row of the frame it was
+# encoded from. The preview branch runs behind the frames branch by one encode,
+# a few tens of ms; 64 frames is 2.5 s at 25 fps, far more than that lag ever is.
+RECENT_FRAMES = 64
+
+# How far apart a preview JPEG's pts and a decoded frame's pts may be and still
+# be called the same frame. videorate re-times its output onto a 1/preview_fps
+# grid, so the two can differ by up to half a source frame (20 ms at 25 fps);
+# 60 ms allows that with margin while staying under two frames, so a match can
+# never be to a frame the camera captured noticeably earlier or later.
+PREVIEW_MATCH_NS = 60_000_000
 
 
 class CameraNode(Node):
@@ -335,12 +354,27 @@ class CameraNode(Node):
         self.att_cache = StreamCache(float(p["attitude_timeout_s"]))
         self.frame_cache = StreamCache(float(p["frame_timeout_s"]))
         # The gimbal gets the same treatment as every other stream, and for the
-        # same reason. It is polled rather than subscribed -- siyi_client asks
-        # the gimbal on each tick -- but the question a cache answers is
+        # same reason. It is polled rather than subscribed -- _gimbal_poll asks
+        # the gimbal at gimbal_poll_hz -- but the question a cache answers is
         # identical either way: is what I am holding still true? Without this
         # the node reported gimbal_ok on the mere fact that a call returned,
         # which was true even when the answer was minutes old.
         self.gimbal_cache = StreamCache(float(p["gimbal_timeout_s"]))
+        # The cache is written by the gimbal poll thread and read by the
+        # GStreamer frame thread and the status tick. StreamCache.set writes
+        # three fields, so an unlocked read could pair a new angle with an old
+        # receipt time -- a fresh-looking reading that is not.
+        self._gimbal_lock = threading.Lock()
+        self._gimbal_stop = threading.Event()
+        self._gimbal_thread = None
+        self._gimbal_period = 1.0 / float(p["gimbal_poll_hz"])
+        # (pts_ns, frame_values) for the last RECENT_FRAMES frames; see
+        # _on_jpeg. Guarded by self._lock with the rest of the frame state.
+        self._recent = deque(maxlen=RECENT_FRAMES)
+        # Preview JPEGs sent WITHOUT metadata because no frame matched. Should
+        # sit at zero; a climbing count means the two branches disagree about
+        # timestamps and the buoy mapper is being starved of frames.
+        self._preview_meta_misses = 0
         self.create_subscription(GlobalPos, "/uav/pose", self._on_pose, 10)
         self.create_subscription(Attitude, "/uav/attitude", self._on_att, 10)
         self.create_subscription(FcuStatus, "/uav/fcu_status", self._on_fcu, 10)
@@ -380,6 +414,20 @@ class CameraNode(Node):
                 "siyi_enabled is false: no gimbal control, no SD recording. "
                 "The camera will stream and record from the Jetson only.")
             self.siyi = NullSiyiClient(nadir_pitch_deg=nadir)
+
+        # ---- gimbal attitude, read on ITS OWN THREAD.
+        #
+        # It used to be asked once per status tick (2 Hz). That was enough to
+        # say whether the camera was at nadir, and not nearly enough to say
+        # where it was POINTING: in follow mode the gimbal trails a fast yaw and
+        # catches up a moment later, and every frame in between needs the
+        # camera's actual heading to be placed on a map. A thread rather than a
+        # ROS timer because each ask can block for ATTITUDE_TIMEOUT_S, and a
+        # blocked timer would stall the pose and attitude subscriptions that the
+        # very same frames depend on.
+        self._gimbal_thread = threading.Thread(
+            target=self._gimbal_poll, daemon=True, name="gimbal-poll")
+        self._gimbal_thread.start()
 
         # ---- the gimbal command topic, created only when asked for.
         #
@@ -449,6 +497,32 @@ class CameraNode(Node):
     def _on_att(self, msg):
         self.att_cache.set((msg.roll, msg.pitch, msg.yaw),
                            time.monotonic(), msg.header.stamp)
+
+    def _gimbal_poll(self):
+        """Own thread. Ask the gimbal for its attitude at gimbal_poll_hz.
+
+        Only ever SETS the cache on a real answer. A miss leaves the last good
+        reading standing until gimbal_timeout_s runs out, which is the same
+        lost-datagram-versus-dead-gimbal distinction the status tick used to
+        make when it did the asking.
+        """
+        while not self._gimbal_stop.is_set():
+            t0 = time.monotonic()
+            g = self.siyi.attitude_and_rates()
+            if g is not None:
+                with self._gimbal_lock:
+                    self.gimbal_cache.set(g, time.monotonic())
+            self._gimbal_stop.wait(
+                max(0.0, self._gimbal_period - (time.monotonic() - t0)))
+
+    def _gimbal_snapshot(self, now):
+        """-> (reading or None, age_s or None), read consistently under the lock.
+
+        reading is siyi_client's (yaw, pitch, roll, yaw_rate, pitch_rate,
+        roll_rate), None when stale. age is None only if nothing ever arrived.
+        """
+        with self._gimbal_lock:
+            return self.gimbal_cache.get(now), self.gimbal_cache.age(now)
 
     # ----------------------------------------------------------- gimbal in
 
@@ -880,15 +954,25 @@ class CameraNode(Node):
         pose = self.pose_cache.get(now)
         att = self.att_cache.get(now)
         age = self.pose_cache.age(now)
+        # The gimbal reading nearest this frame, from the poll thread -- not the
+        # status tick's copy, which can be half a second old. Stale -> blanks.
+        g, g_age = self._gimbal_snapshot(now)
         with self._lock:
-            if self._csv is None:
-                return
-            row = recorder_core.csv_row(
-                self._frame_idx, pts_ns, ros_ns,
+            recording = self._csv is not None
+            values = recorder_core.frame_values(
+                # -1 while no session is open: there is no index row to join
+                # to, but the pose still travels with the preview for mapping.
+                self._frame_idx if recording else -1, pts_ns, ros_ns,
                 pose=pose, attitude=att,
-                gimbal_pitch=(None if math.isnan(self._gimbal_pitch)
-                              else self._gimbal_pitch),
+                gimbal_pitch=None if g is None else g[1],
+                gimbal_yaw=None if g is None else g[0],
+                gimbal_yaw_rate=None if g is None else g[3],
+                gimbal_age_s=g_age,
                 pose_age_s=age)
+            self._recent.append((int(pts_ns), values))
+            if not recording:
+                return
+            row = recorder_core.row_from_values(values)
             idx = self._frame_idx
             self._frame_idx += 1
             if len(self._pending) < MAX_PENDING_ROWS:
@@ -967,8 +1051,34 @@ class CameraNode(Node):
                 self.get_logger().warn(
                     "still write failed: %s" % e, throttle_duration_sec=10.0)
 
-    def _on_jpeg(self, jpeg):
-        self.slot.put(jpeg)
+    def _on_jpeg(self, jpeg, pts_ns=0):
+        """Preview JPEG -> the viewer, with the frame's metadata attached.
+
+        The metadata is the SAME dict that became this frame's _frames.csv row
+        (recorder_core.frame_values), so the live buoy mapper, which reads the
+        stream through detector_node, and the replay tool, which reads the CSV,
+        agree about where the aircraft was for every frame.
+
+        No match means no metadata, never the nearest-looking guess. A preview
+        sent bare is just a picture: detector_node still draws on it, and the
+        mapper refuses it rather than placing buoys with a pose from some other
+        moment.
+        """
+        pts_ns = int(pts_ns)
+        with self._lock:
+            best = None
+            for rec_pts, values in self._recent:
+                d = abs(rec_pts - pts_ns)
+                if d <= PREVIEW_MATCH_NS and (best is None or d < best[0]):
+                    best = (d, values)
+            session = self._session
+        if best is None:
+            self._preview_meta_misses += 1
+            self.slot.put(jpeg)
+            return
+        meta = dict(best[1])
+        meta["session"] = session
+        self.slot.put(jpeg, json.dumps(meta, separators=(",", ":")))
 
     def _on_pipeline_error(self, message):
         self.get_logger().error(str(message))
@@ -1028,22 +1138,21 @@ class CameraNode(Node):
             if self._start_session():
                 self.pipe.split_now()
 
-        # Ask the gimbal, then read the answer back OUT OF THE CACHE rather
-        # than using it directly. The extra hop is what separates a lost
+        # The gimbal is ASKED on its own thread (_gimbal_poll); this reads the
+        # answer back OUT OF THE CACHE. That hop is what separates a lost
         # datagram from a dead gimbal: a single miss leaves the last good angle
         # standing until gimbal_timeout_s has run out, and a gimbal that has
         # actually stopped answering goes NaN and says so exactly once.
-        g = self.siyi.attitude_and_rates()
-        if g is not None:
-            self.gimbal_cache.set(g, now)
-        if self.gimbal_cache.went_stale(now):
+        with self._gimbal_lock:
+            went_stale = self.gimbal_cache.went_stale(now)
+        if went_stale:
             self.get_logger().error(
                 "gimbal has not answered for %.1fs. gimbal_pitch is NaN and the "
                 "frame index will write blanks for it from here -- those frames "
                 "cannot be geo-projected. Video and recording are unaffected; "
                 "the camera is still pointing wherever it last was."
                 % self.gimbal_cache.timeout_s)
-        g = self.gimbal_cache.get(now)
+        g, _ = self._gimbal_snapshot(now)
         if g is None:
             self._gimbal_ok = False
             self._gimbal_pitch = float("nan")
@@ -1082,7 +1191,13 @@ class CameraNode(Node):
         """Snapshot for the viewer's /state. Called on an HTTP thread."""
         with self._lock:
             session, frame_idx = self._session, self._frame_idx
+        g, _ = self._gimbal_snapshot(time.monotonic())
         return {
+            # Raw, as the gimbal reports it. Shown so the one-time check of what
+            # this number is relative to (airframe or north) can be done by
+            # turning the aircraft by hand and watching it.
+            "gimbal_yaw": None if g is None else round(g[0], 1),
+            "preview_meta_misses": self._preview_meta_misses,
             "stream_ok": self.frame_cache.fresh(time.monotonic()),
             "fps": None if math.isnan(self._fps) else round(self._fps, 1),
             "session": session,
@@ -1121,6 +1236,11 @@ class CameraNode(Node):
                     self._stills_thread.join(timeout=5.0)
             except Exception:
                 pass
+        # Stop asking the gimbal before its socket is closed underneath the
+        # thread. Bounded join: one ask blocks at most ATTITUDE_TIMEOUT_S.
+        self._gimbal_stop.set()
+        if self._gimbal_thread is not None:
+            self._gimbal_thread.join(timeout=2.0)
         try:
             self.viewer.stop()
         except Exception:

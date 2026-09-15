@@ -501,18 +501,35 @@ camera_node:
     status_rate_hz: 2.0                    # [RO] /uav/camera/status rate. A
                                            #      heartbeat about the pipeline,
                                            #      not a per-frame record.
+    gimbal_poll_hz: 10.0                   # [RO] gimbal attitude asks per
+                                           #      second, on their own thread.
+                                           #      Sets how old the gimbal yaw
+                                           #      written beside each frame can
+                                           #      be: at 10 Hz, <= 100 ms. In
+                                           #      follow mode the gimbal trails
+                                           #      a fast yaw, and buoy_mapper
+                                           #      needs where the camera WAS
+                                           #      pointing, not where the nose
+                                           #      is. Each ask blocks at most
+                                           #      0.25 s (ATTITUDE_TIMEOUT_S).
 
 detector_node:
   ros__parameters:
     # The trained buoy detector, and the operator's view of it. This node owns
     # NO device: it consumes the MJPEG stream camera_node already serves, so a
     # detector that crashes or fills the GPU cannot stop the recording.
-    model_path: "/root/robotx_ws/models/buoy_yolo11n_v1.pt"
-                                           # [RO] YOLO11n, one class `buoy`,
-                                           #      trained 8 Sep 2026 on 436
-                                           #      frames from two park flights.
-                                           #      Holdout: 95% of airborne
-                                           #      frames on a day it never saw.
+    model_path: "/root/robotx_ws/models/ekko_colour_yolo26n.pt"
+                                           # [RO] YOLO26n, FOUR classes read
+                                           #      from the weights (blue, dark,
+                                           #      green, red), imgsz 1920,
+                                           #      trained 12-13 Sep 2026 on the
+                                           #      12 Sep park flights and chosen
+                                           #      over YOLO11n on a time-split
+                                           #      validation set. The class is
+                                           #      per FRAME: buoy_mapper decides
+                                           #      each buoy's state over time.
+                                           #      The one-class buoy_yolo11n_v1
+                                           #      is still in models/.
                                            #      A TensorRT .engine goes here
                                            #      too — but engines are built on
                                            #      THIS device and are not
@@ -546,6 +563,13 @@ detector_node:
                                            #      leaves real headroom. Raise it
                                            #      only after checking the frame
                                            #      index for drops.
+                                           #      ALSO the colour sample rate:
+                                           #      4 Hz over buoy_mapper's 4 s
+                                           #      watch is 16 samples of a 1 s
+                                           #      on / 1 s off flash. Do not go
+                                           #      below 2 Hz (Nyquist for that
+                                           #      flash) or FLASHING and SOLID
+                                           #      stop being separable.
     imgsz: 1920                            # [RO] native. A 0.46 m buoy at 20 m
                                            #      is 26 px here, 17 px at 1280
                                            #      and 8.7 px at the 640 default
@@ -557,6 +581,195 @@ detector_node:
                                            #      a weak detection is
                                            #      informative, and nothing acts
                                            #      on it.
+    edge_margin_px: 12                     # [RO] a box within this many px of
+                                           #      the frame border is a CLIPPED
+                                           #      buoy: drawn grey, published
+                                           #      with full_view=false, never
+                                           #      mapped. A clipped buoy usually
+                                           #      has its beacon out of frame
+                                           #      (so it reads "dark"), and a
+                                           #      clipped box's centre is not
+                                           #      the buoy's centre.
     reconnect_s: 3.0                       # [RO] wait before retrying a dropped
                                            #      source. camera_node restarts
                                            #      take a few seconds to rebind.
+
+buoy_mapper:
+  ros__parameters:
+    # Detections -> the Task 1 buoy map: where each buoy is and which of the
+    # five states it shows. NOTHING HERE IS A FLIGHT-TIME KNOB: every value is
+    # read-only, and the geometry ones are MEASURED once. If a map comes out
+    # wrong, replay the sightings log with tools/scripts/map_session.py and fix
+    # the constant after landing.
+
+    # ---- geometry (uav_perception/geolocate.py)
+    hfov_deg: 81.0                         # [RO] MEASURED 3 Sep 2026 from a
+                                           #      6.0 m buoy baseline at three
+                                           #      altitudes: f = 750 px at 1280
+                                           #      wide, 1130 px at 1920. Focal
+                                           #      length is derived from each
+                                           #      frame's width, so a stream
+                                           #      that falls back to 720p stays
+                                           #      correct.
+    nadir_pitch_deg: -90.0                 # [RO] = camera_node.gimbal_pitch_deg
+    max_off_nadir_deg: 8.0                 # [RO] frames with the MEASURED
+                                           #      gimbal pitch further from
+                                           #      nadir than this are not
+                                           #      mapped: a camera still slewing
+                                           #      back after a power cycle.
+    gimbal_yaw_mode: "body"                # [RO] what the gimbal's yaw is
+                                           #      measured against. "body" =
+                                           #      relative to the airframe
+                                           #      (SIYI follow mode, expected),
+                                           #      "earth" = already a compass
+                                           #      heading, "aircraft" = ignore
+                                           #      the gimbal and use the nose.
+                                           #      MEASURED 2026-09-13 on the
+                                           #      bench: airframe turned 90 deg
+                                           #      by hand, gimbal_yaw peaked at
+                                           #      24.6 (follow lag), then decayed
+                                           #      back to its 0.3 baseline while
+                                           #      heading sat at 255.9. Returning
+                                           #      to baseline = body. In earth
+                                           #      mode it would have parked ~90
+                                           #      off baseline and STAYED there.
+    gimbal_yaw_sign: -1.0                  # [RO] +1 or -1: which way positive
+                                           #      gimbal yaw turns on THIS unit.
+                                           #      MEASURED 2026-09-13: turning
+                                           #      the camera CLOCKWISE seen from
+                                           #      above drove gimbal_yaw to -52,
+                                           #      so clockwise = DOWN = -1.
+                                           #      The 1.0 that stood here was a
+                                           #      guess and it was WRONG. A wrong
+                                           #      sign does not shift buoys, it
+                                           #      MIRRORS every off-nadir one to
+                                           #      the opposite side -- which at
+                                           #      3 m gate spacing reads as
+                                           #      plausible noise, not a fault.
+    mount_yaw_offset_deg: 0.0              # [RO] angle between the gimbal's yaw
+                                           #      zero and the nose. NOT MEASURED
+                                           #      BY TAPE. Set 0.0 on 2026-09-13
+                                           #      from two weak agreeing checks:
+                                           #      the camera eyeballed square to
+                                           #      the frame, and gimbal_yaw
+                                           #      resting at 0.0-0.3.
+                                           #
+                                           #      NOT A FIXED MOUNT CONSTANT,
+                                           #      despite the name. It was a
+                                           #      genuine ~20 right on 09-11 and
+                                           #      0 on 09-13 with NO remount in
+                                           #      between, so the gimbal's yaw
+                                           #      zero moves across power cycles
+                                           #      the way pitch does. CHECK IT
+                                           #      BEFORE EVERY FLIGHT, not once
+                                           #      on the bench. A stale value
+                                           #      here is worse than none: it
+                                           #      looks measured.
+                                           #
+                                           #      Tape method: line along the
+                                           #      nose-tail axis under the nadir
+                                           #      camera. Nose end leaning LEFT
+                                           #      of image-up by t = camera
+                                           #      looking t RIGHT of the nose
+                                           #      (d = +t). Then this =
+                                           #      d - sign*gimbal_yaw read at
+                                           #      that moment. Steps in the
+                                           #      field-day skill. The replay
+                                           #      tool's --solve-yaw is a
+                                           #      cross-check only: GPS wander
+                                           #      swamps a few degrees.
+    launch_height_above_surface_m: 0.0     # [RO] how far HOME sits above the
+                                           #      surface the buoys float on.
+                                           #      altitude_rel is above home, so
+                                           #      launching from a 1.5 m dock
+                                           #      puts every height 1.5 m short
+                                           #      without this. 0 on grass.
+                                           #      SET PER VENUE.
+    target_height_m: 0.45                  # [RO] height of the buoy TOP (what
+                                           #      the box outlines) above that
+                                           #      surface. ESTIMATE from the
+                                           #      RoboBuoy build guide, not
+                                           #      measured. At 10 m a 0.1 m
+                                           #      error moves an edge-of-frame
+                                           #      buoy about 5 cm.
+    min_alt_m: 3.0                         # [RO] no mapping below this: take-
+                                           #      off and landing, where buoys
+                                           #      are huge and clipped and the
+                                           #      barometer is least reliable.
+    max_pose_age_s: 0.5                    # [RO] a frame whose pose was older
+                                           #      than this is not mapped. At
+                                           #      1.5 m/s, 0.5 s is 0.75 m.
+    max_gimbal_age_s: 0.5                  # [RO] same, for the gimbal reading.
+    max_gimbal_yaw_rate_dps: 20.0          # [RO] the camera turning faster
+                                           #      than this = not mapped; its
+                                           #      heading moved between the
+                                           #      frame and its gimbal sample.
+
+    # ---- which buoy, and which state (uav_perception/buoy_tracker.py)
+    min_conf: 0.35                         # [RO] detections below this are not
+                                           #      mapped. Higher than the
+                                           #      viewer's 0.25: a weak box is
+                                           #      worth SEEING, not navigating
+                                           #      by.
+    assoc_radius_m: 1.5                    # [RO] a sighting this close to a
+                                           #      known buoy IS that buoy. Half
+                                           #      the 3 m Task 1 gate spacing
+                                           #      RoboNation confirmed, so two
+                                           #      gate buoys are never merged.
+    merge_radius_m: 1.0                    # [RO] two buoys whose averages come
+                                           #      this close are one buoy first
+                                           #      seen from the frame edge.
+    min_sightings: 3                       # [RO] before a buoy appears at all,
+                                           #      so one stray box -- a bag, a
+                                           #      person -- never becomes a pin.
+    min_observe_s: 4.0                     # [RO] FULL-VIEW watch time before a
+                                           #      state is decided: two whole
+                                           #      2 s flash periods. Partial
+                                           #      views do not count.
+    min_samples: 12                        # [RO] and at least this many
+                                           #      full-view colour samples (4 Hz
+                                           #      inference gives ~16 in 4 s).
+    max_sample_gap_s: 1.0                  # [RO] gaps longer than this (flew
+                                           #      away, came back) add no watch
+                                           #      time.
+    solid_min_lit: 0.85                    # [RO] lit in >= 85% of samples =
+                                           #      SOLID. Room for the model
+                                           #      occasionally calling a lit
+                                           #      beacon dark.
+    off_max_lit: 0.15                      # [RO] lit in <= 15% = OFF.
+    min_flash_transitions: 2               # [RO] between those, FLASHING needs
+                                           #      at least this many lit/dark
+                                           #      changes. Without them the buoy
+                                           #      was on and then off: a change
+                                           #      of state, not a flash.
+    min_colour_agreement: 0.6              # [RO] share of lit samples that must
+                                           #      agree on the colour, or the
+                                           #      state stays UNKNOWN.
+    lock_state: true                       # [RO] freeze each state once
+                                           #      decided. TRUE for Advanced
+                                           #      tier, where the passage does
+                                           #      not change. Disruptive: false.
+
+    # ---- output
+    map_rate_hz: 1.0                       # [RO] /uav/perception/buoy_map, the
+                                           #      WHOLE map every time -- never
+                                           #      deltas, per the Task 1 design.
+    export_dir: "/root/robotx_ws/logs/buoy_maps"
+                                           # [RO] sightings log + map files.
+                                           #      Rides the workspace bind mount
+                                           #      like logs/video, so it
+                                           #      survives the container.
+    export_min_interval_s: 5.0             # [RO] map files rewritten at most
+                                           #      this often while the map
+                                           #      changes, and always on disarm.
+    http_port: 8093                        # [RO] GET-only downloads and /state.
+                                           #      MUST differ from 8090 (ground
+                                           #      station), 8091 (camera) and
+                                           #      8092 (detector).
+    bind_host: "0.0.0.0"                   # [RO] must NOT be 127.0.0.1 or the
+                                           #      laptop cannot download.
+    waypoint_alt_m: 10.0                   # [RO] .plan waypoint altitude: the
+                                           #      colour-reading altitude.
+    waypoint_hold_s: 6.0                   # [RO] .plan hover per buoy: longer
+                                           #      than min_observe_s, with margin
+                                           #      for arriving off-centre.

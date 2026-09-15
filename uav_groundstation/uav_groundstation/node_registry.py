@@ -39,7 +39,8 @@ GROUPS = (
     ("comms", "Comms",
      "The link to the Operator Control Station."),
     ("perception", "Perception",
-     "The gimbal camera. Serves its own video port; see the Camera tab."),
+     "The gimbal camera, the buoy detector and the buoy mapper. Video on the "
+     "Camera tab; the buoy map on the Map tab. To map: start all three."),
 )
 
 
@@ -102,8 +103,17 @@ REGISTRY = (
     NodeSpec("detector_node", "detector_node", "uav_perception",
              "detector_node", "perception",
              port=8092, stream_path="/stream.mjpg",
-             note="runs the trained buoy model on camera_node's stream and "
-                  "serves an annotated view on :8092; writes nothing"),
+             note="runs the colour-buoy model on camera_node's stream, serves "
+                  "an annotated view on :8092, publishes each frame's boxes "
+                  "with its pose; writes nothing"),
+    # Consumes detector_node's topic, so it needs that node running to map
+    # anything, but holds no device and co-runs with everything. port is its
+    # GET-only download server, not a video stream, so stream_path stays empty.
+    NodeSpec("buoy_mapper", "buoy_mapper", "uav_perception",
+             "buoy_mapper", "perception", port=8093,
+             note="turns detections into the Task 1 buoy map: positions, and "
+                  "each buoy's state decided over 4 s of full-view watching. "
+                  "Map tab; downloads on :8093"),
 )
 
 BY_NAME = {n.name: n for n in REGISTRY}
@@ -121,6 +131,12 @@ PROFILES = {
     # every flight whether anyone is watching or not.
     "flight": ("Flight profile",
                ("telemetry_bridge", "ocs_client", "camera_node")),
+    # Everything a buoy-mapping sortie needs. Separate from "flight" on purpose:
+    # it puts inference on the GPU for the whole flight, which a data-collection
+    # sortie should not pay for.
+    "mapping": ("Mapping profile",
+                ("telemetry_bridge", "ocs_client", "camera_node",
+                 "detector_node", "buoy_mapper")),
     "bench": ("Bench profile", ("telemetry_bridge",)),
 }
 
