@@ -7,7 +7,9 @@ ros2 run uav_groundstation ground_station    # then http://<JETSON_IP>:8090
 ros2 run uav_groundstation ocs_client
 ```
 
-Both are started by systemd in normal operation. **Neither has flown.**
+Both are started by systemd in normal operation. `ground_station` has flown on
+Ekko; `ocs_client` has run aboard but has not been checked against RoboNation's
+stub.
 
 ## Why this is its own package
 
@@ -16,13 +18,24 @@ nodes in order to launch them — while **importing** none. It depends on `rclpy
 `uav_msgs` and `uav_common` and nothing else, which keeps it off the dependency
 graph of the code it starts.
 
-## `ground_station` — five tabs
+## `ground_station` — seven tabs
+
+**On every tab:** a battery readout in the header (volts, margin above
+`BATT_LOW_VOLT`, and in flight the minutes to it), and a **pre-flight strip** of
+eight checks, each one something that has already cost a sortie: telemetry, GPS,
+battery, fence ceiling against the working altitude, gimbal at nadir, the main
+stream's bitrate/codec/resolution, whether the recording will be kept, and the
+mapping nodes. Every chip shows while disarmed; once armed only the ones needing
+attention. The rules live in `preflight_core.py`, the estimate in
+`battery_core.py`; both are plain Python, driven by `tools/bench/bench_preflight.py`.
 
 | Tab | Shows | Can do |
 |---|---|---|
-| Nodes | every registry node, running or not, from the ROS graph **and** `/proc` | start anything; stop what is not protected |
-| Telemetry | lat/lon, three altitudes, climb, speed, heading, roll/pitch/yaw, mode, armed, landed state, OCS link | — |
-| Map | aircraft, trail, **the geofence**, inside/outside, altitude | pan, zoom, follow, clear trail |
+| Nodes | every registry node, running or not, from the ROS graph **and** `/proc` | start anything; **restart** what systemd supervises; stop the rest, unless protected |
+| Telemetry | lat/lon, three altitudes, climb, speed, heading, roll/pitch/yaw, mode, armed, landed state, **GPS fix / satellites / HDOP / accuracy**, **battery volts, volts per cell, margin above the failsafe, minutes to it**, OCS link | — |
+| Map | aircraft, trail, **the geofence**, inside/outside, altitude, GPS quality, a grid that re-spaces itself with zoom, **the camera's footprint**, and the Task 1 buoys with their states | pan, zoom, follow, clear trail, clear buoys, download the map, **measure** between two points or buoys, **beep** when a buoy locks |
+| Camera | the A8 mini's live view or the detector's annotated view, sized to fit the screen, and whether the session will be kept | keep the session, show detections, restart `camera_node` |
+| Camera + Map | the Camera and Map tabs side by side, each fitted to the screen height, for flying | the camera controls, zoom, follow, measure, lock beep |
 | Logs | every node's `/rosout`, filterable by level and node | clear |
 | System | CPU, temp, memory, disk, uptime, **workspace mount** | shut down / reboot the host (gated) |
 

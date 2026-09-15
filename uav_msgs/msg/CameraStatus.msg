@@ -114,3 +114,32 @@ float64 gimbal_pitch_rate
 # is false, but the flag is carried explicitly so a consumer cannot read a NaN
 # as a number.
 bool gimbal_ok
+
+# Gimbal YAW in degrees, as the gimbal reports it (the same raw number as
+# gimbal_yaw in _frames.csv). What it is relative to -- airframe or north -- and
+# its sign are buoy_mapper settings checked on the bench, not facts of this
+# field. Carried here so the ground station can draw where the camera is
+# actually looking; in follow mode the gimbal trails a fast yaw. NaN under the
+# same conditions as gimbal_pitch.
+float64 gimbal_yaw
+
+# ---------------------------------------------------------------- encoding
+
+# The MAIN stream's encoding (what the Jetson receives), READ FROM THE CAMERA
+# over the SIYI protocol (cmd 0x20), refreshed about once a minute
+# (camera_node ENCODING_POLL_S).
+#
+# WHY THE GROUND STATION WANTS IT. Setting this stream above 1570 kbps made the
+# camera emit a broken bitstream that shredded every frame above ~5 m on
+# 2026-09-11, and the camera happily reported the bad setting as accepted. A
+# pre-flight check that shows the number is the cheapest defence.
+#
+# A settings read is NOT proof of what is decoded -- tools/scripts/
+# preflight_camera.sh remains the gate. The camera answers about two queries in
+# three, so a missed read keeps the last answer and lets encoding_age_s grow.
+# Zero/empty and NaN age until the first successful read.
+uint16 stream_width
+uint16 stream_height
+uint16 stream_kbps
+string stream_codec        # "H264", "H265", or "" if unknown
+float64 encoding_age_s     # seconds since the read above; NaN = never read

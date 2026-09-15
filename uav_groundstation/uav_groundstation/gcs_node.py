@@ -1,16 +1,17 @@
 """ground_station — the whole aircraft in one browser tab.
 
-NOTE: unverified in flight. It starts and stops real nodes and can power the
-Jetson off, and none of that has been exercised on an airframe. It is started by
-systemd (tools/systemd/uav-groundstation.service) because nobody will SSH into
-this Jetson between flights; `systemctl disable uav-groundstation` is the way
-back.
+In use on Ekko in flight (Nodes, Map and Camera tabs at the park, 2026-09-13). It
+starts, stops and restarts real nodes and can power the Jetson off. It is
+started by systemd (tools/systemd/uav-groundstation.service) because nobody will
+SSH into this Jetson between flights; `systemctl disable uav-groundstation` is
+the way back.
 
     ros2 run uav_groundstation ground_station
     # then, on the laptop:  http://<JETSON_IP>:8090
 
 Subscribes (read-only): /uav/pose, /uav/attitude, /uav/fcu_status,
-/uav/flight_state, /uav/camera/status, /uav/perception/buoy_map. Publishes
+/uav/flight_state, /uav/battery, /uav/gps, /uav/fcu_params, /uav/camera/status,
+/uav/perception/buoy_map. Publishes
 nothing. Its only outward effects are the processes it spawns, the two power
 verbs it can hand to the host helper — both gated, both re-checked server-side —
 and two services it can call: camera capture, and clearing the buoy map (which
@@ -42,13 +43,15 @@ import time
 from collections import deque
 
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from rcl_interfaces.msg import Log
 
 from std_srvs.srv import SetBool, Trigger
-from uav_msgs.msg import (Attitude, BuoyMap, CameraStatus, FcuStatus,
-                          FlightState, GlobalPos)
+from uav_msgs.msg import (Attitude, Battery, BuoyMap, CameraStatus, FcuParams,
+                          FcuStatus, FlightState, GlobalPos, GpsStatus)
 
+from uav_common import camera_frame
 from uav_common import config as uav_config
 from uav_common import geo
 from uav_common.fence_core import polygon_from_flat
@@ -56,6 +59,7 @@ from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config, make_set_callback
 from uav_common.stream_cache import StreamCache
 
+from uav_groundstation import armed_clock, battery_core, preflight_core
 from uav_groundstation import node_registry as reg
 from uav_groundstation import power_client, proc_scan, system_info
 from uav_groundstation.gcs_page import render as render_page
@@ -95,6 +99,9 @@ PARAM_SPEC = {
                         description="master switch for the power tab"),
     "log_capacity": dict(read_only=True, lo=100, hi=20000,
                          description="/rosout lines kept in the ring"),
+    "armed_time_file": dict(read_only=True,
+                            description="where time armed this power-on is "
+                                        "kept; see armed_clock"),
 }
 
 _LANDED_NAME = {0: "UNDEFINED", 1: "ON_GROUND", 2: "IN_AIR", 3: "TAKEOFF",
@@ -107,6 +114,12 @@ BUOY_MAP_TIMEOUT_S = 3.0
 # How long the page waits on a service it calls. The HTTP thread blocks for this
 # at most; see _call_service for why waiting there is safe.
 SERVICE_TIMEOUT_S = 5.0
+
+
+def _finite(x):
+    """A float for JSON: NaN becomes None, because JSON has no NaN and the page
+    treats a blank as unknown."""
+    return None if x is None or (isinstance(x, float) and math.isnan(x)) else x
 
 
 class GroundStation(Node):
@@ -141,8 +154,11 @@ class GroundStation(Node):
         self._trail = deque(maxlen=int(p["trail_length"]) or 1)
         self._cpu = system_info.CpuMeter()
         # {port: (checked_at, is_open)} — see _port_open. Bounded by the number
-        # of NodeSpecs that declare a port, which is one.
+        # of NodeSpecs that declare a port.
         self._port_probe = {}
+        # {node name: monotonic time of its last restart from the page}. Read by
+        # reg.restarting / reg.start_refusal; see RESTART_GRACE_S for why.
+        self._restart_t = {}
         self._hostname = socket.gethostname()
 
         self.procs = ProcessManager(
@@ -185,6 +201,33 @@ class GroundStation(Node):
                                  self._on_buoy_map, 10)
         self._clear_map_cli = self.create_client(
             Trigger, "/uav/perception/clear_buoy_map")
+
+        # Battery and GPS, for the header and the pre-flight strip. Battery
+        # samples also feed the time-to-failsafe estimator; see battery_core
+        # for why it works from the voltage trend rather than from mAh.
+        self._battery = battery_core.BatteryEstimator()
+        self.create_subscription(Battery, "/uav/battery", self._on_battery, 10)
+        self._gps = StreamCache(float(p["status_timeout_s"]))
+        self.create_subscription(GpsStatus, "/uav/gps", self._on_gps, 10)
+        # Autopilot params read back by telemetry_bridge. Latched on that side,
+        # so this subscription must be TRANSIENT_LOCAL too or a ground station
+        # restarted after the read never hears the values.
+        self._fcu_params = None
+        self.create_subscription(
+            FcuParams, "/uav/fcu_params", self._on_fcu_params,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        # Camera geometry and working altitude, read once from the params the
+        # camera and mapper nodes load themselves -- one source, as _geoid does
+        # for the OCS constant. None if unreadable: the footprint and the fence
+        # head-room check then say so instead of drawing from guessed numbers.
+        self._cam_cfg = self._read_camera_cfg()
+
+        # Time armed this power-on, for the flight log. Ticked by its own timer,
+        # not by the page's poll: it must count whether or not a browser is open.
+        self._armed_clock = armed_clock.ArmedClock(p["armed_time_file"],
+                                                   armed_clock.read_boot_id())
+        self.create_timer(1.0, self._tick_armed_clock)
 
         self._workspace = self._check_workspace(p["workspace_path"])
 
@@ -279,6 +322,7 @@ class GroundStation(Node):
         return (s is not None), (bool(s.armed) if s else False)
 
     def _node_items(self):
+        now = time.monotonic()
         running_names = set()
         items = []
         for spec in reg.REGISTRY:
@@ -292,11 +336,16 @@ class GroundStation(Node):
                     # would be signalled if it is ever stoppable.
                     detail = ("in the ROS graph" if spec.name in self._graph
                               else "pid %s (/proc)" % ",".join(map(str, pids)))
-            allowed, reason = reg.may_stop(spec.name)
+            verb = reg.stop_verb(spec.name)
+            allowed, reason = reg.may_stop(spec.name, verb)
             items.append({
                 "name": spec.name, "label": spec.label, "group": spec.group,
                 "running": running, "detail": detail, "note": spec.note,
                 "may_stop": bool(allowed and running), "stop_reason": reason,
+                # "restart" or "stop": the page labels the button with this.
+                "verb": verb, "unit": spec.unit,
+                "restarting": reg.restarting(spec.name, running_names,
+                                             self._restart_t.get(spec.name), now),
                 "owned": state == "running", "pids": pids,
             })
         return items, running_names
@@ -344,9 +393,19 @@ class GroundStation(Node):
             tel["landed"] = _LANDED_NAME.get(fs.landed_state, "?%d" % fs.landed_state)
 
         known, armed = self._armed()
+        cam = self._cam_state(running)
+        params = self._fcu_params or {}
+        batt = self._battery.snapshot(now, params.get("batt_low_volt"),
+                                      float(self.p["status_timeout_s"]))
+        gps = self._gps.get(now)
         return {
             "groups": groups,
             "tel": tel,
+            "batt": batt,
+            "gps": gps,
+            "armed_time": self._armed_clock.snapshot(now),
+            "preflight": preflight_core.checks(self._preflight_inputs(
+                tel, batt, gps, params, cam, running)),
             "ocs": self._ocs_state(),
             "map": {
                 "fence": self._fence_xy,
@@ -359,10 +418,109 @@ class GroundStation(Node):
                 "trail_max": int(self.p["trail_length"]),
                 "buoys": self._buoy_state(now),
                 "mapper": self._mapper_state(running),
+                "footprint": self._footprint(pose_e, att, tel),
             },
             "sys": self._sys_state(),
             "power": self._power_state(known, armed),
-            "cam": self._cam_state(running),
+            "cam": cam,
+        }
+
+    # ---------- battery, GPS, pre-flight, footprint ----------
+
+    def _tick_armed_clock(self):
+        known, armed = self._armed()
+        self._armed_clock.update(time.monotonic(), known, armed)
+
+    def _on_battery(self, msg):
+        known, armed = self._armed()
+        self._battery.feed(time.monotonic(), msg.voltage, msg.current,
+                           msg.consumed_mah, int(msg.remaining_pct),
+                           known and armed)
+
+    def _on_gps(self, msg):
+        fix = int(msg.fix_type)
+        self._gps.set({"fix_type": fix,
+                       "fix_name": preflight_core.FIX_NAMES.get(fix, "fix %d" % fix),
+                       "satellites": int(msg.satellites),
+                       "hdop": _finite(msg.hdop), "h_acc_m": _finite(msg.h_acc_m)},
+                      time.monotonic())
+
+    def _on_fcu_params(self, msg):
+        self._fcu_params = {f: _finite(getattr(msg, f))
+                            for f in ("batt_low_volt", "batt_crt_volt",
+                                      "batt_capacity_mah", "fence_enable",
+                                      "fence_alt_max")}
+
+    def _read_camera_cfg(self):
+        try:
+            cam = uav_config.node_params("camera_node")
+            mp = uav_config.node_params("buoy_mapper")
+            return {
+                "hfov_deg": float(mp["hfov_deg"]),
+                "yaw_mode": str(mp["gimbal_yaw_mode"]),
+                "yaw_sign": float(mp["gimbal_yaw_sign"]),
+                "mount_offset_deg": float(mp["mount_yaw_offset_deg"]),
+                "launch_height_m": float(mp["launch_height_above_surface_m"]),
+                "max_off_nadir_deg": float(mp["max_off_nadir_deg"]),
+                "working_alt_m": float(mp["waypoint_alt_m"]),
+                "nadir_pitch": float(cam["gimbal_pitch_deg"]),
+                "expected_codec": str(cam["rtsp_codec"]),
+            }
+        except Exception as e:
+            self.get_logger().warn(
+                "camera geometry unreadable from uav_params.yaml (%s): no camera "
+                "footprint on the map, and no fence head-room check" % e)
+            return None
+
+    def _footprint(self, pose_e, att, tel):
+        """The ground patch the camera sees, as map x/y corners, or None.
+
+        Drawn only at nadir: off nadir the patch is a pitch-dependent trapezoid,
+        and the mapper refuses those frames anyway. The heading goes through
+        camera_frame.camera_heading_deg, the same function the mapper uses, so
+        the rectangle and the buoy positions agree on where the camera points.
+        """
+        cfg = self._cam_cfg
+        c = self._cam_status.get(time.monotonic())
+        if cfg is None or pose_e is None or att is None or c is None:
+            return None
+        pitch = c["gimbal_pitch"]
+        if not c["gimbal_ok"] or math.isnan(pitch) \
+                or abs(pitch - cfg["nadir_pitch"]) > cfg["max_off_nadir_deg"]:
+            return None
+        heading = camera_frame.camera_heading_deg(
+            att.yaw, c["gimbal_yaw"], cfg["yaw_mode"], cfg["yaw_sign"],
+            cfg["mount_offset_deg"])
+        corners = camera_frame.nadir_footprint(
+            tel.get("alt_rel", float("nan")) + cfg["launch_height_m"], heading,
+            cfg["hfov_deg"])
+        if corners is None:
+            return None
+        return [[pose_e[1] + e, pose_e[2] + n] for e, n in corners]
+
+    def _preflight_inputs(self, tel, batt, gps, params, cam, running):
+        """Gather what preflight_core needs into one plain dict."""
+        c = self._cam_status.get(time.monotonic())
+        cfg = self._cam_cfg or {}
+        camera = {"running": cam.get("source") is not None}
+        if c is not None:
+            camera.update({
+                "gimbal_ok": c["gimbal_ok"], "gimbal_pitch": _finite(c["gimbal_pitch"]),
+                "nadir_pitch": cfg.get("nadir_pitch", -90.0),
+                "codec": c["codec"], "width": c["width"], "height": c["height"],
+                "kbps": c["kbps"], "encoding_age_s": _finite(c["encoding_age_s"]),
+                "expected_codec": cfg.get("expected_codec", ""),
+            })
+        return {
+            "fcu_ok": tel.get("fcu_ok"), "pose_ok": tel.get("pose_ok"),
+            "armed": tel.get("armed"), "gps": gps, "battery": batt,
+            "fence_enable": params.get("fence_enable"),
+            "fence_alt_max": params.get("fence_alt_max"),
+            "working_alt_m": cfg.get("working_alt_m"),
+            "camera": camera,
+            "record_gate": None if c is None else c["record_gate"],
+            "mapping": {"detector": "detector_node" in running,
+                        "mapper": "buoy_mapper" in running},
         }
 
     def _on_buoy_map(self, msg):
@@ -405,10 +563,18 @@ class GroundStation(Node):
         return {"serving": self._port_open(spec.port), "port": spec.port}
 
     def _on_cam_status(self, msg):
-        # Cached as a pair so one staleness timeout covers both. Splitting them
-        # would let the page show a fresh reason beside a stale record state.
-        self._cam_status.set((bool(msg.recording_sd), str(msg.record_gate)),
-                             time.monotonic())
+        # Cached as ONE entry so one staleness timeout covers every field.
+        # Splitting them would let the page show a fresh reason beside a stale
+        # record state, or a fresh gimbal angle beside a stale encoding.
+        self._cam_status.set({
+            "recording_sd": bool(msg.recording_sd),
+            "record_gate": str(msg.record_gate),
+            "gimbal_ok": bool(msg.gimbal_ok),
+            "gimbal_pitch": msg.gimbal_pitch, "gimbal_yaw": msg.gimbal_yaw,
+            "codec": str(msg.stream_codec), "width": int(msg.stream_width),
+            "height": int(msg.stream_height), "kbps": int(msg.stream_kbps),
+            "encoding_age_s": msg.encoding_age_s,
+        }, time.monotonic())
 
     def _cam_state(self, running):
         """What the Camera tab should point at, if anything.
@@ -426,8 +592,8 @@ class GroundStation(Node):
         serving = {spec.name} if self._port_open(spec.port) else set()
         name, starting = reg.tab_source((spec.name,), running, serving)
         st = self._cam_status.get(time.monotonic())
-        rec = st[0] if st else None
-        gate = st[1] if st else ""
+        rec = st["recording_sd"] if st else None
+        gate = st["record_gate"] if st else ""
         return {
             "source": name,
             "starting": starting,
@@ -583,7 +749,9 @@ class GroundStation(Node):
         if path == "/node/start":
             return self._act_start(payload.get("name", ""))
         if path == "/node/stop":
-            return self._act_stop(payload.get("name", ""))
+            return self._act_stop(payload.get("name", ""), "stop")
+        if path == "/node/restart":
+            return self._act_stop(payload.get("name", ""), "restart")
         if path == "/logs":
             return self._act_logs(payload)
         if path == "/logs/clear":
@@ -641,39 +809,49 @@ class GroundStation(Node):
         return {"ok": bool(res.success), "message": res.message}
 
     def _act_start(self, name):
-        spec = reg.BY_NAME.get(name)
-        if spec is None:
-            return {"ok": False, "message": "unknown node %r" % name}
         _items, running = self._node_items()
-        if name in running:
-            return {"ok": False, "message": "%s is already running" % name}
-        clash = reg.conflicts(name, running)
-        if clash:
-            return {"ok": False,
-                    "message": "%s cannot start while %s is running (they "
-                               "contend for one device)" % (name, ", ".join(clash))}
-        ok, msg = self.procs.start(spec)
+        why = reg.start_refusal(name, running, self._restart_t.get(name),
+                                time.monotonic())
+        if why:
+            return {"ok": False, "message": why}
+        ok, msg = self.procs.start(reg.BY_NAME[name])
         return {"ok": ok, "message": msg}
 
-    def _act_stop(self, name):
+    def _act_stop(self, name, verb):
+        """Stop an unsupervised node, or restart a supervised one.
+
+        Both kill the process; what differs is who brings it back. For a node
+        its systemd unit started, the unit does — so the kill IS the restart,
+        and the time is recorded so a START in the gap is refused. For a copy
+        this page started itself (the unit had given up), nothing would, so a
+        restart starts it again here.
+        """
         # THE gate. Re-checked here and not merely rendered, because anyone can
         # curl this endpoint.
-        allowed, reason = reg.may_stop(name)
+        allowed, reason = reg.may_stop(name, verb)
         if not allowed:
-            self.get_logger().warn("refused stop of %r: %s" % (name, reason))
+            self.get_logger().warn("refused %s of %r: %s" % (verb, name, reason))
             return {"ok": False, "message": reason}
+        spec = reg.BY_NAME[name]
         state, _detail = self.procs.status(name)
         if state == "running":
             ok, msg = self.procs.stop(name)
-        else:
-            spec = reg.BY_NAME.get(name)
-            pids = self._proc.get(spec.executable) if spec else None
-            if not pids:
-                return {"ok": False, "message": "%s is not running" % name}
-            # By PID, never by process group: a node started by systemd or a
-            # launch file shares its group with the whole unit, and signalling
-            # that group would take everything else down with it.
-            ok, msg = self.procs.stop_external(name, pids)
+            if ok and verb == "restart":
+                ok, msg = self.procs.start(spec)
+                msg = "restarted %s (started from this page, so not by %s): %s" \
+                      % (name, spec.unit, msg)
+            return {"ok": ok, "message": msg}
+        pids = self._proc.get(spec.executable)
+        if not pids:
+            return {"ok": False, "message": "%s is not running" % name}
+        # By PID, never by process group: a node started by systemd or a
+        # launch file shares its group with the whole unit, and signalling
+        # that group would take everything else down with it.
+        ok, msg = self.procs.stop_external(name, pids)
+        if ok and verb == "restart":
+            self._restart_t[name] = time.monotonic()
+            msg = "restarting %s: %s brings it back in a few seconds" \
+                  % (name, spec.unit)
         return {"ok": ok, "message": msg}
 
     def _act_logs(self, payload):

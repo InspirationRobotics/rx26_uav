@@ -14,12 +14,13 @@ what this does.
 """
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
-                                "uav_groundstation"))
+REPO = os.path.join(os.path.dirname(__file__), "..", "..")
+sys.path.insert(0, os.path.join(REPO, "uav_groundstation"))
 
 from uav_groundstation import node_registry as reg          # noqa: E402
 from uav_groundstation.gcs_page import render               # noqa: E402
@@ -31,16 +32,29 @@ STATE = {"tel": {"pose_ok": True, "fcu_ok": True, "armed": True,
          "groups": [], "sys": {"hostname": "uav-jetson"}}
 
 
+# {name: time of its restart}, as gcs_node._restart_t, and the bench's own
+# clock, so the restart grace window can be crossed without sleeping.
+RESTARTED = {}
+NOW = [1000.0]
+
+
 def action(path, payload):
-    """Mirrors gcs_node._action's gates, minus the ROS parts."""
-    if path == "/node/stop":
-        allowed, reason = reg.may_stop(payload.get("name", ""))
-        return {"ok": allowed, "message": reason or "would stop"}
+    """Mirrors gcs_node._action, minus the ROS parts.
+
+    The RULES are the real ones -- node_registry.may_stop and start_refusal --
+    so what is proved here is the rule itself, not a copy of it. Only the
+    process handling is invented, and nothing is running.
+    """
+    name = payload.get("name", "")
+    if path in ("/node/stop", "/node/restart"):
+        verb = path.rsplit("/", 1)[1]
+        allowed, reason = reg.may_stop(name, verb)
+        if allowed and verb == "restart":
+            RESTARTED[name] = NOW[0]
+        return {"ok": allowed, "message": reason or "would %s" % verb}
     if path == "/node/start":
-        name = payload.get("name", "")
-        if name not in reg.BY_NAME:
-            return {"ok": False, "message": "unknown node %r" % name}
-        return {"ok": True, "message": "would start %s" % name}
+        why = reg.start_refusal(name, set(), RESTARTED.get(name), NOW[0])
+        return {"ok": not why, "message": why or "would start %s" % name}
     if path == "/power":
         if STATE["tel"]["armed"]:
             return {"ok": False, "message": "vehicle is ARMED. Disarm before "
@@ -49,6 +63,11 @@ def action(path, payload):
             return {"ok": False, "message": "type the hostname to confirm"}
         return {"ok": True, "message": "accepted"}
     return {"ok": False, "message": "unknown action %s" % path}
+
+
+def io_read(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
 
 
 def post(base, path, body):
@@ -86,6 +105,20 @@ def main():
                    and b"cdn" not in page.lower()))
     body, status = get(base, "/")
     r.append(check("GET / serves it", status == 200 and body == page))
+    r.append(check("light/dark toggle and a light palette",
+                   b"toggleTheme" in page and b"data-theme=light" in page))
+    r.append(check("grid replaces the fixed 50 m scale bar",
+                   b"gridStep" in page and b"'50 m'" not in page))
+    # A literal colour on the canvas is a colour the theme toggle cannot reach.
+    lit = re.findall(rb"(?:strokeStyle|fillStyle)='(?:#|rgba)", page)
+    r.append(check("no hard-coded canvas colours", not lit,
+                   "%d found" % len(lit) if lit else ""))
+    for name, needle in (("battery readout in the header", b'id="battery"'),
+                         ("pre-flight strip in the header", b'id="preflight"'),
+                         ("tape measure", b"toggleMeasure"),
+                         ("camera footprint drawn", b"m.footprint"),
+                         ("lock beep", b"checkLocks")):
+        r.append(check(name, needle in page))
 
     print("\nthe protected-node rule, bypassing the page")
     j = post(base, "/node/stop", {"name": "telemetry_bridge"})
@@ -95,11 +128,53 @@ def main():
     j = post(base, "/node/start", {"name": "telemetry_bridge"})
     r.append(check("POST start telemetry_bridge -> allowed", j["ok"] is True,
                    "starting can only move toward observable"))
-    j = post(base, "/node/stop", {"name": "ocs_client"})
-    r.append(check("POST stop ocs_client -> allowed", j["ok"] is True))
+    j = post(base, "/node/restart", {"name": "telemetry_bridge"})
+    r.append(check("POST restart telemetry_bridge -> refused", j["ok"] is False,
+                   "a restart is a stop for 5 s"))
     j = post(base, "/node/stop", {"name": "../../etc/passwd"})
     r.append(check("POST stop unknown node -> refused", j["ok"] is False,
                    j["message"]))
+
+    print("\nrestart, not stop, for what systemd brings back")
+    j = post(base, "/node/stop", {"name": "camera_node"})
+    r.append(check("POST stop camera_node -> refused", j["ok"] is False,
+                   j["message"]))
+    r.append(check("  ...and names the unit to stop instead",
+                   "systemctl stop uav-camera" in j["message"]))
+    j = post(base, "/node/restart", {"name": "camera_node"})
+    r.append(check("POST restart camera_node -> allowed", j["ok"] is True))
+    j = post(base, "/node/start", {"name": "camera_node"})
+    r.append(check("start inside the respawn gap -> refused", j["ok"] is False,
+                   "would run a second camera_node"))
+    NOW[0] += reg.RESTART_GRACE_S + 1
+    j = post(base, "/node/start", {"name": "camera_node"})
+    r.append(check("start after the gap -> allowed", j["ok"] is True,
+                   "the unit gave up; the page may start it"))
+    j = post(base, "/node/restart", {"name": "ocs_client"})
+    r.append(check("POST restart ocs_client -> allowed", j["ok"] is True))
+    j = post(base, "/node/restart", {"name": "detector_node"})
+    r.append(check("POST restart detector_node -> refused", j["ok"] is False,
+                   "no unit: nothing would bring it back"))
+    j = post(base, "/node/stop", {"name": "detector_node"})
+    r.append(check("POST stop detector_node -> allowed", j["ok"] is True))
+
+    # The button label is only honest if `unit` matches the unit files. Checked
+    # both ways: a declared unit must exist and restart the node, and a node
+    # declared unsupervised must not be started by any unit.
+    units = os.path.join(REPO, "tools", "systemd")
+    texts = {f: io_read(os.path.join(units, f)) for f in os.listdir(units)
+             if f.endswith(".service")}
+    for spec in reg.REGISTRY:
+        word = re.compile(r"\b%s\b" % re.escape(spec.executable))
+        if spec.unit:
+            t = texts.get(spec.unit + ".service", "")
+            r.append(check("%s: %s restarts it" % (spec.name, spec.unit),
+                           "Restart=on-failure" in t and bool(word.search(t)),
+                           "" if t else "no such unit file"))
+        else:
+            hits = [f for f, t in texts.items() if word.search(t)]
+            r.append(check("%s: no unit runs it" % spec.name, not hits,
+                           ", ".join(hits)))
 
     print("\nthe power interlock, bypassing the page")
     j = post(base, "/power", {"verb": "reboot", "confirm": "uav-jetson"})

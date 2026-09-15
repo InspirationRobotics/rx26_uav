@@ -218,6 +218,12 @@ RECENT_FRAMES = 64
 # never be to a frame the camera captured noticeably earlier or later.
 PREVIEW_MATCH_NS = 60_000_000
 
+# How often the main stream's encoding is read back from the camera, and how
+# soon to try again after a query the camera dropped. Settings change rarely and
+# only by hand; a minute is quick enough to catch one before the next sortie.
+ENCODING_POLL_S = 60.0
+ENCODING_RETRY_S = 5.0
+
 
 class CameraNode(Node):
 
@@ -429,6 +435,17 @@ class CameraNode(Node):
             target=self._gimbal_poll, daemon=True, name="gimbal-poll")
         self._gimbal_thread.start()
 
+        # ---- main-stream encoding, read from the camera on another thread.
+        # Reported on /uav/camera/status for the ground station's pre-flight
+        # check (see CameraStatus.msg for why the bitrate earns a check). Not
+        # the gimbal thread: each query can block for 1.5 s, and the gimbal poll
+        # is what places frames on the map.
+        self._encoding = None                 # (codec, w, h, kbps)
+        self._encoding_t = None               # monotonic time of that read
+        self._encoding_thread = threading.Thread(
+            target=self._encoding_poll, daemon=True, name="encoding-poll")
+        self._encoding_thread.start()
+
         # ---- the gimbal command topic, created only when asked for.
         #
         # A Vector3 rather than a new message type: x is yaw, y is pitch, both
@@ -514,6 +531,21 @@ class CameraNode(Node):
                     self.gimbal_cache.set(g, time.monotonic())
             self._gimbal_stop.wait(
                 max(0.0, self._gimbal_period - (time.monotonic() - t0)))
+
+    def _encoding_poll(self):
+        """Own thread. Read the main stream's encoding, then again every
+        ENCODING_POLL_S -- or every ENCODING_RETRY_S until an answer arrives,
+        since the camera drops about one query in three. A miss keeps the last
+        answer; its age on the status topic says how old it is. The SIYI
+        client opens a socket per call, so this and the gimbal poll never read
+        each other's replies."""
+        while not self._gimbal_stop.is_set():
+            enc = self.siyi.encoding()
+            if enc is not None:
+                with self._gimbal_lock:
+                    self._encoding, self._encoding_t = enc, time.monotonic()
+            self._gimbal_stop.wait(ENCODING_POLL_S if enc is not None
+                                   else ENCODING_RETRY_S)
 
     def _gimbal_snapshot(self, now):
         """-> (reading or None, age_s or None), read consistently under the lock.
@@ -1179,6 +1211,15 @@ class CameraNode(Node):
         msg.gimbal_pitch = float(self._gimbal_pitch)
         msg.gimbal_pitch_rate = float(self._gimbal_pitch_rate)
         msg.gimbal_ok = bool(self._gimbal_ok)
+        msg.gimbal_yaw = float("nan") if g is None else float(g[0])
+        with self._gimbal_lock:
+            enc, enc_t = self._encoding, self._encoding_t
+        if enc is None:
+            msg.encoding_age_s = float("nan")
+        else:
+            (msg.stream_codec, msg.stream_width, msg.stream_height,
+             msg.stream_kbps) = enc
+            msg.encoding_age_s = float(now - enc_t)
         self.status_pub.publish(msg)
 
     def _free_mb(self) -> float:
@@ -1239,8 +1280,9 @@ class CameraNode(Node):
         # Stop asking the gimbal before its socket is closed underneath the
         # thread. Bounded join: one ask blocks at most ATTITUDE_TIMEOUT_S.
         self._gimbal_stop.set()
-        if self._gimbal_thread is not None:
-            self._gimbal_thread.join(timeout=2.0)
+        for th in (self._gimbal_thread, getattr(self, "_encoding_thread", None)):
+            if th is not None:
+                th.join(timeout=2.0)
         try:
             self.viewer.stop()
         except Exception:

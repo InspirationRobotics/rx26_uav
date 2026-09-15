@@ -96,6 +96,25 @@ def _crc16_xmodem(data):
 NADIR_TOLERANCE_DEG = 2.0
 
 
+# Encoding (cmd 0x20/0x21). stream_type 0 = SD recording, 1 = MAIN (what the
+# Jetson receives), 2 = sub stream.
+MAIN_STREAM = 1
+CODEC_NAMES = {1: "H264", 2: "H265"}
+
+
+def decode_encoding(payload):
+    """Cmd 0x20 reply payload -> (codec, width, height, kbps), or None.
+
+    Payload is <BBHHHB>: stream_type, codec, width, height, kbps, pad -- the same
+    layout tools/scripts/preflight_camera.sh reads. An unrecognised codec number
+    is named rather than dropped, so a surprise shows up as a surprise.
+    """
+    if not payload or len(payload) < 9:
+        return None
+    _stream, codec, w, h, kbps, _pad = struct.unpack("<BBHHHB", payload[:9])
+    return CODEC_NAMES.get(codec, "codec %d" % codec), w, h, kbps
+
+
 # Marks a client opened with connect_wire_only(): everything that speaks the
 # wire protocol works, and the two SD-recording calls that genuinely need the
 # SDK return False rather than raising AttributeError on a sentinel.
@@ -267,6 +286,16 @@ class SiyiClient:
         finally:
             sock.close()
 
+    def encoding(self, stream_type=MAIN_STREAM, timeout_s=1.5):
+        """-> (codec, width, height, kbps) as the camera reports it, or None.
+
+        A settings READ (cmd 0x20), not proof of what is being decoded: the
+        camera has reported 1080p while serving 720p. The camera drops about one
+        query in three, so a None is usually that, not a fault.
+        """
+        return decode_encoding(self._command(
+            0x20, struct.pack("<B", stream_type), timeout_s=timeout_s))
+
     def set_nadir(self) -> bool:
         """Point straight down. One command; the gimbal's own IMU holds it.
 
@@ -400,6 +429,9 @@ class NullSiyiClient:
         return False
 
     def attitude_and_rates(self):
+        return None
+
+    def encoding(self, stream_type=None, timeout_s=None):
         return None
 
     def attitude(self):

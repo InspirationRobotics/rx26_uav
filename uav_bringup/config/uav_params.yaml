@@ -163,8 +163,9 @@ ocs_client:
                                            #      EXTENDED_SYS_STATE is absent;
                                            #      the autopilot's own landed
                                            #      state wins whenever it is
-                                           #      fresh. Raise SR0_EXT_STAT
-                                           #      rather than tuning this.
+                                           #      fresh. telemetry_bridge asks
+                                           #      for it; if it is absent, fix
+                                           #      that rather than tuning this.
     pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s; stale
                                            #      -> NO heartbeat, rather than a
                                            #      fabricated position
@@ -209,6 +210,12 @@ ground_station:
                                            #      that failure helps nobody.
     tools_dir: "/root/robotx_ws/src/rx26_uav/tools"   # [RO] where tools/*.py
                                            #      live INSIDE the container
+    armed_time_file: "/root/robotx_ws/logs/armed_time.json"  # [RO] time armed
+                                           #      this power-on, for the
+                                           #      header. Tagged with the boot
+                                           #      id, so a ground_station
+                                           #      restart resumes it and a
+                                           #      power cycle resets it.
     power_request_dir: "/root/robotx_ws/logs"  # [RO] where shutdown.request
                                            #      and reboot.request are
                                            #      dropped. A container CANNOT

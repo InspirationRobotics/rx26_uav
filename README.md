@@ -27,7 +27,7 @@ autopilot, one that faces the operator, and a data-only package on top.
 
 | Package | Contains | State |
 |---|---|---|
-| [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 10 msgs |
+| [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 13 msgs |
 | [`uav_common`](uav_common/) | Params loader, node lifecycle, stream cache, drop latch, geodesy, the geofence protocol. No nodes | library |
 | [`uav_fcu`](uav_fcu/) | `telemetry_bridge` — the only thing that speaks MAVLink. Also uploads the geofence | flown |
 | [`uav_groundstation`](uav_groundstation/) | `ground_station` (one web page on `:8090`) and `ocs_client` (the OCS heartbeat) | `ground_station` flown; `ocs_client` ran aboard, not yet checked against RoboNation's stub |
@@ -345,7 +345,8 @@ out beside this one.
 
 ## Verifying it
 
-Nothing here has flown. What *has* been exercised, and how to repeat it:
+The fence has flown with the rest of the stack, but these benches are still how
+its rules are proved. How to repeat them:
 
 ```bash
 python3 tools/bench/bench_fence.py

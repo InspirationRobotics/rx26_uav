@@ -14,6 +14,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FcuStatus.msg"
   "msg/RcChannels.msg"
   "msg/CameraStatus.msg"
+  # Battery, GPS quality and read-back autopilot limits (telemetry_bridge).
+  "msg/Battery.msg"
+  "msg/GpsStatus.msg"
+  "msg/FcuParams.msg"
   # Buoy mapping (uav_perception). BuoyDetections contains BuoyDetection and
   # BuoyMap contains Buoy, so all four must be listed or the import fails.
   "msg/BuoyDetection.msg"

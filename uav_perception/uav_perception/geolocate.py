@@ -41,11 +41,10 @@ Projector.reject_reason; see there for each gate and what it protects against.
 import math
 
 from uav_common import geo
-
-
-def known(x) -> bool:
-    """A real number: not None, not NaN. Blank index cells arrive as either."""
-    return x is not None and not (isinstance(x, float) and math.isnan(x))
+# known, YAW_MODES and camera_heading_deg live in uav_common so the ground
+# station's camera footprint uses the SAME heading arithmetic as the mapper.
+# Re-exported here, where the mapper and map_session.py already import them.
+from uav_common.camera_frame import YAW_MODES, camera_heading_deg, known  # noqa: F401
 
 
 def focal_px(width_px: float, hfov_deg: float) -> float:
@@ -54,53 +53,6 @@ def focal_px(width_px: float, hfov_deg: float) -> float:
         raise ValueError("need width > 0 and 0 < hfov < 180, got %r, %r"
                          % (width_px, hfov_deg))
     return (width_px / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
-
-
-YAW_MODES = ("body", "earth", "aircraft")
-
-
-def camera_heading_deg(aircraft_yaw_rad, gimbal_yaw_deg, mode, sign,
-                       mount_offset_deg):
-    """The direction the top of the image faces, degrees clockwise from north.
-
-    mode:
-      "body"     gimbal yaw is measured RELATIVE TO THE AIRFRAME (what follow
-                 mode reports on most SIYI units). heading = aircraft yaw +
-                 sign*gimbal yaw + offset. This is the term that matters in a
-                 turn: the gimbal trails a fast yaw, so for a moment the camera
-                 is NOT looking where the nose points, and the aircraft heading
-                 alone would put every buoy on an arc.
-      "earth"    gimbal yaw is already an absolute heading. heading = sign*gimbal
-                 yaw + offset.
-      "aircraft" ignore the gimbal's yaw. For recordings made before the index
-                 carried it, and as a fallback if the gimbal's number turns out
-                 to mean something else.
-
-    sign is +1 or -1, because the SIYI protocol's yaw direction is a property of
-    the unit and has to be checked once on the bench (turn the aircraft by hand;
-    see the field-day skill), not assumed.
-
-    mount_offset_deg is the fixed angle between where the gimbal thinks "zero"
-    is and where the nose actually points. Measured once, never tuned in flight.
-
-    Returns None when an input the mode needs is unknown: no guessing.
-    """
-    if mode not in YAW_MODES:
-        raise ValueError("gimbal_yaw_mode must be one of %s, got %r"
-                         % (YAW_MODES, mode))
-    if mode == "earth":
-        if not known(gimbal_yaw_deg):
-            return None
-        h = sign * gimbal_yaw_deg + mount_offset_deg
-    else:
-        if not known(aircraft_yaw_rad):
-            return None
-        h = math.degrees(aircraft_yaw_rad) + mount_offset_deg
-        if mode == "body":
-            if not known(gimbal_yaw_deg):
-                return None
-            h += sign * gimbal_yaw_deg
-    return h % 360.0
 
 
 def ground_offset(u, v, width, height, f_px, height_m, cam_pitch_deg,

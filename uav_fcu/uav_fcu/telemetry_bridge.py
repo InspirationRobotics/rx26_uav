@@ -11,6 +11,9 @@ MAVLink connection and there may only ever be one:
      /uav/fcu_status     uav_msgs/FcuStatus    (HEARTBEAT)
      /uav/flight_state   uav_msgs/FlightState  (EXTENDED_SYS_STATE)
      /uav/rc_channels    uav_msgs/RcChannels   (RC_CHANNELS)
+     /uav/battery        uav_msgs/Battery      (SYS_STATUS + BATTERY_STATUS)
+     /uav/gps            uav_msgs/GpsStatus    (GPS_RAW_INT)
+     /uav/fcu_params     uav_msgs/FcuParams    (PARAM_VALUE; latched, on change)
      /uav/autonomy_drop  std_msgs/Bool         (latched, TRANSIENT_LOCAL)
    Other nodes subscribe to these instead of opening their own MAVLink
    connection — this node existing is what keeps the single-owner rule
@@ -90,9 +93,11 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
-from uav_msgs.msg import Attitude, FcuStatus, FlightState, GlobalPos, RcChannels
+from uav_msgs.msg import (Attitude, Battery, FcuParams, FcuStatus, FlightState,
+                          GlobalPos, GpsStatus, RcChannels)
 
 from uav_common import config as uav_config
+from uav_common import fcu_decode
 from uav_common import geo
 from uav_common.drop_latch import DropLatch
 from uav_common.fence_core import (FenceError, FenceProtocol, MavFenceTransport,
@@ -141,6 +146,14 @@ EXT_STATE_INTERVAL_US = 500000
 #: would leave /uav/flight_state dead for the rest of the sortie.
 EXT_STATE_REREQUEST_S = 30.0
 
+#: Autopilot parameters read back for the ground station (FcuParams.msg). Asked
+#: for with PARAM_REQUEST_READ -- read-only, it changes nothing about how the
+#: aircraft flies. Any missing name is re-asked on this period; all of them are
+#: refreshed on the slower one, because a change made in QGC is broadcast but a
+#: change made while this node was down is not.
+PARAM_REREQUEST_S = 30.0
+PARAM_REFRESH_S = 300.0
+
 #: MISSION_* messages the fence dialog consumes. Routed off the RX thread into a
 #: queue rather than handled there, so a blocking request/response exchange
 #: never stalls telemetry republishing.
@@ -185,6 +198,10 @@ class TelemetryBridge(Node):
         self.status_pub = self.create_publisher(FcuStatus, "/uav/fcu_status", 10)
         self.flight_pub = self.create_publisher(FlightState, "/uav/flight_state", 10)
         self.rc_pub = self.create_publisher(RcChannels, "/uav/rc_channels", 10)
+        self.batt_pub = self.create_publisher(Battery, "/uav/battery", 10)
+        self.gps_pub = self.create_publisher(GpsStatus, "/uav/gps", 10)
+        self.params_pub = self.create_publisher(FcuParams, "/uav/fcu_params",
+                                                latched_qos)
         self.drop_pub = self.create_publisher(Bool, "/uav/autonomy_drop", latched_qos)
 
         self.create_subscription(RcChannels, "/uav/rc_override",
@@ -200,6 +217,16 @@ class TelemetryBridge(Node):
         self._status = StreamCache(t_out)  # (mode_str, armed, system_status)
         self._flight = StreamCache(t_out)  # int landed_state
         self._rc = StreamCache(t_out)      # list[int] 18
+        self._batt = StreamCache(t_out)    # (volts, amps, remaining_pct)
+        self._consumed = StreamCache(t_out)  # mAh
+        self._gps = StreamCache(t_out)     # (fix, sats, hdop, h_acc_m)
+        # Read-back autopilot params: {FcuParams field: value}. Values do not go
+        # stale -- a parameter keeps its value until changed -- so this is a
+        # plain dict, published whenever an entry changes.
+        self._params = {}
+        self._params_dirty = False
+        self._params_req_t = -PARAM_REREQUEST_S
+        self._params_refresh_t = 0.0
 
         # Fed by the RX loop, drained by the fence dialog on a service thread.
         # Bounded: a burst of another GCS's mission traffic must not grow without
@@ -303,6 +330,23 @@ class TelemetryBridge(Node):
                     self._rc.set(rc, t, stamp)
                     if self.latch.rc_sample(rc, t):
                         self._handle_trip()
+                elif mtype == "SYS_STATUS":
+                    self._batt.set(fcu_decode.battery_from_sys_status(
+                        msg.voltage_battery, msg.current_battery,
+                        msg.battery_remaining), t, stamp)
+                elif mtype == "BATTERY_STATUS" and msg.id == 0:
+                    self._consumed.set(
+                        fcu_decode.consumed_mah(msg.current_consumed), t, stamp)
+                elif mtype == "GPS_RAW_INT":
+                    self._gps.set(fcu_decode.gps_from_raw(
+                        msg.fix_type, msg.eph, msg.satellites_visible,
+                        getattr(msg, "h_acc", 0)), t, stamp)
+                elif mtype == "PARAM_VALUE":
+                    field = fcu_decode.FCU_PARAMS.get(
+                        fcu_decode.param_name(msg.param_id))
+                    if field and self._params.get(field) != msg.param_value:
+                        self._params[field] = float(msg.param_value)
+                        self._params_dirty = True
             # Outside the lock: a publish must never be held up by, or hold up,
             # the RC path.
             if att_now is not None:
@@ -321,6 +365,9 @@ class TelemetryBridge(Node):
             status = self._status.get(t)
             flight = self._flight.get(t)
             rc = self._rc.get(t)
+            batt = self._batt.get(t)
+            consumed = self._consumed.get(t)
+            gps = self._gps.get(t)
             # one loud line per stream the moment it goes stale — a silent
             # gateway must be diagnosable from the log, and consumers that judge
             # health by arrival need the silence to be real
@@ -328,9 +375,15 @@ class TelemetryBridge(Node):
                                           ("attitude", self._att),
                                           ("fcu_status", self._status),
                                           ("flight_state", self._flight),
-                                          ("rc_channels", self._rc))
+                                          ("rc_channels", self._rc),
+                                          ("battery", self._batt),
+                                          ("gps", self._gps))
                      if c.went_stale(t)]
             ext_seen = self._ext_state_seen
+            params = dict(self._params) if self._params_dirty else None
+            self._params_dirty = False
+            missing = [n for n, f in fcu_decode.FCU_PARAMS.items()
+                       if f not in self._params]
             if self.latch.tick(t):
                 self._handle_trip()
         for name in stale:
@@ -357,6 +410,31 @@ class TelemetryBridge(Node):
         # of the sortie after any in-air FC reset.
         if flight is None and t - self._ext_state_req_t >= EXT_STATE_REREQUEST_S:
             self._request_ext_sys_state()
+        # Only once the autopilot is talking (a fresh FcuStatus), so requests
+        # are not fired into a link with nobody on the other end.
+        if status is not None:
+            if t - self._params_refresh_t >= PARAM_REFRESH_S:
+                self._params_refresh_t = t
+                self._request_params(list(fcu_decode.FCU_PARAMS))
+            elif missing and t - self._params_req_t >= PARAM_REREQUEST_S:
+                self._request_params(missing)
+        if params is not None:
+            m = FcuParams()
+            m.header.stamp = self.get_clock().now().to_msg()
+            for f in fcu_decode.FCU_PARAMS.values():
+                setattr(m, f, params.get(f, float("nan")))
+            self.params_pub.publish(m)
+        if batt is not None:
+            m = Battery()
+            m.header.stamp = self._batt.stamp
+            m.voltage, m.current, m.remaining_pct = batt
+            m.consumed_mah = consumed if consumed is not None else float("nan")
+            self.batt_pub.publish(m)
+        if gps is not None:
+            m = GpsStatus()
+            m.header.stamp = self._gps.stamp
+            m.fix_type, m.satellites, m.hdop, m.h_acc_m = gps
+            self.gps_pub.publish(m)
         if pose is not None:
             m = GlobalPos()
             m.header.stamp = self._pose.stamp
@@ -413,6 +491,17 @@ class TelemetryBridge(Node):
             # above already makes a silent /uav/flight_state obvious.
             self.get_logger().warn(
                 "could not request EXTENDED_SYS_STATE: %s" % e)
+
+    def _request_params(self, names):
+        """PARAM_REQUEST_READ for each name. Read-only; never fatal."""
+        self._params_req_t = time.monotonic()
+        try:
+            for name in names:
+                self.conn.mav.param_request_read_send(
+                    self.conn.target_system, self.conn.target_component,
+                    name.encode("ascii"), -1)
+        except Exception as e:
+            self.get_logger().warn("could not request autopilot params: %s" % e)
 
     # ---------- override TX (the enforcement point) ----------
 

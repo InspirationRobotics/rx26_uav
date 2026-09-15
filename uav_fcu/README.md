@@ -8,13 +8,17 @@ One node, `telemetry_bridge`. The single ROS-side consumer of MAVProxy's
 rebroadcast and the single sender back to it. Nothing else in the workspace may
 open a MAVLink connection.
 
-**Untested in flight.**
+**Flown on Ekko** (ArduCopter 4.7.0, CubeOrange+).
 
 ## Three jobs
 
 **RX** — republishes `/uav/pose`, `/uav/attitude`, `/uav/fcu_status`,
-`/uav/flight_state`, `/uav/rc_channels`, `/uav/autonomy_drop`, each **only while
-fresh**, with the stamp captured at receipt.
+`/uav/flight_state`, `/uav/rc_channels`, `/uav/battery`, `/uav/gps`,
+`/uav/autonomy_drop`, each **only while fresh**, with the stamp captured at
+receipt. Also reads five autopilot parameters back (`PARAM_REQUEST_READ`,
+read-only) and publishes them latched on `/uav/fcu_params`, so the ground
+station's battery and fence checks use the autopilot's real thresholds instead
+of a copy in our YAML.
 
 **TX (autonomy)** — the only sanctioned RC-override path, gated by the
 autonomy-drop latch. Nothing publishes to `/uav/rc_override` yet; the enforcement
@@ -47,15 +51,16 @@ act at a ground station.
 
 ## Autopilot params this node depends on
 
-Set in QGC on `SR0_*` (USB = SERIAL0). MAVProxy runs `--streamrate=-1` precisely
-so it does not stomp them.
+Set in QGC on `MAV1_*` (USB = SERIAL0; `SR0_*` before ArduPilot 4.7). MAVProxy
+runs `--streamrate=-1` precisely so it does not stomp them.
 
 | Param | Why |
 |---|---|
-| `SR0_POSITION` > 0 | `GLOBAL_POSITION_INT` → `/uav/pose` |
-| `SR0_EXTRA1` = 30 | `ATTITUDE` → `/uav/attitude` |
-| `SR0_EXT_STAT` > 0 | `EXTENDED_SYS_STATE` → `/uav/flight_state`, the authoritative `flight_phase` |
+| `MAV1_POSITION` > 0 | `GLOBAL_POSITION_INT` → `/uav/pose` |
+| `MAV1_EXTRA1` = 30 | `ATTITUDE` → `/uav/attitude` |
 | `FENCE_TYPE` polygon bit | or the upload is NACKed |
+
+`/uav/flight_state` needs no parameter. `EXTENDED_SYS_STATE` is in **no** stream group on any firmware, so no parameter turns it on: `telemetry_bridge` requests it itself with `SET_MESSAGE_INTERVAL` and re-asks every 30 s, because an autopilot reboot discards the request.
 
 ## Change impact
 
