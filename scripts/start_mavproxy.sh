@@ -126,20 +126,20 @@ done
 # --streamrate=-1 means "request NOTHING; leave the vehicle's own SRx_* rates
 # alone". It is not a tuning choice — without it MAVProxy sends
 # REQUEST_DATA_STREAM(MAV_DATA_STREAM_ALL, 4Hz) on every connect and after every
-# reconnect, which overwrites SR0_* in the autopilot's RAM. A rate set in QGC is
+# reconnect, which overwrites MAV1_* in the autopilot's RAM. A rate set in QGC is
 # saved to the Pixhawk's EEPROM, looks correct in QGC forever, and is silently
 # stomped back to 4 Hz the moment this service restarts.
 #
-# So per-message rates are set ONCE, in QGC, on SR0_* (USB = SERIAL0, the port
-# this --master opens). The three this stack needs:
-#   SR0_POSITION  >0   GLOBAL_POSITION_INT -> /uav/pose (lat/lon/alt/climb)
-#   SR0_EXTRA1    30   ATTITUDE            -> /uav/attitude
-#   SR0_EXT_STAT  >0   EXTENDED_SYS_STATE  -> /uav/flight_state, which is the
-#                      AUTHORITATIVE source of flight_phase. Leave it at 0 and
-#                      ocs_client silently falls back to an armed+altitude
-#                      guess — it says so loudly, but the fix is here.
+# So per-message rates are set ONCE, in QGC, on MAV1_* (USB = SERIAL0, the port
+# this --master opens; ArduPilot 4.7 renamed them from SR0_*). The two this
+# stack needs:
+#   MAV1_POSITION >0   GLOBAL_POSITION_INT -> /uav/pose (lat/lon/alt/climb)
+#   MAV1_EXTRA1   30   ATTITUDE            -> /uav/attitude
+# EXTENDED_SYS_STATE (-> /uav/flight_state) is in NO stream group, so no param
+# produces it; telemetry_bridge requests it per-message itself. An older copy
+# of this comment said to raise SR0_EXT_STAT for it, which never worked.
 #
-# If SR0_* is ever left at 0 the vehicle streams nothing and telemetry_bridge
+# If MAV1_* is ever left at 0 the vehicle streams nothing and telemetry_bridge
 # sits at "still no heartbeat" — check the params before suspecting the link.
 exec mavproxy.py \
   --master="$MASTER" \

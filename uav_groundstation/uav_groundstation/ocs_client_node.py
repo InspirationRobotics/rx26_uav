@@ -209,7 +209,9 @@ class OcsClient(Node):
         if info == "fallback":
             self.get_logger().warning(
                 "flight_phase from armed+altitude, NOT from the autopilot — "
-                "/uav/flight_state is stale or absent. Set SR0_EXT_STAT > 0.",
+                "/uav/flight_state is stale or absent. telemetry_bridge requests "
+                "EXTENDED_SYS_STATE itself; check its log for 'no "
+                "EXTENDED_SYS_STATE yet'.",
                 throttle_duration_sec=15.0)
 
         return {"team_id": p["team_id"], "vehicle_id": p["vehicle_id"],

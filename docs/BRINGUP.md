@@ -1,7 +1,8 @@
 # Bringing the aircraft up
 
-Ordered so each step needs only what the one before it proved. Nothing here has
-flown; every step below is bench or ground.
+Ordered so each step needs only what the one before it proved. Written before
+the first flight; every step below is bench or ground. The stack it brings up
+has since flown on Ekko (camera, telemetry, operator page, buoy map).
 
 ---
 
@@ -93,18 +94,21 @@ owner of a link MAVProxy already holds.
 ## 3. Autopilot parameters, in QGC
 
 MAVProxy runs `--streamrate=-1` so it does not stomp these. Set them once; they
-persist in EEPROM.
+persist in EEPROM. **ArduPilot 4.7 renamed `SR0_*` to `MAV1_*`** (USB = SERIAL0);
+Ekko is on 4.7.0, so search QGC for the `MAV1_` names.
 
 | Param | Value | Without it |
 |---|---|---|
-| `SR0_POSITION` | > 0 | no `/uav/pose` at all |
-| `SR0_EXTRA1` | 30 | attitude at whatever rate, or none |
-| `SR0_EXT_STAT` | > 0 | **no `/uav/flight_state`** — `ocs_client` falls back to an armed+altitude guess for `flight_phase` |
+| `MAV1_POSITION` | > 0 | no `/uav/pose` at all |
+| `MAV1_EXTRA1` | 30 | attitude at whatever rate, or none |
 | `FENCE_TYPE` | polygon bit set | the fence upload is NACKed |
 | `FENCE_ENABLE` | your call | never set from code |
 
-`SR0_EXT_STAT` is the one people miss. Everything keeps working and the log fills
-with a warning that the flight phase is a fallback.
+Stream rates are **latched at boot**: a change does nothing until the autopilot
+reboots.
+
+There is no parameter for `/uav/flight_state`. `EXTENDED_SYS_STATE` is in **no** stream group on any firmware, so no parameter turns it on: `telemetry_bridge` requests it itself with `SET_MESSAGE_INTERVAL` and re-asks every 30 s, because an autopilot reboot discards the request. If it is still
+silent, the bridge log says `no EXTENDED_SYS_STATE yet`.
 
 ---
 
@@ -125,7 +129,8 @@ Check, in order:
 - `ros2 topic echo /uav/pose` — live `altitude_amsl` and `altitude_rel`.
 - `ros2 topic echo /uav/attitude` — moves when the airframe is tilted by hand.
 - `ros2 topic echo /uav/flight_state` — `landed_state: 1` (ON_GROUND). Silent
-  means `SR0_EXT_STAT` is still 0.
+  means the autopilot is not answering `telemetry_bridge`'s
+  `SET_MESSAGE_INTERVAL` request; its log says `no EXTENDED_SYS_STATE yet`.
 - `sudo systemctl stop uav-mavproxy` → **one** loud stale line per stream, and
   republishing **stops**. Restart and confirm recovery. This is the whole
   staleness rule; if a topic keeps publishing, something is replaying a cache.

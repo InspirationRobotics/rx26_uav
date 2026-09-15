@@ -99,9 +99,8 @@ if (( collision )); then
   echo "ERROR: conflicting udev symlinks — refusing to report success." >&2
   echo "       Check for stale rules left by an earlier install:" >&2
   echo "         ls -l /etc/udev/rules.d/99-uav*" >&2
-  echo "       Two devices sharing a VID/PID will do this too. The Pixhawk" >&2
-  echo "       rules in 99-uav.rules are a candidate list covering several" >&2
-  echo "       boards; if two of them match at once, prune it to the board" >&2
-  echo "       actually aboard." >&2
+  echo "       Two devices sharing a VID/PID will do this too, and so will a" >&2
+  echo "       Pixhawk rule without ENV{ID_USB_INTERFACE_NUM}==00: the" >&2
+  echo "       CubeOrange+ has two CDC interfaces and both would match." >&2
   exit 1
 fi

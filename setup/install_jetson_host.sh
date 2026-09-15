@@ -581,9 +581,9 @@ if [[ -e /dev/uav-pixhawk ]]; then
   fi
 else
   echo "WARN: /dev/uav-pixhawk does not exist yet."
-  echo "      Either the Pixhawk is unplugged, or its USB VID/PID is not in"
-  echo "      tools/udev/99-uav.rules — that file says its four Pixhawk lines"
-  echo "      are a CANDIDATE list, not a confirmed one. To find the real one:"
+  echo "      Either the flight controller is unplugged, or it is not the"
+  echo "      CubeOrange+ (2dae:1058) that tools/udev/99-uav.rules names. To"
+  echo "      read the board's real VID/PID:"
   echo "        udevadm info -a -n /dev/ttyACM0 | grep -E 'idVendor|idProduct' | head -4"
   problems=1
 fi

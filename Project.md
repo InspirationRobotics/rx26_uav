@@ -32,21 +32,21 @@ here.
 
 | | **Don** | **Ekko** | **Fitz** |
 |---|---|---|---|
-| **Role** | Competition aircraft — payload + gripper | Software development airframe *(inferred: the Jetson container is `uav_ekko`; confirm)* | Second Pixhawk 1 airframe |
+| **Role** | Ekko's predecessor — shares one Cube Orange+ with Ekko | **Competition UAV** — the airframe this repo targets (`uav_ekko`, OCS `UAV1`) | Second Pixhawk 1 airframe |
 | **Frame** | Tarot IRON MAN 650 folding CF quad | **9IMOD IDF-17** — 760 mm, 2.0 mm CF | Tarot Iron *(650 assumed — TBC)* |
 | **Flight controller** | Pixhawk **Cube Orange+** | Pixhawk **Cube Orange+** | **Pixhawk 1** (2.4.8-class, 2 MB flash) |
-| **Firmware** | TBC | TBC | ArduCopter **4.7.0** (`1511f271`) |
+| **Firmware** | ArduCopter 4.6.3 | ArduCopter **4.7.0** (`1511f271`) | ArduCopter **4.7.0** (`1511f271`) |
 | **GNSS / compass** | u-blox **M9N** + external magnetometer | u-blox **M9N** + external magnetometer | u-blox **M8N**, 2 compasses (int + ext) |
 | **Companion computer** | Jetson Orin Nano | Jetson Orin Nano | Jetson Orin Nano |
 | **ESC** | Lumenier Elite Pro 60A AM32 4-in-1 | Lumenier Elite Pro 60A AM32 4-in-1 | Lumenier Elite Pro 60A AM32 4-in-1 — **DShot600** on outputs 9–12 |
 | **Motors** | MAD 4014 IPE | MAD 4014 IPE | MAD 4014 IPE |
 | **Propellers** | 14 × 5.5 carbon fibre | **16 in — planned, not yet fitted** | 14 in *(pitch TBC)* |
-| **Battery** | Tattu 6000 mAh 6S1P 35C | TBC — **6S max, see note** | 6S LiPo, 4200 mAh configured — **voltage monitoring only** |
+| **Battery** | Tattu 6000 mAh 6S1P 35C | Tattu **16000 mAh** 6S1P (~1.8 kg), flown 2026-09-13 — **6S max, see note** | 6S LiPo, 4200 mAh configured — **voltage monitoring only** |
 | **Operating mass** | 2.99 kg (Cfg 1) / 3.36 kg (Cfg 2) | TBC | 2800 g (3485 g demonstrated) |
 | **MTOM** | 4.6 kg provisional | TBC | 4.6 kg provisional |
 | **RC link** | RadioMaster Pocket → RP3 ELRS, 2.4 GHz | same | same (receiver set to **SBUS** out) |
 | **Telemetry** | 915 MHz FHSS, 100 mW EIRP | 915 MHz FHSS, 100 mW EIRP | TBC |
-| **Payload** | SIYI A8 mini + magnet gripper | TBC | none fitted |
+| **Payload** | SIYI A8 mini + magnet gripper | SIYI A8 mini; magnet gripper mounting in progress | none fitted |
 | **Flotation** | Closed-cell foam, electronics uppermost | TBC | TBC |
 | **Status** | Flying — last flight 24 Aug 2026 | In build — 16 in props not yet fitted | Flying — logs 28–29 Aug 2026 |
 
@@ -137,10 +137,9 @@ to date supervised by a certificated remote pilot.
 The large airframe. **Electronics are identical to Don**; the frame and
 propellers are what set it apart.
 
-The ROS 2 container on the companion computer is named `uav_ekko` and the OCS
-lists the aircraft as `UAV1`, which suggests Ekko is the airframe this repo
-actually targets — **please confirm**, because it determines which aircraft the
-bringup, geofence and OCS heartbeat in this repo are written against.
+**Ekko is the competition UAV and the airframe this repo targets.** The ROS 2
+container on its companion computer is `uav_ekko` and the OCS lists it as
+`UAV1`; the bringup, geofence and OCS heartbeat here are written against it.
 
 **Frame** — 9IMOD IDF-17
 *(specifications below are the vendor's listing text and are not independently
@@ -179,8 +178,14 @@ Lumenier ESC is rated 2–6S and is the binding constraint. A 760 mm airframe on
 16 in props will want more capacity than Don's 6000 mAh pack; size it as 6S
 with a higher mAh rather than reaching for more cells.
 
-**Still TBC** — firmware version, battery part number, payload fit-out,
-flotation, and all masses.
+**First flight on the 16000 mAh pack** (2026-09-13, `00000046.BIN`, 8 sorties,
+pack started at 22.8 V): hover about 45 A and hover throttle 0.43 **as logged**.
+The current sensor is still the CubeOrange default calibration
+(`BATT_AMP_PERVLT` 39.877), so treat the amps as unconfirmed until a charger
+comparison. Sag at hover current puts the `BATT_LOW_VOLT` 21.6 V RTL at roughly
+14 minutes from a full charge. Vibration: VibeZ mean 8.8, no clipping on any IMU.
+
+**Still TBC** — propeller fit, flotation, and all masses.
 
 ---
 
@@ -311,7 +316,8 @@ Shared across the fleet unless a per-aircraft section says otherwise.
 | Frame 2 — Ekko | 9IMOD IDF-17, 760 mm, 2.0 mm carbon fibre, 17 in prop capacity, 10 kg rated load, tripod legs | https://www.aliexpress.us/item/3256810008919823.html |
 | Transmitter | RadioMaster Pocket | https://radiomasterrc.com/products/pocket-radio-controller-m2 |
 | Receiver | RadioMaster RP3 ExpressLRS 2.4 GHz nano | https://radiomasterrc.com/products/rp3-expresslrs-2-4ghz-nano-receiver?variant=46486353674432 |
-| Flight controller | Pixhawk (HAWKS WORK, with damper) | https://www.amazon.com/HAWKS-WORK-Pixhawk-Controller-Absorber/dp/B0CTZTJD4J |
+| Flight controller — Don, Ekko | CubePilot Cube Orange+ (one board, shared between the two) | — |
+| Flight controller — Fitz | Pixhawk 1 (HAWKS WORK, 2.4.8-class, with damper) | https://www.amazon.com/HAWKS-WORK-Pixhawk-Controller-Absorber/dp/B0CTZTJD4J |
 | Companion computer | NVIDIA Jetson Orin Nano | https://docs.nvidia.com/jetson/orin-nano-devkit/user-guide/latest/quick_start.html |
 | ESC — **all three** | Lumenier Elite Pro 60A 2-6S AM32 4-in-1, 30×30 | https://www.lumenier.com/products/lumenier-elite-pro-60a-2-6s-am32-4-in-1-esc-30x30 |
 | Camera | SIYI A8 mini | https://www.airbot-systems.com/wp-content/uploads/2025/01/A8-mini-User-Manual-v1.6.pdf |
@@ -319,7 +325,7 @@ Shared across the fleet unless a per-aircraft section says otherwise.
 | Propellers — Don, Fitz | 14 × 5.5 carbon fibre (2CW + 2CCW) | https://speedyfpv.com/products/4pcs-14x5-5-carbon-fiber-propellers-1455-2cw-2ccw-3k-carbon-fiber-balanced |
 | Propellers — Ekko | 16 in, planned — not yet sourced | TBC |
 | GNSS | u-blox M8N module | https://www.amazon.com/M8N-GPS-Module-Controller-Receiver/dp/B0FLV6RTY1 |
-| Battery | Tattu 6000 mAh 6S1P 35C (Don); others TBC | — |
+| Battery | Tattu 6000 mAh 6S1P 35C (Don); Tattu 16000 mAh 6S1P (Ekko); Fitz in its own section | — |
 
 ---
 

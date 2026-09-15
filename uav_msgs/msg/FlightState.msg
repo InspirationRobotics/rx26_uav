@@ -2,8 +2,9 @@
 # EXTENDED_SYS_STATE. The autopilot's own answer to "is it flying?".
 #
 # WHY THIS IS ITS OWN TOPIC AND NOT A FIELD ON FcuStatus. EXTENDED_SYS_STATE and
-# HEARTBEAT are separate MAVLink streams on separate rate groups (SR0_EXT_STAT
-# and SR0_EXTRA1) and they die independently. Folding landed_state into
+# HEARTBEAT arrive by separate paths (EXTENDED_SYS_STATE is requested
+# per-message by telemetry_bridge; HEARTBEAT needs no request at all) and they
+# die independently. Folding landed_state into
 # FcuStatus would make one stream's staleness silently gate the other's — and
 # these two have very different consequences downstream: a stale mode string
 # costs a greyed-out readout, while a stale landed_state must SUPPRESS the OCS
