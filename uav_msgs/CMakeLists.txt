@@ -24,6 +24,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BuoyDetections.msg"
   "msg/Buoy.msg"
   "msg/BuoyMap.msg"
+  # The fence read back from the autopilot.
+  "msg/Fence.msg"
   DEPENDENCIES std_msgs
 )
 

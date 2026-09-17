@@ -38,9 +38,8 @@ REST_BAD_PER_CELL = 3.70
 #: While armed: loaded margin above BATT_LOW_VOLT.
 FLY_OK_MARGIN_V = 0.6
 FLY_BAD_MARGIN_V = 0.3
-#: Head-room required between the fence ceiling and the working altitude.
-#: Altitude hold overshoots a climb, and the fence acts on the overshoot.
-FENCE_HEADROOM_M = 3.0
+#: FENCE_TYPE bits (ArduPilot).
+FENCE_TYPE_ALT_MAX, FENCE_TYPE_CIRCLE, FENCE_TYPE_POLYGON = 1, 2, 4
 
 FIX_NAMES = {0: "no GPS", 1: "no fix", 2: "2D", 3: "3D", 4: "DGPS",
              5: "RTK float", 6: "RTK fixed"}
@@ -110,18 +109,44 @@ def battery(inp):
 
 
 def fence(inp):
+    """The fence the working altitude is flown under.
+
+    The number that matters is not FENCE_ALT_MAX but FENCE_ALT_MAX minus
+    FENCE_MARGIN: that is where the autopilot's avoidance stops a climb in
+    Loiter, and the buoy search refuses to fly above it. Chris flies 12 m and a
+    2 m margin for a 10 m pass on purpose -- a stick climb stops at exactly the
+    working altitude -- so that is ok, and 10 m with a 2 m margin is bad.
+    """
     enable, ceiling = inp.get("fence_enable"), inp.get("fence_alt_max")
+    margin, ftype = inp.get("fence_margin"), inp.get("fence_type")
     work = inp.get("working_alt_m")
     if not _num(enable) or not _num(ceiling):
         return _chip("fence", "fence", "unknown",
                      "FENCE_ENABLE / FENCE_ALT_MAX not read from the autopilot yet")
     if enable < 0.5:
         return _chip("fence", "fence", "warn", "FENCE_ENABLE is 0: no fence at all")
-    if _num(work) and ceiling < work + FENCE_HEADROOM_M:
-        return _chip("fence", "fence", "bad",
-                     "ceiling %.0f m is under %.0f m working altitude + %.0f m: "
-                     "the fence will act mid-pass" % (ceiling, work, FENCE_HEADROOM_M))
-    return _chip("fence", "fence", "ok", "enabled, ceiling %.0f m" % ceiling)
+    bits = int(ftype) if _num(ftype) else None
+    stop = ceiling - (margin if _num(margin) else 0.0)
+    if (bits is None or bits & FENCE_TYPE_ALT_MAX) and _num(work):
+        if ceiling < work:
+            return _chip("fence", "fence", "bad",
+                         "ceiling %.0f m is under the %.0f m working altitude: the "
+                         "fence will act mid-pass" % (ceiling, work))
+        if stop < work - 0.05:
+            return _chip("fence", "fence", "bad",
+                         "climbs stop at %.0f m (FENCE_ALT_MAX %.0f - FENCE_MARGIN "
+                         "%.0f), under the %.0f m working altitude. The search "
+                         "will refuse to start." % (stop, ceiling, margin or 0, work))
+    if bits is not None and not bits & FENCE_TYPE_POLYGON:
+        return _chip("fence", "fence", "warn",
+                     "FENCE_TYPE %d has no polygon: nothing stops it sideways, and "
+                     "the search needs one" % bits)
+    if bits is not None and bits & FENCE_TYPE_CIRCLE:
+        return _chip("fence", "fence", "warn",
+                     "FENCE_TYPE %d includes the circle: FENCE_RADIUS around home "
+                     "triggers too, not just the polygon" % bits)
+    return _chip("fence", "fence", "ok",
+                 "enabled, ceiling %.0f m, climbs stop at %.0f m" % (ceiling, stop))
 
 
 def gimbal(inp):

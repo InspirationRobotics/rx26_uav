@@ -27,9 +27,9 @@ autopilot, one that faces the operator, and a data-only package on top.
 
 | Package | Contains | State |
 |---|---|---|
-| [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 13 msgs |
+| [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 14 msgs |
 | [`uav_common`](uav_common/) | Params loader, node lifecycle, stream cache, drop latch, geodesy, the geofence protocol. No nodes | library |
-| [`uav_fcu`](uav_fcu/) | `telemetry_bridge` — the only thing that speaks MAVLink. Also uploads the geofence | flown |
+| [`uav_fcu`](uav_fcu/) | `telemetry_bridge` — the only thing that speaks MAVLink. Uploads the geofence and reads back the one the autopilot holds | flown; fence read-back tested in ArduCopter 4.7.0 SITL only |
 | [`uav_groundstation`](uav_groundstation/) | `ground_station` (one web page on `:8090`) and `ocs_client` (the OCS heartbeat) | `ground_station` flown; `ocs_client` ran aboard, not yet checked against RoboNation's stub |
 | [`uav_camera`](uav_camera/) | `camera_node` — the SIYI A8 mini gateway: RTSP in, MJPEG out on `:8091`, records to the Jetson and the camera's SD card, holds the gimbal at nadir | flown |
 | [`uav_perception`](uav_perception/) | `detector_node` — runs the colour-buoy model on `camera_node`'s stream, annotated view on `:8092`, publishes each frame's boxes with its pose. `buoy_mapper` — the Task 1 buoy map: positions by ray projection, each buoy's state decided over 4 s of full-view watching; downloads on `:8093`. Replay with `tools/scripts/map_session.py` | flown 2026-09-13: all 10 buoy states correct over 5 map runs |

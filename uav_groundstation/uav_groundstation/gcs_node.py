@@ -11,11 +11,18 @@ the way back.
 
 Subscribes (read-only): /uav/pose, /uav/attitude, /uav/fcu_status,
 /uav/flight_state, /uav/battery, /uav/gps, /uav/fcu_params, /uav/camera/status,
-/uav/perception/buoy_map. Publishes
+/uav/perception/buoy_map, /uav/fence. Publishes
 nothing. Its only outward effects are the processes it spawns, the two power
 verbs it can hand to the host helper — both gated, both re-checked server-side —
 and two services it can call: camera capture, and clearing the buoy map (which
 saves the map before clearing it, so neither can lose data).
+
+THE MAP IS DRAWN AROUND THE FENCE THE AUTOPILOT HOLDS (/uav/fence), and falls
+back to the `geofence` param only while none has been read. The map's origin
+follows the same choice; far from both, it is the first position fix. An origin
+half a world away is not cosmetic: local metres are scaled by the cosine of the
+origin's latitude, so a Singapore origin stretched every east-west distance at a
+San Diego park by 19%, the tape measure and the grid with it.
 
 THE TWO RULES THIS NODE HOLDS, and holds again on every request no matter what
 the page rendered:
@@ -49,7 +56,7 @@ from rcl_interfaces.msg import Log
 
 from std_srvs.srv import SetBool, Trigger
 from uav_msgs.msg import (Attitude, Battery, BuoyMap, CameraStatus, FcuParams,
-                          FcuStatus, FlightState, GlobalPos, GpsStatus)
+                          FcuStatus, Fence, FlightState, GlobalPos, GpsStatus)
 
 from uav_common import camera_frame
 from uav_common import config as uav_config
@@ -115,11 +122,35 @@ BUOY_MAP_TIMEOUT_S = 3.0
 # at most; see _call_service for why waiting there is safe.
 SERVICE_TIMEOUT_S = 5.0
 
+# Farther than this from the params fence, it is not this venue's fence and the
+# map is centred on the aircraft instead.
+FOREIGN_ORIGIN_M = 50_000.0
+
+# Latched topics (telemetry_bridge's /uav/fcu_params and /uav/fence): a
+# subscriber must be TRANSIENT_LOCAL too, or a ground station restarted after the
+# publish never hears the value.
+_LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                      durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+_FCU_PARAM_FIELDS = ("batt_low_volt", "batt_crt_volt", "batt_capacity_mah",
+                 "fence_enable", "fence_alt_max", "fence_type", "fence_margin",
+                 "fence_action")
+
 
 def _finite(x):
     """A float for JSON: NaN becomes None, because JSON has no NaN and the page
     treats a blank as unknown."""
     return None if x is None or (isinstance(x, float) and math.isnan(x)) else x
+
+
+def _centroid(polygon):
+    """Mean vertex of a polygon given open or closed; (0, 0) if empty."""
+    pts = list(polygon)
+    if len(pts) > 1 and tuple(pts[0]) == tuple(pts[-1]):
+        pts = pts[:-1]
+    if not pts:
+        return (0.0, 0.0)
+    return (sum(a for a, _ in pts) / len(pts), sum(b for _, b in pts) / len(pts))
 
 
 class GroundStation(Node):
@@ -141,17 +172,20 @@ class GroundStation(Node):
         self._status = StreamCache(p["status_timeout_s"])
         self._flight = StreamCache(p["flight_timeout_s"])
 
+        self._trail = deque(maxlen=int(p["trail_length"]) or 1)
+
         # The fence is the map's origin. Anchoring on it rather than on the
         # first fix means the polygon does not jump the moment GPS arrives, and
-        # two sessions draw the same picture.
+        # two sessions draw the same picture. The params fence stands in until
+        # the autopilot's is read (see the module header); origin_id tells the
+        # page to drop a trail drawn about the old origin.
         # Flat [lat, lon, ...] in the params because ROS parameters cannot
         # nest; paired here by the one function that owns that conversion.
         self._fence = polygon_from_flat(p["geofence"])
-        self._origin = self._fence_centroid()
-        self._fence_xy = [list(geo.latlon_to_xy(a, b, self._origin))
-                          for a, b in self._fence]
-
-        self._trail = deque(maxlen=int(p["trail_length"]) or 1)
+        self._fence_src = "params"
+        self._fence_problem = ""
+        self._origin_id = 0
+        self._set_origin(_centroid(self._fence))
         self._cpu = system_info.CpuMeter()
         # {port: (checked_at, is_open)} — see _port_open. Bounded by the number
         # of NodeSpecs that declare a port.
@@ -202,6 +236,11 @@ class GroundStation(Node):
         self._clear_map_cli = self.create_client(
             Trigger, "/uav/perception/clear_buoy_map")
 
+        # The fence the autopilot holds (latched by telemetry_bridge).
+        self.create_subscription(
+            Fence, "/uav/fence", self._on_fence,
+            _LATCHED)
+
         # Battery and GPS, for the header and the pre-flight strip. Battery
         # samples also feed the time-to-failsafe estimator; see battery_core
         # for why it works from the voltage trend rather than from mAh.
@@ -215,8 +254,7 @@ class GroundStation(Node):
         self._fcu_params = None
         self.create_subscription(
             FcuParams, "/uav/fcu_params", self._on_fcu_params,
-            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
-                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            _LATCHED)
         # Camera geometry and working altitude, read once from the params the
         # camera and mapper nodes load themselves -- one source, as _geoid does
         # for the OCS constant. None if unreadable: the footprint and the fence
@@ -242,14 +280,12 @@ class GroundStation(Node):
 
     # ---------- startup checks ----------
 
-    def _fence_centroid(self):
-        pts = self._fence[:-1] if (len(self._fence) > 1
-                                   and self._fence[0] == self._fence[-1]) \
-            else self._fence
-        if not pts:
-            return (0.0, 0.0)
-        return (sum(a for a, _ in pts) / len(pts),
-                sum(b for _, b in pts) / len(pts))
+    def _set_origin(self, origin):
+        """Re-anchor the map's local metres, and everything drawn in them."""
+        self._origin = origin
+        self._fence_xy = [list(geo.latlon_to_xy(a, b, origin)) for a, b in self._fence]
+        self._trail.clear()
+        self._origin_id += 1
 
     def _check_workspace(self, path):
         """Is the workspace a bind mount, and say so once at startup.
@@ -280,11 +316,27 @@ class GroundStation(Node):
 
     # ---------- inputs ----------
 
+    def _on_fence(self, msg: Fence):
+        self._fence_problem = "" if msg.valid else msg.problem
+        if not msg.valid:
+            return                  # keep drawing the last fence known
+        poly = list(zip(msg.latitude, msg.longitude))
+        if poly == self._fence and self._fence_src == "autopilot":
+            return
+        self._fence, self._fence_src = poly, "autopilot"
+        self._set_origin(_centroid(poly))
+        self.get_logger().info("map: drawing the autopilot's %d-corner fence"
+                               % len(poly))
+
     def _on_pose(self, msg: GlobalPos):
         # NaN heading is kept, not dropped: the readout says so and the operator
         # needs to know GPS yaw is unresolved. Only the trail skips it, because
         # a NaN cannot be plotted.
         x, y = geo.latlon_to_xy(msg.latitude, msg.longitude, self._origin)
+        if self._fence_src == "params" and math.hypot(x, y) > FOREIGN_ORIGIN_M:
+            self._fence_src = "params (far away)"
+            self._set_origin((msg.latitude, msg.longitude))
+            x, y = 0.0, 0.0
         self._pose.set((msg, x, y), time.monotonic())
         gate = self.p["trail_min_move_m"]
         if not self._trail or math.hypot(x - self._trail[-1][0],
@@ -409,6 +461,11 @@ class GroundStation(Node):
             "ocs": self._ocs_state(),
             "map": {
                 "fence": self._fence_xy,
+                # "autopilot" = read back from it; anything else is the params
+                # stand-in, and the page says so.
+                "fence_src": self._fence_src,
+                "fence_problem": self._fence_problem,
+                "origin_id": self._origin_id,
                 "veh": (None if pose is None else
                         {"x": pose_e[1], "y": pose_e[2],
                          "heading": (0.0 if math.isnan(pose.heading)
@@ -446,10 +503,7 @@ class GroundStation(Node):
                       time.monotonic())
 
     def _on_fcu_params(self, msg):
-        self._fcu_params = {f: _finite(getattr(msg, f))
-                            for f in ("batt_low_volt", "batt_crt_volt",
-                                      "batt_capacity_mah", "fence_enable",
-                                      "fence_alt_max")}
+        self._fcu_params = {f: _finite(getattr(msg, f)) for f in _FCU_PARAM_FIELDS}
 
     def _read_camera_cfg(self):
         try:
@@ -516,6 +570,8 @@ class GroundStation(Node):
             "armed": tel.get("armed"), "gps": gps, "battery": batt,
             "fence_enable": params.get("fence_enable"),
             "fence_alt_max": params.get("fence_alt_max"),
+            "fence_margin": params.get("fence_margin"),
+            "fence_type": params.get("fence_type"),
             "working_alt_m": cfg.get("working_alt_m"),
             "camera": camera,
             "record_gate": None if c is None else c["record_gate"],

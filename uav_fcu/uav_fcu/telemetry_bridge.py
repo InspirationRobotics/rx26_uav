@@ -35,6 +35,12 @@ MAVLink connection and there may only ever be one:
 3. TX (geofence): uploads the competition geofence to the autopilot as an
    inclusion fence, via the /uav/fence_upload service. See fence_core.
 
+4. RX (the fence the autopilot HOLDS): read back over the mission protocol at
+   startup, every FENCE_POLL_S while disarmed (so a fence drawn in QGC shows up)
+   and once more on each arm, and published latched on /uav/fence. Read-only.
+   On its own worker thread, because a mission dialog blocks for a second and
+   the executor is what keeps every topic flowing.
+
 THERE IS NO DISARM PATH IN THIS NODE, AND THAT IS DELIBERATE.
 -------------------------------------------------------------
 The ASV's telemetry_bridge carries a force-disarm TX path — a
@@ -93,15 +99,16 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
-from uav_msgs.msg import (Attitude, Battery, FcuParams, FcuStatus, FlightState,
-                          GlobalPos, GpsStatus, RcChannels)
+from uav_msgs.msg import (Attitude, Battery, FcuParams, FcuStatus, Fence,
+                          FlightState, GlobalPos, GpsStatus, RcChannels)
 
 from uav_common import config as uav_config
 from uav_common import fcu_decode
 from uav_common import geo
 from uav_common.drop_latch import DropLatch
-from uav_common.fence_core import (FenceError, FenceProtocol, MavFenceTransport,
-                                   items_from_polygon, polygon_from_flat)
+from uav_common.fence_core import (MISSION_TYPE_FENCE, FenceError, FenceProtocol,
+                                   MavFenceTransport, items_from_polygon,
+                                   polygon_from_flat, polygon_from_items)
 from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config
 from uav_common.stream_cache import StreamCache
@@ -160,6 +167,14 @@ PARAM_REFRESH_S = 300.0
 _MISSION_TYPES = ("MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK",
                   "MISSION_COUNT", "MISSION_ITEM", "MISSION_ITEM_INT")
 
+#: How often the fence is read back while disarmed, so a fence re-drawn in QGC
+#: reaches the search before takeoff, and while armed, so the search always has a
+#: RECENT read rather than one taken at arming that may have failed. The read is
+#: a few MAVLink frames and changes nothing. After a failed read, try again sooner.
+FENCE_POLL_S = 15.0
+FENCE_ARMED_POLL_S = 30.0
+FENCE_RETRY_S = 5.0
+
 
 class TelemetryBridge(Node):
 
@@ -203,6 +218,7 @@ class TelemetryBridge(Node):
         self.params_pub = self.create_publisher(FcuParams, "/uav/fcu_params",
                                                 latched_qos)
         self.drop_pub = self.create_publisher(Bool, "/uav/autonomy_drop", latched_qos)
+        self.fence_pub = self.create_publisher(Fence, "/uav/fence", latched_qos)
 
         self.create_subscription(RcChannels, "/uav/rc_override",
                                  self._override_cb, 10)
@@ -233,6 +249,9 @@ class TelemetryBridge(Node):
         # limit while nobody is running an upload.
         self._mission_q = queue.Queue(maxsize=256)
         self._fence_lock = threading.Lock()
+        # The fence as last READ from the autopilot: [(lat, lon)] when it held
+        # one usable polygon, else None. Guided targets are checked against it.
+        self._held_fence = None
         self._ext_state_seen = False
         self._ext_state_req_t = time.monotonic()
 
@@ -250,6 +269,9 @@ class TelemetryBridge(Node):
         self._stop = threading.Event()          # deterministic teardown
         self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._rx_thread.start()
+        self._fence_thread = threading.Thread(target=self._fence_read_loop,
+                                              daemon=True)
+        self._fence_thread.start()
 
         self.create_timer(1.0 / PUB_RATE_HZ, self._publish_tick)
         self._publish_drop_state()               # initial state (STARTUP=blocked)
@@ -284,6 +306,14 @@ class TelemetryBridge(Node):
             mtype = msg.get_type()
 
             if mtype in _MISSION_TYPES:
+                # Only the FENCE dialog addressed to US. MAVProxy rebroadcasts
+                # every GCS's mission traffic to this port too; QGC fetching its
+                # own copy of the fence must not be read as our answer.
+                if (getattr(msg, "target_system", self.conn.source_system)
+                        != self.conn.source_system
+                        or getattr(msg, "mission_type", MISSION_TYPE_FENCE)
+                        != MISSION_TYPE_FENCE):
+                    continue
                 # Handed to the fence dialog, never handled here: it is a
                 # blocking request/response exchange and the RX loop is what
                 # keeps every other stream alive.
@@ -547,7 +577,9 @@ class TelemetryBridge(Node):
         # of MISSION_REQUEST and produces a fence made of both.
         if not self._fence_lock.acquire(blocking=False):
             response.success = False
-            response.message = "a fence upload is already in progress"
+            response.message = ("a fence dialog (an upload, or the periodic "
+                                 "read-back) is in progress; try again in a few "
+                                 "seconds")
             self.get_logger().warn(response.message)
             return response
         try:
@@ -596,11 +628,76 @@ class TelemetryBridge(Node):
         finally:
             self._fence_lock.release()
 
+    # ---------- fence read-back (job 4) ----------
+
+    def _fence_read_loop(self):
+        """Keep /uav/fence equal to what the autopilot holds. Own thread."""
+        last_try = None
+        last_ok = False
+        was_armed = None
+        while not self._stop.wait(1.0):
+            t = time.monotonic()
+            with self._lock:
+                status = self._status.get(t)
+            if status is None:
+                continue                  # nobody answering yet; do not ask
+            armed = status[1]
+            if armed and was_armed is False:
+                need = True             # read this flight's fence at once
+            else:
+                period = FENCE_ARMED_POLL_S if armed else FENCE_POLL_S
+                need = last_try is None or t - last_try >= (
+                    period if last_ok else FENCE_RETRY_S)
+            was_armed = armed
+            if not need:
+                continue
+            last_try = t
+            last_ok = self._read_fence()
+
+    def _read_fence(self):
+        """One download; publish what it found. -> True if the dialog completed."""
+        if not self._fence_lock.acquire(blocking=False):
+            return False              # an upload is running; read again after
+        try:
+            proto = FenceProtocol(
+                MavFenceTransport(self.conn, self._mission_q, self._mavutil.mavlink),
+                timeout_s=float(self.p["fence_timeout_s"]))
+            try:
+                items = proto.download()
+            except FenceError as e:
+                self.get_logger().warn(
+                    "could not read the fence back from the autopilot: %s" % e,
+                    throttle_duration_sec=60.0)
+                return False
+        finally:
+            self._fence_lock.release()
+        polygon, problem = polygon_from_items(items)
+        with self._lock:
+            changed = (polygon or None) != self._held_fence
+            self._held_fence = polygon or None
+        if changed:
+            if polygon:
+                self.get_logger().info(
+                    "fence on the autopilot: a %d-corner polygon" % len(polygon))
+            else:
+                self.get_logger().warn("fence on the autopilot is not usable: %s"
+                                       % problem)
+        m = Fence()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.valid = bool(polygon)
+        m.problem = problem
+        m.latitude = [a for a, _ in polygon]
+        m.longitude = [b for _, b in polygon]
+        m.item_count = len(items)
+        self.fence_pub.publish(m)
+        return True
+
     # ---------- teardown ----------
 
     def destroy_node(self):
         self._stop.set()
         self._rx_thread.join(timeout=2.0)
+        self._fence_thread.join(timeout=float(self.p["fence_timeout_s"]) + 1.0)
         try:
             self.conn.close()
         except Exception:

@@ -10,10 +10,10 @@ server-side on arrival (see gcs_server), because anyone can edit JavaScript in a
 browser or curl the endpoint. A greyed-out button is a courtesy to the operator,
 never a security boundary.
 
-THE MAP DRAWS THE SAME `geofence` PARAM THE UPLOADER SENDS. Not a copy, not a
-re-derivation — the snapshot carries the polygon telemetry_bridge would upload,
-so what the operator sees is what the autopilot was told. Two sources here would
-drift silently and the drift would only show as an unexplained fence breach.
+THE MAP DRAWS THE FENCE THE AUTOPILOT HOLDS, read back by telemetry_bridge —
+not a copy, not a re-derivation — so what the operator sees is what the
+autopilot enforces, whether it came from QGC or from the uploader. Until one has
+been read the `geofence` param stands in, and the line under the map says so.
 
 Logs are read INCREMENTALLY: the page sends the newest sequence number it holds
 and gets only what is new. Resending the whole ring at the poll rate would cost
@@ -267,9 +267,11 @@ details.about p{margin:6px 0 0;max-width:920px}
     </div>
     <div id="buoylist"></div>
     <details class="about"><summary>About this tab</summary>
-    <p>The polygon is the <b>same <code>geofence</code> parameter
-    telemetry_bridge uploads</b> — what you see is what the autopilot was told.
-    Drag to pan; scroll or +/− to zoom. The grid is fixed to the ground and
+    <p>The polygon is the <b>fence read back from the autopilot</b> — the one it
+    enforces, drawn in QGC or uploaded. Until one has been read, the
+    <code>geofence</code> parameter stands in, and the line under the map says
+    so. Drag to pan; scroll or +/− to zoom.</p>
+    <p> The grid is fixed to the ground and
     re-spaces itself as you zoom — the corner says the spacing. The autopilot
     enforces the fence; this is a readout.</p>
     <p><b>Measure</b>: click two points for the distance between
@@ -703,8 +705,12 @@ function draw(){
   g.fillStyle=PAL.dim;g.fillText(legend,14,H-12);
   g.fillText('N \u2191',W-34,20);
 }
+var originSeen=null;
 function renderMap(){
   var m=S.map||{};
+  /* The map re-anchors when the autopilot's fence is first read; a trail drawn
+     about the old origin would be in the wrong place. */
+  if(m.origin_id!==originSeen){trail=[];originSeen=m.origin_id}
   if(m.veh){var p=[m.veh.x,m.veh.y];
     if(!trail.length||Math.hypot(p[0]-trail[trail.length-1][0],
         p[1]-trail[trail.length-1][1])>=(m.trail_gate||0.5))trail.push(p);
@@ -716,7 +722,10 @@ function renderMap(){
       'alt '+fmt((S.tel||{}).alt_rel,1)+' m  ·  '+trail.length+' trail pts')
     :'no pose')+'  ·  '+(G?'GPS '+G.fix_name
       +(G.satellites!==255?' '+G.satellites+' sats':'')
-      +(G.hdop!=null?' HDOP '+fmt(G.hdop,2):''):'no GPS');
+      +(G.hdop!=null?' HDOP '+fmt(G.hdop,2):''):'no GPS')
+    +'  ·  fence: '+(m.fence_src==='autopilot'?'read from the autopilot'
+      :'uav_params stand-in, none read from the autopilot yet')
+    +(m.fence_problem?' ('+m.fence_problem+')':'');
   checkLocks();
   if(mapVisible()){renderBuoys();draw();}
 }

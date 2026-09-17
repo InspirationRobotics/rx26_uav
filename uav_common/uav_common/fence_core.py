@@ -45,7 +45,11 @@ from dataclasses import dataclass
 from uav_common import geo
 
 MISSION_TYPE_FENCE = 1                       # MAV_MISSION_TYPE_FENCE
+CMD_FENCE_RETURN_POINT = 5000                # MAV_CMD_NAV_FENCE_RETURN_POINT
 CMD_FENCE_POLYGON_VERTEX_INCLUSION = 5001    # MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION
+CMD_FENCE_POLYGON_VERTEX_EXCLUSION = 5002
+CMD_FENCE_CIRCLE_INCLUSION = 5003
+CMD_FENCE_CIRCLE_EXCLUSION = 5004
 ACK_ACCEPTED = 0                             # MAV_MISSION_ACCEPTED
 
 #: How far a readback vertex may sit from what we sent before it is a mismatch.
@@ -115,6 +119,52 @@ def items_from_polygon(polygon):
             for i, (lat, lon) in enumerate(pts)]
 
 
+def polygon_from_items(items):
+    """Downloaded fence items -> (polygon [(lat, lon), ...], problem str).
+
+    The polygon comes back only when the autopilot holds EXACTLY ONE inclusion
+    polygon and nothing else the buoy search would have to plan around; problem
+    is "" then. Otherwise the polygon is [] and problem says, in words for the
+    pilot, what is there instead.
+
+    Exclusion zones and circles are refused rather than ignored: a sweep planned
+    inside the polygon alone would fly straight through an exclusion zone, and
+    the autopilot would answer with its fence action -- an RTL in the middle of
+    the search, from a fence nobody looked at. The breach return point is not a
+    boundary and is skipped.
+
+    ArduPilot stores a polygon as consecutive vertex items that each carry the
+    polygon's vertex count in param1; that count is what groups them.
+    """
+    names = {CMD_FENCE_POLYGON_VERTEX_EXCLUSION: "exclusion polygon",
+             CMD_FENCE_CIRCLE_INCLUSION: "inclusion circle",
+             CMD_FENCE_CIRCLE_EXCLUSION: "exclusion circle"}
+    others = sorted({names[i.get("command")] for i in items
+                     if i.get("command") in names})
+    if others:
+        return [], ("the fence also has: %s. The search plans inside ONE "
+                    "inclusion polygon only -- delete the rest in QGC."
+                    % ", ".join(others))
+    verts = [i for i in items if i.get("command") == CMD_FENCE_POLYGON_VERTEX_INCLUSION]
+    polygons, k = [], 0
+    while k < len(verts):
+        n = int(verts[k].get("param1") or 0)
+        group = verts[k:k + n]
+        if n < 3 or len(group) < n or any(int(v.get("param1") or 0) != n
+                                          for v in group):
+            return [], ("the autopilot's polygon is malformed (a vertex count "
+                        "that does not match its items). Re-draw it in QGC.")
+        polygons.append([(float(v["lat"]), float(v["lon"])) for v in group])
+        k += n
+    if not polygons:
+        return [], ("no polygon fence on the autopilot. Draw one in QGC's "
+                    "GeoFence tab and upload it.")
+    if len(polygons) > 1:
+        return [], ("the autopilot holds %d inclusion polygons; the search "
+                    "needs exactly one." % len(polygons))
+    return polygons[0], ""
+
+
 class FenceProtocol:
     """Drives the mission protocol over an injected transport.
 
@@ -172,18 +222,44 @@ class FenceProtocol:
             self.t.send_item(match[0])
             remaining.discard(seq)
 
-    def readback_verify(self, items, tolerance_m: float = DEFAULT_TOLERANCE_M):
-        """A fence the autopilot does not echo back does not exist."""
+    def _read_list(self, expect_count=None, ack=True):
+        """Request the fence list and every item in it. -> [item dict].
+
+        `expect_count`, when given, is checked BEFORE any item is requested, so a
+        readback of the wrong length fails without a dialog's worth of traffic.
+        `ack=False` leaves the final ACK to the caller: readback_verify sends it
+        only once every item has checked out.
+        """
         self.t.send_request_list()
         count = self._recv({"MISSION_COUNT"})["count"]
-        if count != len(items):
+        if expect_count is not None and count != expect_count:
             raise FenceError(
                 "readback count %d != uploaded %d — the autopilot holds a "
-                "different fence than we just sent" % (count, len(items)))
-        by_seq = {i.seq: i for i in items}
+                "different fence than we just sent" % (count, expect_count))
+        got = []
         for seq in range(count):
             self.t.send_request(seq)
-            msg = self._recv({"MISSION_ITEM"})
+            got.append(self._recv({"MISSION_ITEM"}))
+        # MAVLink: a zero-length list is complete at the COUNT; there is nothing
+        # to acknowledge.
+        if count and ack:
+            self.t.send_ack()
+        return got
+
+    def download(self):
+        """The fence exactly as the autopilot holds it. -> [item dict].
+
+        Each item has seq, command, lat, lon, param1. Read-only: nothing about
+        the fence or the aircraft changes. See polygon_from_items for turning it
+        into something a sweep can be planned inside.
+        """
+        self.t.clear()
+        return self._read_list()
+
+    def readback_verify(self, items, tolerance_m: float = DEFAULT_TOLERANCE_M):
+        """A fence the autopilot does not echo back does not exist."""
+        by_seq = {i.seq: i for i in items}
+        for msg in self._read_list(expect_count=len(items), ack=False):
             want = by_seq.get(msg["seq"])
             if want is None:
                 raise FenceError(
@@ -291,5 +367,5 @@ class MavFenceTransport:
             scale = 1e-7 if mtype == "MISSION_ITEM_INT" else 1.0
             return {"type": "MISSION_ITEM", "seq": msg.seq,
                     "lat": msg.x * scale, "lon": msg.y * scale,
-                    "param1": msg.param1}
+                    "param1": msg.param1, "command": msg.command}
         return {"type": mtype}

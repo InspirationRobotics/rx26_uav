@@ -17,7 +17,15 @@ FCU_PARAMS = {
     "BATT_CAPACITY": "batt_capacity_mah",
     "FENCE_ENABLE": "fence_enable",
     "FENCE_ALT_MAX": "fence_alt_max",
+    "FENCE_TYPE": "fence_type",
+    "FENCE_MARGIN": "fence_margin",
+    "FENCE_ACTION": "fence_action",
 }
+
+#: FENCE_TYPE bits.
+FENCE_TYPE_ALT_MAX = 1
+FENCE_TYPE_CIRCLE = 2
+FENCE_TYPE_POLYGON = 4
 
 
 def battery_from_sys_status(voltage_battery_mv, current_battery_ca,

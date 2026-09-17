@@ -143,7 +143,8 @@ def good_inputs():
         "fcu_ok": True, "pose_ok": True, "armed": False,
         "gps": {"fix_type": 4, "satellites": 25, "hdop": 0.57},
         "battery": {"voltage": 24.3, "low_volt": 21.6, "cells": 6},
-        "fence_enable": 1.0, "fence_alt_max": 25.0, "working_alt_m": 10.0,
+        "fence_enable": 1.0, "fence_alt_max": 12.0, "fence_margin": 2.0,
+        "fence_type": 5.0, "working_alt_m": 10.0,
         "camera": {"running": True, "gimbal_ok": True, "gimbal_pitch": -90.1,
                    "nadir_pitch": -90.0, "codec": "H264", "width": 1920,
                    "height": 1080, "kbps": 1570, "encoding_age_s": 12.0,
@@ -169,7 +170,15 @@ def case_preflight():
         r.append(check(name, got == want, got))
 
     one(lambda i: i.update(fence_alt_max=10.0), "fence", "bad",
-        "13 Sep fence: 10 m ceiling, 10 m pass -> bad")
+        "13 Sep fence: 10 m ceiling, 2 m margin, 10 m pass -> bad")
+    one(lambda i: i.update(fence_alt_max=9.0, fence_margin=0.0), "fence", "bad",
+        "ceiling under the pass altitude -> bad")
+    one(lambda i: i.update(fence_type=7.0), "fence", "warn",
+        "FENCE_TYPE 7 (circle as well) -> warn")
+    one(lambda i: i.update(fence_type=1.0), "fence", "warn",
+        "FENCE_TYPE 1 (no polygon) -> warn")
+    one(lambda i: i.update(fence_type=4.0, fence_alt_max=5.0), "fence", "ok",
+        "polygon only: ceiling not enforced, not judged -> ok")
     one(lambda i: i["camera"].update(kbps=2000), "stream", "bad",
         "2000 kbps main stream -> bad")
     one(lambda i: i["camera"].update(width=1280, height=720), "stream", "warn",

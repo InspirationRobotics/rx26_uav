@@ -18,3 +18,9 @@ float64 batt_crt_volt       # BATT_CRT_VOLT: the critical threshold, V
 float64 batt_capacity_mah   # BATT_CAPACITY
 float64 fence_enable        # FENCE_ENABLE (0/1)
 float64 fence_alt_max       # FENCE_ALT_MAX, metres above home
+
+# Read for the buoy search (uav_mission), which flies only inside a fence the
+# autopilot is actually enforcing, below the height it actually stops at.
+float64 fence_type          # FENCE_TYPE bitmask: 1 alt max, 2 circle, 4 polygon, 8 alt min
+float64 fence_margin        # FENCE_MARGIN, m: avoidance stops this far short of a limit
+float64 fence_action        # FENCE_ACTION (1 = RTL)

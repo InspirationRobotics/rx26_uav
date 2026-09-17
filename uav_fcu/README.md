@@ -10,15 +10,26 @@ open a MAVLink connection.
 
 **Flown on Ekko** (ArduCopter 4.7.0, CubeOrange+).
 
-## Three jobs
+## Four jobs
 
 **RX** — republishes `/uav/pose`, `/uav/attitude`, `/uav/fcu_status`,
 `/uav/flight_state`, `/uav/rc_channels`, `/uav/battery`, `/uav/gps`,
 `/uav/autonomy_drop`, each **only while fresh**, with the stamp captured at
-receipt. Also reads five autopilot parameters back (`PARAM_REQUEST_READ`,
+receipt. Also reads eight autopilot parameters back (`PARAM_REQUEST_READ`,
 read-only) and publishes them latched on `/uav/fcu_params`, so the ground
-station's battery and fence checks use the autopilot's real thresholds instead
-of a copy in our YAML.
+station's battery and fence checks — and the buoy search — use the autopilot's
+real thresholds instead of a copy in our YAML.
+
+**RX (the fence the autopilot holds)** — reads the fence back over the mission
+protocol at startup, every 15 s while disarmed (so a fence drawn in QGC shows
+up), on each arm, and every 30 s in the air, and publishes it latched on
+`/uav/fence`. It keeps reading while armed on purpose: the search refuses to
+start on a fence older than 90 s, and a single read taken at arming that failed
+used to block the search for the whole flight. Valid only
+when the autopilot holds exactly one inclusion polygon and no exclusion zones or
+circles; otherwise `problem` says what is there. On its own thread. Mission
+frames are only taken if addressed to this node's sysid and of type FENCE, so
+QGC fetching its own copy is never read as our answer.
 
 **TX (autonomy)** — the only sanctioned RC-override path, gated by the
 autonomy-drop latch. Nothing publishes to `/uav/rc_override` yet; the enforcement
