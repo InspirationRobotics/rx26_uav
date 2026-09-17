@@ -88,6 +88,28 @@ def range_conflict_message(name, value, lo, hi, error) -> str:
     return "\n".join(lines)
 
 
+def stale_msgs_message(error) -> str:
+    """Explain an ImportError from uav_msgs.msg in terms of what to type next.
+
+    The workspace is built with --symlink-install, so a `git switch` or `git
+    pull` puts new PYTHON into the running install space at once -- but a new
+    .msg only exists after uav_msgs is rebuilt. The node then dies at import with
+    "cannot import name 'Battery' from 'uav_msgs.msg'", under systemd, in a
+    restart loop, which reads like a broken node rather than a skipped build.
+    Seen on Ekko 2026-09-16 moving from a Sep 13 build to main.
+    """
+    return "\n".join([
+        f"{error}",
+        "  This node's code names a message the INSTALLED uav_msgs does not have.",
+        "  Python follows src/ immediately (--symlink-install); messages do not.",
+        "  That is almost always a STALE BUILD after a branch switch or pull.",
+        "  Fix, inside the container:",
+        "    /root/robotx_ws/src/rx26_uav/tools/scripts/rebuild.sh",
+        "  then restart the node (systemctl restart uav-groundstation /",
+        "  uav-container on the host).",
+    ])
+
+
 def declare_from_config(node, defaults, spec):
     """Declare a node's parameters from the shared config defaults.
 
