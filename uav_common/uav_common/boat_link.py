@@ -22,6 +22,9 @@ NO FIELD NAMES ON THE AIR: the order of the bytes IS the meaning. The shapes:
   BOAT       boat -> all    every second: lat(4) lon(4) activity(1)
              target slot(1), then a 32-bit mask of the slots whose positions
              the boat HOLDS. That mask is the acknowledgement.
+  TEST       anyone -> all: a text line the ground station's Radio tab
+             puts on the air so an operator can watch one known frame
+             cross it. NEITHER VEHICLE ACTS ON IT.
 
 SLOTS, NOT TRACKER IDS, ON THE AIR. buoy_mapper numbers every track it ever
 starts, false ones included, so ids are not 1-10 in a real session. Each buoy
@@ -35,6 +38,7 @@ import struct
 PAYLOAD_BOAT = 32768         # boat -> all
 PAYLOAD_POSITIONS = 32770    # drone -> all
 PAYLOAD_LIGHTS = 32771       # drone -> all
+PAYLOAD_TEST = 33022         # 0x80FE, anyone -> anyone: a text line nobody acts on
 MAX_PAYLOAD = 128
 
 #: Light states, by code. Index IS the wire value; append only, never reorder.
@@ -257,3 +261,53 @@ class Receiver:
         """The confirmed gate or exit as buoy ids (not slots), or []."""
         ids = [self.positions[s]["id"] for s in self.confirmed_slots if s in self.positions]
         return ids if len(ids) == len(self.confirmed_slots) else []
+
+
+def pack_test(text):
+    """A PAYLOAD_TEST line, cut to one TUNNEL. ASCII, so it reads the same in
+    QGC's MAVLink Inspector as on the Radio tab."""
+    return str(text).encode("ascii", "replace")[:MAX_PAYLOAD]
+
+
+def describe(payload_type, payload):
+    """(name, one line) for a TUNNEL payload, for the Radio tab.
+
+    NEVER RAISES. A packet that does not decode is still something that crossed
+    the link, and the Radio tab is exactly where it needs to show up -- a
+    describer that threw would hide the one frame worth looking at.
+    """
+    raw = bytes(payload)
+    name = "TUNNEL_0x%04X" % (int(payload_type) & 0xFFFF)
+    try:
+        if payload_type == PAYLOAD_BOAT:
+            b = unpack_boat(raw)
+            doing = (ACTIVITY[b["activity"]] if b["activity"] < len(ACTIVITY)
+                     else "activity %d" % b["activity"])
+            # The ack mask is the whole point of the boat's packet: say how many
+            # positions it holds, not just where it is.
+            target = ", wants slot %d" % b["target_slot"] if b["target_slot"] else ""
+            return "BOAT", "%.7f %.7f, %s%s, holds %d position(s)" % (
+                b["lat"], b["lon"], doing, target, len(b["acked"]))
+        if payload_type == PAYLOAD_POSITIONS:
+            recs = unpack_positions(raw)
+            if not recs:
+                return "POSITIONS", "empty"
+            return "POSITIONS", "%d buoy(s): %s" % (
+                len(recs), ", ".join("B%d as slot %d" % (r["id"], r["slot"])
+                                     for r in recs))
+        if payload_type == PAYLOAD_LIGHTS:
+            rep = unpack_lights(raw)
+            c = rep["confirmed"]
+            if len(c) == 2:
+                confirmed = "gate red slot %d / green slot %d" % (c[0], c[1])
+            elif c:
+                confirmed = "exit slot %d" % c[0]
+            else:
+                confirmed = "nothing"
+            return "LIGHTS", "%d light(s), confirmed %s" % (len(rep["lights"]),
+                                                            confirmed)
+        if payload_type == PAYLOAD_TEST:
+            return "TEST", raw.decode("ascii", "replace")
+    except Exception as e:                     # noqa: BLE001 -- see docstring
+        return name, "does not decode (%d bytes): %s" % (len(raw), e)
+    return name, "%d bytes, not a format boat_link knows" % len(raw)

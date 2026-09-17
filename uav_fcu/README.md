@@ -90,6 +90,13 @@ and on the mesh, the same tool on a laptop with `--port COM5`. `tools/scripts/
 rfd_setup.py` reads a radio and sets it up for the mesh (Multipoint firmware,
 920–925 MHz, the laptop as master).
 
+**The radio, as a record.** Every frame that crosses it — the map out, the
+boat's packets in, and any other system's frames in — is also published on
+`/uav/radio/traffic` (`uav_msgs/RadioFrame`) for the ground station's Radio tab,
+after the fact; nothing acts on that topic. `/uav/radio/send_test` puts one
+text TUNNEL (`boat_link.PAYLOAD_TEST`, `0x80FE`) on the air, addressed to the
+boat, that neither end acts on.
+
 ## There is no disarm path, deliberately
 
 The ASV's version carries a force-disarm (`MAV_CMD_COMPONENT_ARM_DISARM` with the

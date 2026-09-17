@@ -135,7 +135,9 @@ def main():
                          ("altitude drawn big on the map", b"drawAltitude"),
                          ("3D attitude view beside the map", b'id="att3d"'),
                          ("Ekko's own model in it, not the stand-in", b'EKKO_MESH={"groups"'),
-                         ("Fit frames the fence and buoys", b"fitView")):
+                         ("Fit frames the fence and buoys", b"fitView"),
+                         ("radio tab", b"['radio','Radio']"),
+                         ("radio send-test button", b"/radio/send_test")):
         r.append(check(name, needle in page))
     # The page's search controls post SETTINGS and nothing else: on/off, the
     # count, the task and the tier. Anything that could name a position, a mode

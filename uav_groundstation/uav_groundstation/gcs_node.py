@@ -62,7 +62,7 @@ from rcl_interfaces.srv import SetParameters
 from std_srvs.srv import SetBool, Trigger
 from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, CameraStatus,
                           FcuParams, FcuStatus, Fence, FlightState, GlobalPos,
-                          GpsStatus, SearchStatus)
+                          GpsStatus, RadioFrame, SearchStatus)
 
 from uav_common import camera_frame
 from uav_common import config as uav_config
@@ -72,7 +72,8 @@ from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config, make_set_callback
 from uav_common.stream_cache import StreamCache
 
-from uav_groundstation import armed_clock, battery_core, map_origin, preflight_core
+from uav_groundstation import (armed_clock, battery_core, map_origin,
+                              preflight_core, radio_core)
 from uav_groundstation import node_registry as reg
 from uav_groundstation import power_client, proc_scan, system_info
 from uav_groundstation.gcs_page import render as render_page
@@ -256,6 +257,14 @@ class GroundStation(Node):
         # boat is not being heard, never a remembered position.
         self._boat = StreamCache(BOAT_TIMEOUT_S)
         self.create_subscription(BoatState, "/uav/boat", self._on_boat, 10)
+        # Every frame telemetry_bridge sends to, or hears from, another system
+        # over the radio, for the Radio tab. The boat's id comes from the
+        # bridge's own params, as _read_camera_cfg reads the camera's.
+        self._radio = radio_core.RadioLog(boat_sysid=self._read_boat_sysid())
+        self.create_subscription(RadioFrame, "/uav/radio/traffic",
+                                 self._on_radio, 50)
+        self._radio_test_cli = self.create_client(Trigger,
+                                                  "/uav/radio/send_test")
         self._search = StreamCache(SEARCH_STATUS_TIMEOUT_S)
         self.create_subscription(SearchStatus, "/uav/search/status",
                                  self._on_search, 10)
@@ -364,6 +373,25 @@ class GroundStation(Node):
     def _on_boat(self, msg: BoatState):
         self._recentre_on(msg.latitude, msg.longitude)
         self._boat.set(msg, time.monotonic())
+
+    def _on_radio(self, msg: RadioFrame):
+        self._radio.add(msg.direction, msg.src_system, msg.src_component,
+                        msg.dst_system, msg.msg_name, msg.payload_type,
+                        msg.summary, msg.frame_bytes,
+                        stamp=msg.header.stamp.sec
+                        + msg.header.stamp.nanosec * 1e-9)
+
+    def _read_boat_sysid(self):
+        """telemetry_bridge's boat_sysid, or None if it is 0 or unreadable --
+        then the Radio tab says it cannot score the boat link, rather than
+        guessing which system is the boat."""
+        try:
+            return int(uav_config.node_params("telemetry_bridge")["boat_sysid"]) or None
+        except Exception as e:
+            self.get_logger().warn(
+                "boat_sysid unreadable from uav_params.yaml (%s): the Radio tab "
+                "will not estimate the boat link" % e)
+            return None
 
     def _boat_state(self, now):
         """Crusader in the map's local metres, or None while it is not heard
@@ -914,6 +942,14 @@ class GroundStation(Node):
         if path == "/logs/clear":
             self.logs.clear()
             return {"ok": True, "message": "log buffer cleared"}
+        if path == "/radio":
+            return self._act_radio(payload)
+        if path == "/radio/clear":
+            self._radio.clear()
+            return {"ok": True, "message": "radio log cleared"}
+        if path == "/radio/send_test":
+            return self._call_service(self._radio_test_cli, Trigger.Request(),
+                                      "telemetry_bridge", "radio send_test")
         if path == "/map/clear_trail":
             self._trail.clear()
             return {"ok": True, "message": "trail cleared"}
@@ -1127,6 +1163,22 @@ class GroundStation(Node):
                  for r in records]
         return {"ok": True, "message": "", "lines": lines, "newest": newest,
                 "nodes": self.logs.nodes(), "dropped": dropped}
+
+    def _act_radio(self, payload):
+        """Radio frames the page has not seen, plus the per-system and boat
+        link summaries, which the ground station keeps whether or not the tab
+        is open."""
+        try:
+            since = int(payload.get("since", 0))
+            limit = min(int(payload.get("limit", 300)), 1000)
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "since/limit must be integers"}
+        records, newest, dropped = self._radio.read(since_seq=since, limit=limit)
+        rows = [dict(r, t=time.strftime("%H:%M:%S", time.localtime(r["t"])))
+                for r in records]
+        return {"ok": True, "message": "", "rows": rows, "newest": newest,
+                "dropped": dropped, "systems": self._radio.systems(),
+                "boat": self._radio.boat_link()}
 
     def _act_power(self, payload):
         verb = payload.get("verb", "")
