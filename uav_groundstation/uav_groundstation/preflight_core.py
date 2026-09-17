@@ -216,7 +216,26 @@ def mapping(inp):
     return _chip("map", "mapping", "off", "not started (not needed for a data flight)")
 
 
-CHECKS = (telemetry, gps, battery, fence, gimbal, stream, recording, mapping)
+def search(inp):
+    """The buoy search: off unless search_node runs and is switched on; then its
+    own verdict. search_core decides what "ready" means -- this only colours it."""
+    s = inp.get("search")
+    if not s or not s.get("running"):
+        return _chip("search", "search", "off", "search_node not running")
+    phase = s.get("phase")
+    if phase is None:
+        return _chip("search", "search", "unknown", "no status from search_node")
+    if phase == "off":
+        return _chip("search", "search", "off", "search is switched off")
+    if phase == "not_ready":
+        return _chip("search", "search", "warn", s.get("text") or "not ready")
+    if phase in ("holding", "paused"):
+        return _chip("search", "search", "warn", s.get("text") or phase)
+    return _chip("search", "search", "ok", s.get("text") or phase)
+
+
+CHECKS = (telemetry, gps, battery, fence, gimbal, stream, recording, mapping,
+          search)
 
 
 def checks(inp):

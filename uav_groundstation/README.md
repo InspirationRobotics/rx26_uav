@@ -21,11 +21,13 @@ graph of the code it starts.
 ## `ground_station` — seven tabs
 
 **On every tab:** a battery readout in the header (volts, margin above
-`BATT_LOW_VOLT`, and in flight the minutes to it), and a **pre-flight strip** of
-eight checks, each one something that has already cost a sortie: telemetry, GPS,
-battery, the fence (where a climb stops, `FENCE_ALT_MAX - FENCE_MARGIN`, against
-the working altitude), gimbal at nadir, the main stream's bitrate/codec/
-resolution, whether the recording will be kept, and the mapping nodes. Every chip shows while disarmed; once armed only the ones needing
+`BATT_LOW_VOLT`, and in flight the minutes to it), a **buoy search** tile while
+`search_node` runs (found of wanted, and what it is doing), and a **pre-flight
+strip** of nine checks, each one something that has already cost a sortie:
+telemetry, GPS, battery, the fence (where a climb stops, `FENCE_ALT_MAX -
+FENCE_MARGIN`, against the working altitude), gimbal at nadir, the main
+stream's bitrate/codec/resolution, whether the recording will be kept, the
+mapping nodes, and whether the search is ready. Every chip shows while disarmed; once armed only the ones needing
 attention. The rules live in `preflight_core.py`, the estimate in
 `battery_core.py`; both are plain Python, driven by `tools/bench/bench_preflight.py`.
 
@@ -33,7 +35,7 @@ attention. The rules live in `preflight_core.py`, the estimate in
 |---|---|---|
 | Nodes | every registry node, running or not, from the ROS graph **and** `/proc` | start anything; **restart** what systemd supervises; stop the rest, unless protected |
 | Telemetry | lat/lon, three altitudes, climb, speed, heading, roll/pitch/yaw, mode, armed, landed state, **GPS fix / satellites / HDOP / accuracy**, **battery volts, volts per cell, margin above the failsafe, minutes to it**, OCS link | — |
-| Map | aircraft, trail, **the fence the autopilot holds**, inside/outside, altitude, GPS quality, a grid that re-spaces itself with zoom, **the camera's footprint**, and the Task 1 buoys with their states | pan, zoom, follow, clear trail, clear buoys, download the map, **measure** between two points or buoys, **beep** when a buoy locks |
+| Map | aircraft, trail, **the fence the autopilot holds**, inside/outside, altitude, GPS quality, a grid that re-spaces itself with zoom, **the camera's footprint**, the Task 1 buoys with their states, and **the buoy search**: its path, the shrunk fence, where it is heading, the buoys it is hovering over or skipped | pan, zoom, follow, clear trail, clear buoys, download the map, **measure** between two points or buoys, **beep** when a buoy locks; **search on/off and buoys to find** — neither can start a flight |
 | Camera | the A8 mini's live view or the detector's annotated view, sized to fit the screen, and whether the session will be kept | keep the session, show detections, restart `camera_node` |
 | Camera + Map | the Camera and Map tabs side by side, each fitted to the screen height, for flying | the camera controls, zoom, follow, measure, lock beep |
 | Logs | every node's `/rosout`, filterable by level and node | clear |
@@ -84,6 +86,13 @@ params fence is more than 50 km away (the Singapore placeholder, at a San Diego
 park) and nothing has been read, the origin is the first fix instead: local
 metres are scaled by the origin's latitude, and a far origin stretched every
 east-west distance on the map, tape measure included.
+
+### The buoy search's two settings
+
+`POST /search/config` with `enabled` and/or `buoys_to_find` sets `search_node`'s
+two dynamic parameters. Neither can move the aircraft: the search starts only on
+the pilot's switch into GUIDED, and OFF makes it hold position. See
+`uav_mission/README.md`.
 
 ### Power is a file, watched by the host
 

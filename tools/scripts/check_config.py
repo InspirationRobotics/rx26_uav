@@ -91,6 +91,15 @@ PINNED = [
         # readout, that one is written to disk and read back months later as
         # if it were measured.
         ("camera_node", "pose_timeout_s"),
+        # search_node flies toward where the aircraft IS; a pose older than the
+        # bridge vouches for is a position the search would steer from blind.
+        ("search_node", "pose_timeout_s"),
+    ]),
+    # One working altitude. The mapper's .plan, the ground station's footprint
+    # and fence check, and the altitude the search actually flies must be the
+    # same number, or the page approves a fence for a height nobody flies.
+    (("buoy_mapper", "waypoint_alt_m"), [
+        ("search_node", "search_alt_m"),
     ]),
     (("shared", "geoid_separation_m"), [
         ("ocs_client", "geoid_separation_m"),

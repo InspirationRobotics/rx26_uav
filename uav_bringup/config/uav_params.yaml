@@ -803,3 +803,70 @@ buoy_mapper:
     waypoint_hold_s: 6.0                   # [RO] .plan hover per buoy: longer
                                            #      than min_observe_s, with margin
                                            #      for arriving off-centre.
+
+search_node:
+  ros__parameters:
+    # The Task 1 buoy search (uav_mission). Sweeps the fence THE AUTOPILOT HOLDS
+    # (read back by telemetry_bridge; drawn in QGC at practice), hovers over each
+    # UNKNOWN buoy until buoy_mapper locks it, asks for RTL when the count is
+    # found. STARTS ONLY on the pilot's switch INTO GUIDED; any other mode pauses
+    # it. Needs detector_node and buoy_mapper running.
+    #
+    # Autopilot setup it expects (set in QGC, verified -- never set -- by code):
+    #   FENCE_ENABLE 1, FENCE_TYPE 5 (alt max + polygon), FENCE_ALT_MAX 12,
+    #   FENCE_MARGIN 2 (Loiter's avoidance then stops a climb at 10 m), GUIDED
+    #   on the SC switch (RCx_OPTION 55). It refuses to start, and says why,
+    #   when search_alt_m is above FENCE_ALT_MAX - FENCE_MARGIN.
+
+    # ---- set from the ground station page (the only [DYN] values)
+    enabled: false                         # [DYN] the page's on/off. ON never
+                                           #      starts a flight by itself.
+    buoys_to_find: 10                      # [DYN] confirmed buoys inside the
+                                           #      fence before RTL. 10 = the
+                                           #      competition's Task 1 field.
+
+    # ---- how it flies
+    search_alt_m: 10.0                     # [RO] = buoy_mapper.waypoint_alt_m
+                                           #      (pinned): the colour-reading
+                                           #      altitude flown 2026-09-13.
+    speed_mps: 2.0                         # [RO] every leg. At 10 m a buoy
+                                           #      stays in frame ~4 s at 2 m/s,
+                                           #      enough sightings to put it on
+                                           #      the map mid-pass.
+    line_spacing_m: 10.0                   # [RO] widest gap between lines. The
+                                           #      frame is ~17 m across at 10 m
+                                           #      (HFOV 81), so every buoy passes
+                                           #      within 5 m of a line, well
+                                           #      inside the frame.
+    fence_inset_m: 2.0                     # [RO] every point it flies to stays
+                                           #      this far inside the fence. = the
+                                           #      FENCE_MARGIN Chris flies with.
+    arrive_radius_m: 1.0                   # [RO] waypoint reached
+    hover_radius_m: 1.5                    # [RO] "over the buoy": the give-up
+                                           #      clock starts here, not when the
+                                           #      buoy is first spotted.
+    give_up_s: 10.0                        # [RO] seconds over a buoy without it
+                                           #      locking before it is skipped for
+                                           #      the rest of the pass. A buoy
+                                           #      needs ~6 s in full view to lock.
+    divert_timeout_s: 45.0                 # [RO] seconds to get over a buoy
+    cluster_radius_m: 4.0                  # [RO] unknown buoys this close share
+                                           #      one hover: a 3 m gate pair is
+                                           #      confirmed together.
+    recenter_m: 0.75                       # [RO] move the hover point once the
+                                           #      buoy's mapped position shifts
+                                           #      this far
+    climb_tolerance_m: 1.0                 # [RO]
+    fence_max_age_s: 90.0                  # [RO] the fence must have been read
+                                           #      from the autopilot this recently
+                                           #      or the search refuses to start.
+                                           #      telemetry_bridge re-reads every
+                                           #      30 s armed, 15 s disarmed.
+    rtl_when_done: true                    # [RO] Saturday 2026-09-19 behaviour.
+                                           #      false = hold position instead.
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s (pinned)
+    status_timeout_s: 1.5                  # [RO] no fresh heartbeat for this long
+                                           #      = mode unknown = not GUIDED. Over
+                                           #      1 s: the heartbeat is 1 Hz.
+    buoy_map_timeout_s: 3.0                # [RO] no map for this long = hold
+    tick_hz: 5.0                           # [RO]

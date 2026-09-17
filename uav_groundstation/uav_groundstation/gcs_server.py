@@ -43,7 +43,11 @@ class GcsServer:
 
             def do_GET(self):
                 if self.path in ("/", "/index.html"):
-                    return self._send(outer.page, "text/html; charset=utf-8")
+                    # no-store as well: a page kept by the browser survives a
+                    # deploy, and the operator reloading to pick up a fix gets
+                    # the old one back with no way to tell.
+                    return self._send(outer.page, "text/html; charset=utf-8",
+                                      nocache=True)
                 if self.path == "/state":
                     try:
                         body = json.dumps(outer.snapshot_fn()).encode()

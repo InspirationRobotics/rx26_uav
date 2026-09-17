@@ -117,8 +117,18 @@ def main():
                          ("pre-flight strip in the header", b'id="preflight"'),
                          ("tape measure", b"toggleMeasure"),
                          ("camera footprint drawn", b"m.footprint"),
-                         ("lock beep", b"checkLocks")):
+                         ("lock beep", b"checkLocks"),
+                         ("search controls on the map", b'id="searchbar"'),
+                         ("search path drawn", b"drawSearch"),
+                         ("search tile in the header", b'id="searchtile"')):
         r.append(check(name, needle in page))
+    # The page's search controls post SETTINGS and nothing else: on/off, the
+    # count, the task and the tier. Anything that could name a position, a mode
+    # or a waypoint would be a web page flying the aircraft.
+    keys = set(re.findall(rb"post\('/search/config',\{?(\w+)", page))
+    r.append(check("search posts only settings",
+                   keys <= {b"enabled", b"buoys_to_find", b"b"},
+                   b",".join(sorted(keys))))
 
     print("\nthe protected-node rule, bypassing the page")
     j = post(base, "/node/stop", {"name": "telemetry_bridge"})

@@ -24,8 +24,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BuoyDetections.msg"
   "msg/Buoy.msg"
   "msg/BuoyMap.msg"
-  # The fence read back from the autopilot.
+  # The buoy search (uav_mission): the fence read back from the autopilot, the
+  # one way a node asks to be flown somewhere, and what the search is doing.
   "msg/Fence.msg"
+  "msg/GuidedTarget.msg"
+  "msg/SearchStatus.msg"
   DEPENDENCIES std_msgs
 )
 

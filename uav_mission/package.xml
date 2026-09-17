@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uav_mission</name>
+  <version>0.1.0</version>
+  <description>
+    The aircraft doing a task on its own. search_node flies the Task 1 buoy
+    search: it sweeps the fence the autopilot holds, hovers over each buoy the
+    map still calls UNKNOWN until buoy_mapper locks its state, and asks for RTL
+    once the ground station's count of buoys is confirmed.
+
+    It OWNS NOTHING. No MAVLink connection (telemetry_bridge forwards its
+    targets, after checking them), no camera, no map (buoy_mapper's). It only
+    moves the aircraft while the pilot has GUIDED selected, and it only starts
+    on the pilot's switch into GUIDED -- never from a web page.
+
+    Pure Python and plain ROS messages, so it runs on any image, unlike
+    uav_perception.
+  </description>
+  <maintainer email="chase001cz@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_uav</url>
+
+  <depend>rclpy</depend>
+  <depend>std_srvs</depend>
+  <depend>uav_msgs</depend>
+  <depend>uav_common</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

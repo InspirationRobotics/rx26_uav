@@ -10,7 +10,7 @@ open a MAVLink connection.
 
 **Flown on Ekko** (ArduCopter 4.7.0, CubeOrange+).
 
-## Four jobs
+## Five jobs
 
 **RX** — republishes `/uav/pose`, `/uav/attitude`, `/uav/fcu_status`,
 `/uav/flight_state`, `/uav/rc_channels`, `/uav/battery`, `/uav/gps`,
@@ -34,6 +34,19 @@ QGC fetching its own copy is never read as our answer.
 **TX (autonomy)** — the only sanctioned RC-override path, gated by the
 autonomy-drop latch. Nothing publishes to `/uav/rc_override` yet; the enforcement
 point exists before anything needs it.
+
+**TX (guided targets, for the buoy search)** — `/uav/guided_target`
+(`uav_msgs/GuidedTarget`) becomes `SET_POSITION_TARGET_GLOBAL_INT` at the
+target's speed (`MAV_CMD_DO_CHANGE_SPEED`), and `/uav/rtl_from_guided`
+(`std_srvs/Trigger`) a mode change to RTL. **Both refused unless the autopilot
+freshly reports GUIDED and armed**; a target must also be under a second old,
+inside the fence read back above, at least 2 m up and no higher than
+`FENCE_ALT_MAX - FENCE_MARGIN`. The rules are `uav_common/guided_gate.py`.
+An unchanged target is only re-sent every 5 s or after a fresh entry into GUIDED,
+because re-sending restarts the autopilot's leg.
+
+GUIDED is the pilot's switch. The autopilot ignores position targets in every
+other mode, so taking control back never depends on this node.
 
 **TX (geofence)** — `/uav/fence_upload` (`std_srvs/Trigger`) uploads the
 configured polygon and verifies the readback.
@@ -69,7 +82,8 @@ runs `--streamrate=-1` precisely so it does not stomp them.
 |---|---|
 | `MAV1_POSITION` > 0 | `GLOBAL_POSITION_INT` → `/uav/pose` |
 | `MAV1_EXTRA1` = 30 | `ATTITUDE` → `/uav/attitude` |
-| `FENCE_TYPE` polygon bit | or the upload is NACKed |
+| `FENCE_TYPE` polygon bit | or the upload is NACKed, and the search will not start |
+| `FENCE_ALT_MAX - FENCE_MARGIN` ≥ the search altitude | or every search target is refused (12 − 2 = 10 m for a 10 m search) |
 
 `/uav/flight_state` needs no parameter. `EXTENDED_SYS_STATE` is in **no** stream group on any firmware, so no parameter turns it on: `telemetry_bridge` requests it itself with `SET_MESSAGE_INTERVAL` and re-asks every 30 s, because an autopilot reboot discards the request.
 
@@ -81,3 +95,4 @@ runs `--streamrate=-1` precisely so it does not stomp them.
 | a published topic | `ocs_client` and `ground_station` both subscribe; `grep` before renaming |
 | the staleness rule | stop MAVProxy and confirm **one** loud line per stream and that republishing stops |
 | `mav_source_system` | the fence upload; the symptom of a collision is a timeout, not an error |
+| the guided-target gate | `tools/bench/bench_search.py`, then the SITL search test before anything flies |

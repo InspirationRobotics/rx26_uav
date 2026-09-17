@@ -46,6 +46,10 @@ GROUPS = (
     ("perception", "Perception",
      "The gimbal camera, the buoy detector and the buoy mapper. Video on the "
      "Camera tab; the buoy map on the Map tab. To map: start all three."),
+    ("autonomy", "Autonomy",
+     "The buoy search. Needs the three perception nodes. It moves the aircraft "
+     "only while GUIDED is selected, and starts only when the pilot switches "
+     "into GUIDED. Controls on the Map tab."),
 )
 
 
@@ -82,7 +86,8 @@ REGISTRY = (
              "telemetry_bridge", "core", protected=True,
              unit="uav-telemetry-bridge",
              note="the only thing that speaks MAVLink; owns the geofence "
-                  "upload and the RC-override gate"),
+                  "upload and read-back, the RC-override gate, and the gate "
+                  "every buoy-search target passes"),
     NodeSpec("ocs_client", "ocs_client", "uav_groundstation",
              "ocs_client", "comms", unit="uav-ocs-client",
              note="2 Hz heartbeat to the OCS at 192.168.8.107:37564"),
@@ -121,6 +126,14 @@ REGISTRY = (
              note="turns detections into the Task 1 buoy map: positions, and "
                   "each buoy's state decided over 4 s of full-view watching. "
                   "Map tab; downloads on :8093"),
+    # No unit, stoppable. Stopping it mid-search is safe by construction: the
+    # autopilot finishes the leg it was given -- inside the fence, at the search
+    # altitude -- and holds there in GUIDED until the pilot flips a switch.
+    NodeSpec("search_node", "search_node", "uav_mission",
+             "search_node", "autonomy",
+             note="the Task 1 buoy search: sweeps the fence at 10 m, hovers over "
+                  "each unknown buoy until it locks, RTL when all are found. "
+                  "Starts on the pilot's switch into GUIDED"),
 )
 
 BY_NAME = {n.name: n for n in REGISTRY}
@@ -144,6 +157,10 @@ PROFILES = {
     "mapping": ("Mapping profile",
                 ("telemetry_bridge", "ocs_client", "camera_node",
                  "detector_node", "buoy_mapper")),
+    # The Task 1 practice run: mapping plus the search that flies it.
+    "search": ("Search profile",
+               ("telemetry_bridge", "ocs_client", "camera_node",
+                "detector_node", "buoy_mapper", "search_node")),
     "bench": ("Bench profile", ("telemetry_bridge",)),
 }
 

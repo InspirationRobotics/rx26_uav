@@ -11,11 +11,14 @@ the way back.
 
 Subscribes (read-only): /uav/pose, /uav/attitude, /uav/fcu_status,
 /uav/flight_state, /uav/battery, /uav/gps, /uav/fcu_params, /uav/camera/status,
-/uav/perception/buoy_map, /uav/fence. Publishes
+/uav/perception/buoy_map, /uav/fence, /uav/search/status. Publishes
 nothing. Its only outward effects are the processes it spawns, the two power
 verbs it can hand to the host helper — both gated, both re-checked server-side —
-and two services it can call: camera capture, and clearing the buoy map (which
-saves the map before clearing it, so neither can lose data).
+two services it can call: camera capture, and clearing the buoy map (which
+saves the map before clearing it, so neither can lose data) — and the buoy
+search's two page settings, on/off and how many buoys to find. Switching the
+search ON cannot move the aircraft: only the pilot's switch into GUIDED starts
+it (search_core). Switching it OFF makes it hold position.
 
 THE MAP IS DRAWN AROUND THE FENCE THE AUTOPILOT HOLDS (/uav/fence), and falls
 back to the `geofence` param only while none has been read. The map's origin
@@ -52,11 +55,13 @@ from collections import deque
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
-from rcl_interfaces.msg import Log
+from rcl_interfaces.msg import Log, Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 
 from std_srvs.srv import SetBool, Trigger
 from uav_msgs.msg import (Attitude, Battery, BuoyMap, CameraStatus, FcuParams,
-                          FcuStatus, Fence, FlightState, GlobalPos, GpsStatus)
+                          FcuStatus, Fence, FlightState, GlobalPos, GpsStatus,
+                          SearchStatus)
 
 from uav_common import camera_frame
 from uav_common import config as uav_config
@@ -122,6 +127,9 @@ BUOY_MAP_TIMEOUT_S = 3.0
 # at most; see _call_service for why waiting there is safe.
 SERVICE_TIMEOUT_S = 5.0
 
+# search_node publishes its status twice a second.
+SEARCH_STATUS_TIMEOUT_S = 2.0
+BUOYS_TO_FIND_RANGE = (1, 50)
 # Farther than this from the params fence, it is not this venue's fence and the
 # map is centred on the aircraft instead.
 FOREIGN_ORIGIN_M = 50_000.0
@@ -236,10 +244,16 @@ class GroundStation(Node):
         self._clear_map_cli = self.create_client(
             Trigger, "/uav/perception/clear_buoy_map")
 
-        # The fence the autopilot holds (latched by telemetry_bridge).
+        # The fence the autopilot holds (latched by telemetry_bridge), and the
+        # buoy search: its status for the Map tab, and its two page settings.
         self.create_subscription(
             Fence, "/uav/fence", self._on_fence,
             _LATCHED)
+        self._search = StreamCache(SEARCH_STATUS_TIMEOUT_S)
+        self.create_subscription(SearchStatus, "/uav/search/status",
+                                 self._on_search, 10)
+        self._search_params_cli = self.create_client(
+            SetParameters, "/search_node/set_parameters")
 
         # Battery and GPS, for the header and the pre-flight strip. Battery
         # samples also feed the time-to-failsafe estimator; see battery_core
@@ -327,6 +341,9 @@ class GroundStation(Node):
         self._set_origin(_centroid(poly))
         self.get_logger().info("map: drawing the autopilot's %d-corner fence"
                                % len(poly))
+
+    def _on_search(self, msg: SearchStatus):
+        self._search.set(msg, time.monotonic())
 
     def _on_pose(self, msg: GlobalPos):
         # NaN heading is kept, not dropped: the readout says so and the operator
@@ -450,6 +467,7 @@ class GroundStation(Node):
         batt = self._battery.snapshot(now, params.get("batt_low_volt"),
                                       float(self.p["status_timeout_s"]))
         gps = self._gps.get(now)
+        search = self._search_state(now, running)
         return {
             "groups": groups,
             "tel": tel,
@@ -457,7 +475,7 @@ class GroundStation(Node):
             "gps": gps,
             "armed_time": self._armed_clock.snapshot(now),
             "preflight": preflight_core.checks(self._preflight_inputs(
-                tel, batt, gps, params, cam, running)),
+                tel, batt, gps, params, cam, running, search)),
             "ocs": self._ocs_state(),
             "map": {
                 "fence": self._fence_xy,
@@ -466,6 +484,7 @@ class GroundStation(Node):
                 "fence_src": self._fence_src,
                 "fence_problem": self._fence_problem,
                 "origin_id": self._origin_id,
+                "search": search,
                 "veh": (None if pose is None else
                         {"x": pose_e[1], "y": pose_e[2],
                          "heading": (0.0 if math.isnan(pose.heading)
@@ -504,6 +523,36 @@ class GroundStation(Node):
 
     def _on_fcu_params(self, msg):
         self._fcu_params = {f: _finite(getattr(msg, f)) for f in _FCU_PARAM_FIELDS}
+
+    def _search_state(self, now, running):
+        """The buoy search for the Map tab and the checklist, in map metres.
+
+        {"running": False} when search_node is not running; phase None when it
+        runs but its status is stale -- the page then shows no plan rather than
+        the last one heard, drawn as if current.
+        """
+        if "search_node" not in running:
+            return {"running": False}
+        s = self._search.get(now)
+        if s is None:
+            return {"running": True, "phase": None}
+        o = self._origin
+
+        def xy(lats, lons):
+            return [list(geo.latlon_to_xy(a, b, o)) for a, b in zip(lats, lons)]
+        target = (None if math.isnan(s.target_latitude) else
+                  list(geo.latlon_to_xy(s.target_latitude, s.target_longitude, o)))
+        return {
+            "running": True, "phase": s.phase, "text": s.text,
+            "waiting": list(s.waiting_for), "enabled": s.enabled,
+            "count": s.buoys_to_find, "found": s.found, "flying": s.flying,
+            "pass": s.pass_number, "leg": s.leg, "legs": s.legs,
+            "hover": list(s.hover_buoys), "hover_s": _finite(s.hover_s),
+            "give_up_s": _finite(s.give_up_s), "skipped": list(s.skipped),
+            "target": target,
+            "plan": xy(s.plan_latitude, s.plan_longitude),
+            "inset": xy(s.inset_latitude, s.inset_longitude),
+        }
 
     def _read_camera_cfg(self):
         try:
@@ -552,7 +601,7 @@ class GroundStation(Node):
             return None
         return [[pose_e[1] + e, pose_e[2] + n] for e, n in corners]
 
-    def _preflight_inputs(self, tel, batt, gps, params, cam, running):
+    def _preflight_inputs(self, tel, batt, gps, params, cam, running, search):
         """Gather what preflight_core needs into one plain dict."""
         c = self._cam_status.get(time.monotonic())
         cfg = self._cam_cfg or {}
@@ -577,6 +626,7 @@ class GroundStation(Node):
             "record_gate": None if c is None else c["record_gate"],
             "mapping": {"detector": "detector_node" in running,
                         "mapper": "buoy_mapper" in running},
+            "search": search,
         }
 
     def _on_buoy_map(self, msg):
@@ -821,6 +871,8 @@ class GroundStation(Node):
                                       "buoy_mapper", "clear_buoy_map")
         if path == "/camera/capture":
             return self._act_capture(payload)
+        if path == "/search/config":
+            return self._act_search(payload)
         if path == "/power":
             return self._act_power(payload)
         return {"ok": False, "message": "unknown action %s" % path}
@@ -839,8 +891,55 @@ class GroundStation(Node):
         return self._call_service(self._capture_cli, req, "camera_node",
                                   "capture")
 
-    def _call_service(self, cli, req, who, what):
+    def _act_search(self, payload):
+        """The buoy search's page settings: {"enabled": bool} and/or
+        {"buoys_to_find": int}.
+
+        Both are safe to change at any time, and that is by design rather than
+        by checking here: ON cannot start a flight (only the pilot's switch into
+        GUIDED does), OFF makes the aircraft hold, and the count only decides
+        when to RTL. The values are still validated, because anyone can curl
+        this.
+        """
+        params = []
+        if "enabled" in payload:
+            if not isinstance(payload["enabled"], bool):
+                return {"ok": False, "message": "enabled must be true or false"}
+            params.append(Parameter(name="enabled", value=ParameterValue(
+                type=ParameterType.PARAMETER_BOOL, bool_value=payload["enabled"])))
+        if "buoys_to_find" in payload:
+            n = payload["buoys_to_find"]
+            lo, hi = BUOYS_TO_FIND_RANGE
+            if isinstance(n, bool) or not isinstance(n, int) or not lo <= n <= hi:
+                return {"ok": False,
+                        "message": "buoys to find must be a whole number %d-%d" % (lo, hi)}
+            params.append(Parameter(name="buoys_to_find", value=ParameterValue(
+                type=ParameterType.PARAMETER_INTEGER, integer_value=n)))
+        if not params:
+            return {"ok": False,
+                    "message": 'expected "enabled" and/or "buoys_to_find"'}
+        req = SetParameters.Request(parameters=params)
+
+        def reply(res):
+            bad = [r.reason for r in res.results if not r.successful]
+            if bad:
+                return False, "search_node refused: %s" % "; ".join(bad)
+            parts = []
+            if "enabled" in payload:
+                parts.append("search %s" % ("ON: the pilot's switch into GUIDED "
+                                            "starts it" if payload["enabled"]
+                                            else "OFF"))
+            if "buoys_to_find" in payload:
+                parts.append("find %d buoys" % payload["buoys_to_find"])
+            return True, ", ".join(parts)
+        return self._call_service(self._search_params_cli, req, "search_node",
+                                  "set_parameters", reply)
+
+    def _call_service(self, cli, req, who, what, reply=None):
         """Call a service from an HTTP action; -> {ok, message}.
+
+        `reply` turns the response into (ok, message); by default the response
+        is a std_srvs one with success and message.
 
         WAITING ON THE FUTURE HERE IS SAFE, AND ONLY HERE. This runs on the HTTP
         server's thread, never inside a ROS callback, so the executor spinning in
@@ -862,7 +961,8 @@ class GroundStation(Node):
                                "changed as far as this page knows"
                                % (who, what, SERVICE_TIMEOUT_S)}
         res = fut.result()
-        return {"ok": bool(res.success), "message": res.message}
+        ok, message = reply(res) if reply else (res.success, res.message)
+        return {"ok": bool(ok), "message": message}
 
     def _act_start(self, name):
         _items, running = self._node_items()

@@ -28,6 +28,7 @@
   <exec_depend>uav_groundstation</exec_depend>
   <exec_depend>uav_camera</exec_depend>
   <exec_depend>uav_perception</exec_depend>
+  <exec_depend>uav_mission</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -41,6 +41,14 @@ MAVLink connection and there may only ever be one:
    On its own worker thread, because a mission dialog blocks for a second and
    the executor is what keeps every topic flowing.
 
+5. TX (guided targets, for the buoy search): /uav/guided_target becomes a
+   SET_POSITION_TARGET_GLOBAL_INT, and /uav/rtl_from_guided a mode change to
+   RTL. Both are refused unless the autopilot freshly reports GUIDED and ARMED;
+   a target must also be recent and inside the fence read in (4), under the
+   ceiling. uav_common.guided_gate holds those rules. GUIDED is the PILOT'S
+   switch, and the autopilot itself ignores position targets in any other mode,
+   so the pilot's way back never depends on this node or its checks.
+
 THERE IS NO DISARM PATH IN THIS NODE, AND THAT IS DELIBERATE.
 -------------------------------------------------------------
 The ASV's telemetry_bridge carries a force-disarm TX path — a
@@ -90,6 +98,7 @@ Parameters:
                                    fence_core.polygon_from_flat
   fence_timeout_s    (float, 5.0)  per-exchange timeout in the mission dialog
 """
+import math
 import queue
 import threading
 import time
@@ -100,11 +109,13 @@ from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
 from uav_msgs.msg import (Attitude, Battery, FcuParams, FcuStatus, Fence,
-                          FlightState, GlobalPos, GpsStatus, RcChannels)
+                          FlightState, GlobalPos, GpsStatus, GuidedTarget,
+                          RcChannels)
 
 from uav_common import config as uav_config
 from uav_common import fcu_decode
 from uav_common import geo
+from uav_common import guided_gate
 from uav_common.drop_latch import DropLatch
 from uav_common.fence_core import (MISSION_TYPE_FENCE, FenceError, FenceProtocol,
                                    MavFenceTransport, items_from_polygon,
@@ -175,6 +186,15 @@ FENCE_POLL_S = 15.0
 FENCE_ARMED_POLL_S = 30.0
 FENCE_RETRY_S = 5.0
 
+#: ArduCopter's custom mode number for RTL.
+COPTER_MODE_RTL = 6
+#: SET_POSITION_TARGET_GLOBAL_INT type_mask: position and yaw used; velocity,
+#: acceleration and yaw rate ignored. YAW_IGNORE is added when the target has no
+#: heading (a hold).
+_TYPEMASK_POS_YAW = 8 | 16 | 32 | 64 | 128 | 256 | 2048
+_TYPEMASK_YAW_IGNORE = 1024
+_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
+
 
 class TelemetryBridge(Node):
 
@@ -222,8 +242,11 @@ class TelemetryBridge(Node):
 
         self.create_subscription(RcChannels, "/uav/rc_override",
                                  self._override_cb, 10)
+        self.create_subscription(GuidedTarget, "/uav/guided_target",
+                                 self._guided_target_cb, 10)
         self.create_service(Trigger, "/uav/autonomy_drop_reset", self._reset_cb)
         self.create_service(Trigger, "/uav/fence_upload", self._fence_cb)
+        self.create_service(Trigger, "/uav/rtl_from_guided", self._rtl_cb)
 
         # Each stream is republished ONLY while it is fresh. See the header.
         self._lock = threading.Lock()
@@ -252,6 +275,12 @@ class TelemetryBridge(Node):
         # The fence as last READ from the autopilot: [(lat, lon)] when it held
         # one usable polygon, else None. Guided targets are checked against it.
         self._held_fence = None
+        # Bumped on every change INTO GUIDED: the autopilot resets its target on
+        # entry, so the next target must be sent even if it has not changed.
+        self._guided_epoch = 0
+        self._last_mode = None
+        self._resender = guided_gate.Resender()
+        self._last_refusal = ("", 0.0)
         self._ext_state_seen = False
         self._ext_state_req_t = time.monotonic()
 
@@ -351,6 +380,9 @@ class TelemetryBridge(Node):
                     armed = bool(msg.base_mode &
                                  self._mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                     self._status.set((mode, armed, msg.system_status), t, stamp)
+                    if mode == "GUIDED" and self._last_mode != "GUIDED":
+                        self._guided_epoch += 1
+                    self._last_mode = mode
                 elif mtype == "EXTENDED_SYS_STATE":
                     self._ext_state_seen = True
                     self._flight.set(int(msg.landed_state), t, stamp)
@@ -691,6 +723,78 @@ class TelemetryBridge(Node):
         m.item_count = len(items)
         self.fence_pub.publish(m)
         return True
+
+    # ---------- guided targets and RTL (job 5) ----------
+
+    def _fresh_status(self):
+        """(mode, armed) from a heartbeat under guided_gate.STATUS_MAX_AGE_S
+        old, or None. Deliberately not self._status.get(): see that constant."""
+        with self._lock:
+            st, age = self._status.value, self._status.age(time.monotonic())
+        if st is None or age is None or age >= guided_gate.STATUS_MAX_AGE_S:
+            return None
+        return (st[0], st[1])
+
+    def _guided_target_cb(self, msg: GuidedTarget):
+        t = time.monotonic()
+        stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        age = (self.get_clock().now().nanoseconds - stamp_ns) / 1e9
+        with self._lock:
+            fence, epoch = self._held_fence, self._guided_epoch
+            params = dict(self._params)
+        lat, lon = msg.latitude, msg.longitude
+        alt, yaw, speed = float(msg.alt_rel_m), float(msg.yaw_deg), float(msg.speed_mps)
+        why = guided_gate.refusal(lat, lon, alt, speed, age, self._fresh_status(),
+                                  fence, params.get("fence_type"),
+                                  params.get("fence_alt_max"),
+                                  params.get("fence_margin"))
+        if why:
+            last_why, last_t = self._last_refusal
+            if why != last_why or t - last_t >= 10.0:
+                self.get_logger().warn("guided target NOT forwarded: %s" % why)
+                self._last_refusal = (why, t)
+            return
+        self._last_refusal = ("", 0.0)
+        mav = self._mavutil.mavlink
+        if self._resender.speed_due(speed, epoch, t):
+            self.conn.mav.command_long_send(
+                self.conn.target_system, self.conn.target_component,
+                mav.MAV_CMD_DO_CHANGE_SPEED, 0,
+                1.0, speed, -1.0, 0, 0, 0, 0)          # ground speed, m/s
+            self._resender.speed_sent(speed, epoch, t)
+        if self._resender.target_due(lat, lon, alt, yaw, epoch, t):
+            no_yaw = math.isnan(yaw)
+            self.conn.mav.set_position_target_global_int_send(
+                0, self.conn.target_system, self.conn.target_component,
+                _FRAME_GLOBAL_RELATIVE_ALT_INT,
+                _TYPEMASK_POS_YAW | (_TYPEMASK_YAW_IGNORE if no_yaw else 0),
+                int(round(lat * 1e7)), int(round(lon * 1e7)), alt,
+                0, 0, 0, 0, 0, 0,
+                0.0 if no_yaw else math.radians(yaw), 0)
+            self._resender.target_sent(lat, lon, alt, yaw, epoch, t)
+
+    def _rtl_cb(self, request, response):
+        """RTL, asked for by the search once every buoy is found. GUIDED only:
+        any other mode is the pilot's choice and is left alone."""
+        status = self._fresh_status()
+        if status is None or not status[1] or status[0] != "GUIDED":
+            response.success = False
+            response.message = (
+                "refused: RTL is only requested from GUIDED while armed; the "
+                "autopilot reports %s" % ("nothing fresh" if status is None else
+                                          "%s, %s" % (status[0], "armed" if status[1]
+                                                      else "disarmed")))
+            self.get_logger().warn(response.message)
+            return response
+        self.conn.mav.command_long_send(
+            self.conn.target_system, self.conn.target_component,
+            self._mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+            float(self._mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
+            float(COPTER_MODE_RTL), 0, 0, 0, 0, 0)
+        response.success = True
+        response.message = "RTL requested (was GUIDED)"
+        self.get_logger().warn(response.message)
+        return response
 
     # ---------- teardown ----------
 

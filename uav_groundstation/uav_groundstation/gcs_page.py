@@ -15,6 +15,9 @@ not a copy, not a re-derivation — so what the operator sees is what the
 autopilot enforces, whether it came from QGC or from the uploader. Until one has
 been read the `geofence` param stands in, and the line under the map says so.
 
+THE BUOY SEARCH'S CONTROLS ARE ON THE MAP TAB and cannot start a flight: ON only
+arms the search for the pilot's switch into GUIDED, OFF makes it hold.
+
 Logs are read INCREMENTALLY: the page sends the newest sequence number it holds
 and gets only what is new. Resending the whole ring at the poll rate would cost
 more than every other tab combined.
@@ -190,6 +193,25 @@ main.split details.about,main.split #mapexp,main.split .wide-only{display:none}
 #mapbar{display:flex;gap:6px;align-items:center;padding:8px 10px;
         border-bottom:1px solid var(--line);flex-wrap:wrap}
 #mapbar .sep{width:1px;height:26px;background:var(--line);margin:0 4px}
+/* The buoy search's controls sit on the map, in the split view too: it is the
+   tab open while it flies. */
+#searchbar{display:flex;gap:10px;align-items:center;padding:7px 10px;
+           border-bottom:1px solid var(--line);flex-wrap:wrap;background:var(--bg)}
+#searchbar .sk{font-size:11px;font-weight:700;letter-spacing:.9px;
+               text-transform:uppercase;color:var(--dim)}
+#searchbar label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dim)}
+#searchn{width:66px}
+/* A two-position switch, not a button labelled with its own state: the lit half
+   is where the switch IS. A single button reading "Search OFF" was read as a
+   switch already in the ON position, and a search nobody had switched on looked
+   like a search that would not start. */
+.seg{display:inline-flex}
+.seg button{border-radius:0;margin-left:-1px;min-width:52px}
+.seg button:first-child{border-radius:6px 0 0 6px;margin-left:0}
+.seg button:last-child{border-radius:0 6px 6px 0}
+.seg button.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+#searchstat{display:flex;align-items:center;gap:8px;font-weight:600;min-width:0}
+.tile.hidden{display:none}
 #mapinfo{padding:6px 12px;font-size:13px;color:var(--dim);border-top:1px solid var(--line)}
 #map.measuring{cursor:crosshair}
 #logs{background:var(--sunk);border:1px solid var(--line);border-radius:8px;
@@ -232,6 +254,7 @@ details.about p{margin:6px 0 0;max-width:920px}
     <div id="flighttime" class="tile"></div>
     <div id="gpstile" class="tile"></div>
     <div id="alttile" class="tile"></div>
+    <div id="searchtile" class="tile hidden"></div>
   </div>
   <div id="preflight"></div>
 </header>
@@ -262,6 +285,16 @@ details.about p{margin:6px 0 0;max-width:920px}
         <span class="spacer"></span>
         <span id="mapexp"></span>
       </div>
+      <div id="searchbar">
+        <span class="sk">Buoy search</span>
+        <span class="seg" title="ON never starts a flight: flip SC into GUIDED to start. OFF makes Ekko hold position."><button
+          id="search-off" onclick="setSearch(false)" disabled>Off</button><button
+          id="search-on" onclick="setSearch(true)" disabled>On</button></span>
+        <label>Buoys to find
+          <input id="searchn" type="number" min="1" max="50" step="1" value="10"
+            onchange="setCount()" disabled></label>
+        <span id="searchstat"></span>
+      </div>
       <canvas id="map"></canvas>
       <div id="mapinfo"></div>
     </div>
@@ -271,6 +304,14 @@ details.about p{margin:6px 0 0;max-width:920px}
     enforces, drawn in QGC or uploaded. Until one has been read, the
     <code>geofence</code> parameter stands in, and the line under the map says
     so. Drag to pan; scroll or +/− to zoom.</p>
+    <p><b>Buoy search</b>: set how many buoys to find and switch it ON. That
+    alone moves nothing — <b>flip SC into GUIDED</b> to start it. It climbs to
+    10 m, sweeps the fence 2 m inside it (the blue path; faded legs are flown),
+    flies over each buoy the map still calls UNKNOWN until it locks, gives up on
+    one after 10 s overhead, and asks for RTL once the count is confirmed. Flip
+    SB (Loiter, Brake) to take over at any time; SC off and on again resumes.
+    Switching it OFF here makes Ekko hold position. Buoys already confirmed on
+    the map count, so clear the buoys before a fresh run.</p>
     <p> The grid is fixed to the ground and
     re-spaces itself as you zoom — the corner says the spacing. The autopilot
     enforces the fence; this is a readout.</p>
@@ -356,7 +397,8 @@ function show(t){tab=t;
 var lastLayout='';
 function layoutVars(){
   var h=document.querySelector('header').offsetHeight,
-      mb=(el('mapbar')||{}).offsetHeight||0,cr=(el('camrec')||{}).offsetHeight||0,
+      mb=((el('mapbar')||{}).offsetHeight||0)+((el('searchbar')||{}).offsetHeight||0),
+      cr=(el('camrec')||{}).offsetHeight||0,
       key=h+'/'+mb+'/'+cr;
   if(key===lastLayout)return;
   lastLayout=key;
@@ -376,7 +418,7 @@ var PAL={},BPAL={RED:'bRed',GREEN:'bGreen',BLUE:'bBlue'};
 var BVAR={RED:'var(--b-red)',GREEN:'var(--b-green)',BLUE:'var(--b-blue)'};
 function readPalette(){
   var cs=getComputedStyle(document.documentElement);
-  ['fg','dim','ok','bad','accent','panel','grid','grid-major','ring',
+  ['fg','dim','ok','warn','bad','accent','panel','grid','grid-major','ring',
    'fence-fill','trail','veh-ring','buoy-off','buoy-solid','b-red','b-green',
    'b-blue','foot','foot-fill'].forEach(function(k){
     PAL[k.replace(/-(\w)/g,function(_,c){return c.toUpperCase()})]=
@@ -636,6 +678,7 @@ function draw(){
     g.fillStyle=PAL.accent;
     f.forEach(function(p){g.fillRect(sx(p[0])-2.5,sy(p[1])-2.5,5,5)});
   }
+  drawSearch(g,m.search);
   /* trail */
   if(trail.length>1){
     g.beginPath();
@@ -655,8 +698,9 @@ function draw(){
     g.lineWidth=3;g.stroke();
   }
   /* buoys: filled in their colour once decided, black for OFF, hollow grey
-     while UNKNOWN; dashed ring = spread of the sightings */
-  var bm=m.buoys;
+     while UNKNOWN; dashed ring = spread of the sightings; a thick amber ring on
+     the ones the search is hovering over */
+  var bm=m.buoys,se=m.search||{},hov=se.hover||[],skip=se.skipped||[];
   if(bm&&bm.buoys){
     var marks=bm.buoys.map(function(b){
       return {x:sx(b.x),y:sy(b.y),r:Math.max(5,0.23*scale)}});
@@ -670,6 +714,8 @@ function draw(){
       else{g.fillStyle=b.state==='OFF'?PAL.buoyOff:(PAL[BPAL[b.colour]]||PAL.fg);g.fill();
         g.strokeStyle=b.state==='SOLID'?PAL.buoySolid:PAL.dim;
         g.lineWidth=b.state==='SOLID'?2.5:1;g.stroke()}
+      if(hov.indexOf(b.id)>=0){g.beginPath();g.arc(X,Y,r+6,0,6.284);
+        g.strokeStyle=PAL.warn;g.lineWidth=3;g.stroke()}
     });
     /* Labels go on AFTER every marker, and each takes the first of right, left,
        below, above that covers no marker and no earlier label. At the
@@ -678,7 +724,8 @@ function draw(){
     g.font=MAPFONT;g.fillStyle=PAL.fg;
     var taken=[];
     bm.buoys.forEach(function(b,i){
-      var t='B'+b.id+' '+buoyShort(b),w=g.measureText(t).width,h=13,k=marks[i];
+      var t='B'+b.id+' '+buoyShort(b)+(skip.indexOf(b.id)>=0?' · skipped':''),
+          w=g.measureText(t).width,h=13,k=marks[i];
       var spots=[[k.x+k.r+4,k.y-h/2],[k.x-k.r-4-w,k.y-h/2],
                  [k.x-w/2,k.y+k.r+3],[k.x-w/2,k.y-k.r-3-h]];
       var at=spots.filter(function(p){return labelClear(p[0],p[1],w,h,marks,taken)})[0]||spots[0];
@@ -705,12 +752,70 @@ function draw(){
   g.fillStyle=PAL.dim;g.fillText(legend,14,H-12);
   g.fillText('N \u2191',W-34,20);
 }
+/* ---- buoy search ----
+   The dotted outline is the fence shrunk by the distance the search keeps from
+   it; the blue path is the current pass, faded where it has been flown; the
+   ring is where it is heading. Nothing is drawn from a stale status. */
+function drawSearch(g,se){
+  if(!se||se.phase==null)return;
+  var ins=se.inset||[],plan=se.plan||[];
+  if(ins.length>2){g.beginPath();
+    ins.forEach(function(p,i){i?g.lineTo(sx(p[0]),sy(p[1])):g.moveTo(sx(p[0]),sy(p[1]))});
+    g.closePath();g.strokeStyle=PAL.dim;g.lineWidth=1;g.setLineDash([2,4]);g.stroke();
+    g.setLineDash([])}
+  if(plan.length>1){
+    var done=Math.max(0,(se.leg||1)-1);
+    g.lineWidth=2;g.strokeStyle=PAL.accent;
+    for(var i=1;i<plan.length;i++){
+      g.globalAlpha=i<done?0.18:0.6;g.beginPath();
+      g.moveTo(sx(plan[i-1][0]),sy(plan[i-1][1]));g.lineTo(sx(plan[i][0]),sy(plan[i][1]));
+      g.stroke()}
+    g.globalAlpha=1}
+  if(se.target){var X=sx(se.target[0]),Y=sy(se.target[1]);
+    g.strokeStyle=PAL.accent;g.lineWidth=2;g.beginPath();g.arc(X,Y,8,0,6.284);g.stroke();
+    g.beginPath();g.moveTo(X-13,Y);g.lineTo(X+13,Y);g.moveTo(X,Y-13);g.lineTo(X,Y+13);g.stroke()}
+}
+/* OFF asks first while it is flying: it is safe (Ekko holds), but a slipped
+   click stops a search mid-pass. ON never asks: it starts nothing. */
+function setSearch(on){
+  var s=(S.map||{}).search||{};
+  if(on===!!s.enabled)return;
+  if(!on&&s.flying&&!confirm('Switch the search OFF? Ekko stops and holds position in GUIDED. '
+     +'Flip SC off and on to resume after switching it back on.'))return;
+  post('/search/config',{enabled:on}).then(poll)}
+function setCount(){
+  var v=Number(el('searchn').value);
+  if(!(v>=1&&v<=50&&Math.floor(v)===v)){toast('Buoys to find: a whole number from 1 to 50',true);return}
+  post('/search/config',{buoys_to_find:v}).then(poll)}
+var lastSearchPhase=null;
+function renderSearch(){
+  var s=(S.map||{}).search||{running:false},on=el('search-on'),off=el('search-off'),
+      n=el('searchn'),
+      live=!!s.running&&s.phase!=null;
+  on.disabled=off.disabled=n.disabled=!live;
+  on.classList.toggle('on',live&&!!s.enabled);
+  off.classList.toggle('on',live&&!s.enabled);
+  /* The count follows the node, but never under the pilot's typing. */
+  if(live&&document.activeElement!==n&&String(s.count)!==n.value)n.value=s.count;
+  var html;
+  if(!s.running)html='<span class="note">search_node is not running — start it on the Nodes tab</span>';
+  else if(!live)html='<span class="note">no status from search_node</span>';
+  else{var st=chipState('search')||'off',w=s.waiting||[];
+    html='<span class="dot '+st+'"></span><span>'+esc(s.text)+'</span>'
+      +(w.length>1?'<span class="note" title="'+esc(w.join('\n'))+'">+'+(w.length-1)
+        +' more</span>':'')}
+  paint('searchstat',html);
+  /* Two tones when the last buoy is confirmed and it turns for home. */
+  if(live&&s.phase==='rtl'&&lastSearchPhase!==null&&lastSearchPhase!=='rtl'&&soundOn){
+    beep();setTimeout(beep,260)}
+  lastSearchPhase=live?s.phase:null}
 var originSeen=null;
 function renderMap(){
   var m=S.map||{};
   /* The map re-anchors when the autopilot's fence is first read; a trail drawn
      about the old origin would be in the wrong place. */
   if(m.origin_id!==originSeen){trail=[];originSeen=m.origin_id}
+  renderSearch();
   if(m.veh){var p=[m.veh.x,m.veh.y];
     if(!trail.length||Math.hypot(p[0]-trail[trail.length-1][0],
         p[1]-trail[trail.length-1][1])>=(m.trail_gate||0.5))trail.push(p);
@@ -801,7 +906,16 @@ function renderVitals(){
       +(G.hdop!=null?' \u00b7 HDOP '+fmt(G.hdop,2):''):'no GPS data');
   var altOk=t.pose_ok&&t.alt_rel!=null;
   tile('alttile',altOk?'':'bad','Altitude',altOk?fmt(t.alt_rel,1)+' m':'\u2014',
-    altOk?esc(t.mode||'')+(t.landed?' \u00b7 '+esc(t.landed.replace('_',' ').toLowerCase()):''):'position stale')}
+    altOk?esc(t.mode||'')+(t.landed?' \u00b7 '+esc(t.landed.replace('_',' ').toLowerCase()):''):'position stale')
+  /* The search tile shows only while search_node runs: found of wanted, big,
+     and what it is doing in words. Blue while it is the one flying. */
+  var se=(S.map||{}).search||{},st=el('searchtile');
+  if(!se.running){st.className='tile hidden';return}
+  if(se.phase==null){tile('searchtile','bad','Buoy search','\u2014','no status from search_node');return}
+  var cls=se.flying?'armed':(chipState('search')==='warn'?'warn':
+          (se.phase==='rtl'||se.phase==='complete'?'ok':''));
+  tile('searchtile',cls,'Buoy search',se.found+' / '+se.count+' found',esc(se.text),'',
+    (se.waiting||[]).join('\n'))}
 /* Every chip while disarmed; once armed only what needs attention, so the strip
    stays out of the way in flight and still shouts when something goes wrong. */
 function renderPreflight(){
@@ -1015,13 +1129,26 @@ function renderCam(){
     box.innerHTML='<img id="camimg" alt="camera" src="'+esc(url)+'">';
   }
 }
+/* One failure here used to stop the rest: an exception thrown while drawing
+   left the MAP frozen on its last frame while the tiles above it kept updating,
+   so the aircraft sat at its takeoff point looking parked while it flew a whole
+   search. A frozen picture that still looks live is the worst kind of readout,
+   so every part draws independently and any failure says so in the banner. */
+var renderFails=0;
+function part(name,fn){
+  try{fn()}catch(e){
+    renderFails++;
+    var b=el('banner');
+    b.textContent='page error in '+name+': '+e.message;
+    b.className='bad';
+    if(console&&console.error)console.error('render '+name,e)}}
 function render(){
-  renderVitals();renderPreflight();
-  if(tab==='nodes')renderNodes(); else if(tab==='tel')renderTel();
-  else if(tab==='sys')renderSys();
-  if(camVisible())renderCam();
-  renderMap();
-  layoutVars();
+  part('vitals',renderVitals);part('preflight',renderPreflight);
+  if(tab==='nodes')part('nodes',renderNodes); else if(tab==='tel')part('telemetry',renderTel);
+  else if(tab==='sys')part('system',renderSys);
+  if(camVisible())part('camera',renderCam);
+  part('map',renderMap);
+  part('layout',layoutVars);
 }
 function poll(){
   fetch('/state',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
@@ -1037,7 +1164,11 @@ function poll(){
     }
     render();
   }).catch(function(e){var b=el('banner');
-    b.textContent='ground station unreachable';b.className='bad'})
+    b.textContent='ground station unreachable';b.className='bad';
+    /* Blanks over guesses: an unreachable ground station must not leave the last
+       altitude, battery and mode on screen looking live. Read off a header that
+       had stopped updating, they say the aircraft is flying when it is parked. */
+    S={};render()})
 }
 setToggle('soundb',soundOn);
 var startTab='nodes';

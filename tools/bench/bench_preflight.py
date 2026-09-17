@@ -151,6 +151,8 @@ def good_inputs():
                    "expected_codec": "h264"},
         "record_gate": "will discard: never armed",
         "mapping": {"detector": True, "mapper": True},
+        "search": {"running": True, "phase": "ready",
+                   "text": "Ready: flip SC to GUIDED to start"},
     }
 
 
@@ -179,6 +181,14 @@ def case_preflight():
         "FENCE_TYPE 1 (no polygon) -> warn")
     one(lambda i: i.update(fence_type=4.0, fence_alt_max=5.0), "fence", "ok",
         "polygon only: ceiling not enforced, not judged -> ok")
+    one(lambda i: i.update(search={"running": True, "phase": "not_ready",
+                                   "text": "Not ready: take off first"}),
+        "search", "warn", "search on but not ready -> warn")
+    one(lambda i: i.update(search={"running": False}), "search", "off",
+        "search_node not running -> off")
+    one(lambda i: i.update(search={"running": True, "phase": "hover",
+                                   "text": "Confirming B4"}),
+        "search", "ok", "search hovering -> ok")
     one(lambda i: i["camera"].update(kbps=2000), "stream", "bad",
         "2000 kbps main stream -> bad")
     one(lambda i: i["camera"].update(width=1280, height=720), "stream", "warn",
