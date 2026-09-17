@@ -84,12 +84,13 @@ class TrackerConfig:
                  min_sightings=3, min_observe_s=4.0, min_samples=12,
                  max_sample_gap_s=1.0, solid_min_lit=0.85, off_max_lit=0.15,
                  min_flash_transitions=2, min_colour_agreement=0.6,
-                 lock_state=True):
+                 lock_state=True, decide_window_s=0.0):
         if not 0.0 <= off_max_lit < solid_min_lit <= 1.0:
             raise ValueError("need 0 <= off_max_lit < solid_min_lit <= 1, got "
                              "%r, %r" % (off_max_lit, solid_min_lit))
         if merge_radius_m > assoc_radius_m:
             raise ValueError("merge_radius_m must not exceed assoc_radius_m")
+        self.decide_window_s = float(decide_window_s)
         self.assoc_radius_m = float(assoc_radius_m)
         self.merge_radius_m = float(merge_radius_m)
         self.min_sightings = int(min_sightings)
@@ -161,8 +162,19 @@ class Track:
             self.locked = other.locked
 
     def evidence(self, cfg):
-        """The numbers a state is decided from."""
+        """The numbers a state is decided from.
+
+        With cfg.decide_window_s > 0 only the samples from the last window count.
+        THAT IS WHAT MAKES A CHANGE VISIBLE: weighing every sample ever taken, a
+        buoy watched as red for a minute needs another minute of dark samples
+        before the average moves, and Task 1's Disruptive tier changes the
+        passage under a boat that is already driving it. Positions still use
+        every sighting -- only the STATE decision is windowed.
+        """
         samples = sorted(self.samples, key=lambda s: s[0])
+        if cfg.decide_window_s > 0 and samples:
+            cut = samples[-1][0] - cfg.decide_window_s
+            samples = [s for s in samples if s[0] >= cut]
         n = len(samples)
         lit = [s for s in samples if s[1]]
         observed = 0.0
@@ -186,7 +198,14 @@ class Track:
 
     def decide(self, cfg, ev):
         """-> (state, colour) from evidence. See the module docstring's table."""
-        if ev["samples"] < cfg.min_samples or ev["observed_s"] < cfg.min_observe_s:
+        need = cfg.min_observe_s
+        if cfg.decide_window_s > 0:
+            # The watch time can never fill the whole window (it is the sum of
+            # the gaps between samples inside it), so asking for the full
+            # min_observe_s within a window of the same length decides nothing,
+            # ever.
+            need = min(need, 0.8 * cfg.decide_window_s)
+        if ev["samples"] < cfg.min_samples or ev["observed_s"] < need:
             return STATE_UNKNOWN, ""
         frac = ev["lit_fraction"]
         if frac <= cfg.off_max_lit:
@@ -211,6 +230,16 @@ class BuoyTracker:
     def __init__(self, cfg=None):
         self.cfg = cfg or TrackerConfig()
         self.clear()
+
+    def unlock_all(self):
+        """Let every decided state be re-decided.
+
+        Called when the tier changes to Disruptive: a state frozen under
+        Advanced would otherwise never move again, and the whole tier is about
+        states that move.
+        """
+        for tr in self.tracks:
+            tr.locked = None
 
     def clear(self):
         self.origin = None          # (lat, lon) of the first sighting

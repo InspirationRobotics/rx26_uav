@@ -28,6 +28,55 @@ flown.
 6. **Once the ground station's "buoys to find" are confirmed inside the fence,
    it asks for RTL.**
 
+## Disruptive
+
+**Crusader moves only to what Ekko confirms.** `confirmed` on
+`/uav/search/status` (and in the radio packet) is the boat's next gate as
+`[red, green]`, or the exit as `[id]`, and it is set only when all of these are
+true on that tick:
+
+- the search is escorting (a pilot who takes the aircraft back takes the
+  confirmation with it, on the same tick);
+- the aircraft is within `hover_radius_m` of the gate (or the exit);
+- every light in it was actually seen in the last `FRESH_S` (4 s) and still
+  reads right — a buoy with no age at all is not fresh;
+- nothing between the boat and that gate is still UNKNOWN. If something is, the
+  aircraft reads it first; one that will not settle is given up on after
+  `give_up_s`, like any other.
+
+`watching` is only where the aircraft is going. The difference is the whole
+point: the boat once waited while Ekko hovered over its gate (nothing on the
+wire said "go"), and once ran the passage while Ekko was still mapping (it
+trusted the map). The confirmation is what closes both.
+
+The stand-in boat in `sim_search` laps the entry buoy once from its gate side,
+stops there, and after every gate stops again until the next confirmation. tier: staying with the boat
+
+Set the tier on the Map tab. **Advanced** is the above: map it, RTL. In
+**Disruptive** the passage may change while Crusader transits, and only the UAV
+can see it (handbook 3.3.2), so once the field is mapped the aircraft does not
+go home:
+
+1. It hovers over **the boat's next element** — its next gate, then the exit —
+   using the boat's position over the radio (`/uav/boat`).
+2. A gate **holds** while both lights still read flashing red and green on a
+   fresh look. The buoys never move; only the lights change.
+3. When one changes it **re-reads known buoys**: pairable ones first, ahead of
+   the boat first, and among those the earliest along the passage — the first
+   one the boat will reach. It stops at the first valid new gate.
+4. **The 4 m rule.** Gates are 3 m apart, so a buoy with no neighbour within 4 m
+   can never be half of a gate whatever its light does. Those are LONE and are
+   checked only when everything pairable has been. That is what keeps the
+   re-check quick enough to beat the boat.
+
+The drone sends the boat buoy ids, positions and states — nothing else; the boat
+plans from that. While no gate ahead is confirmed, the boat holds.
+
+**Disruptive also needs `buoy_mapper.lock_state` false**, or a state decided once
+never changes again — and the mapper needs to decide from RECENT samples, which
+it does not do yet (see `buoy_tracker.evidence`: it weighs every sample ever
+taken, so a buoy watched as red for a minute cannot flip quickly).
+
 ## Who is flying
 
 - **Only the pilot starts it**: on a *change* into GUIDED (the SC switch), while

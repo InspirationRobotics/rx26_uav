@@ -46,7 +46,7 @@ from uav_msgs.msg import Buoy, BuoyDetections, BuoyMap, FcuStatus
 from uav_camera.recorder_core import session_stem
 from uav_common import config as uav_config
 from uav_common.node_main import run_node
-from uav_common.param_utils import declare_from_config
+from uav_common.param_utils import declare_from_config, make_set_callback
 from uav_perception import map_export
 from uav_perception.buoy_tracker import TrackerConfig
 from uav_perception.geolocate import Projector
@@ -127,9 +127,19 @@ PARAM_SPEC = {
     "min_colour_agreement": dict(read_only=True, lo=0.0, hi=1.0,
                                  description="share of lit samples that must "
                                              "agree on the colour"),
-    "lock_state": dict(read_only=True,
+    # The two the TIER owns, set by the ground station when the tier is chosen:
+    # Advanced freezes a decided state and weighs every sample; Disruptive must
+    # see a light change, so nothing is frozen and only the last few seconds
+    # decide. Dynamic so the tier can be switched without a restart.
+    "lock_state": dict(read_only=False,
                        description="freeze a buoy's state once decided "
-                                   "(Advanced tier). false for Disruptive"),
+                                   "(Advanced). The tier sets this"),
+    "decide_window_s": dict(read_only=False, lo=0.0, hi=60.0,
+                            description="decide a state from the last N seconds "
+                                        "only; 0 = every sample ever taken. The "
+                                        "tier sets this (Disruptive: a few "
+                                        "seconds, or a change is outvoted by "
+                                        "history)"),
     # ---- output
     "map_rate_hz": dict(read_only=True, lo=0.1, hi=10.0,
                         description="BuoyMap publish rate"),
@@ -162,6 +172,10 @@ class BuoyMapperNode(Node):
         self.mapper = Mapper(Projector(**{k: p[k] for k in PROJECTOR_KEYS}),
                              TrackerConfig(**{k: p[k] for k in TRACKER_KEYS}),
                              min_conf=float(p["min_conf"]))
+        ranges = {n: (s["lo"], s["hi"]) for n, s in PARAM_SPEC.items()
+                  if not s.get("read_only") and "lo" in s}
+        self.add_on_set_parameters_callback(
+            make_set_callback(self, ranges, self._apply))
         self._plan_opts = {"alt_m": float(p["waypoint_alt_m"]),
                            "hold_s": float(p["waypoint_hold_s"])}
 
@@ -205,6 +219,24 @@ class BuoyMapperNode(Node):
             % (self._stem, p["gimbal_yaw_mode"], p["gimbal_yaw_sign"],
                p["mount_yaw_offset_deg"], p["launch_height_above_surface_m"],
                self.export_dir, int(p["http_port"])))
+
+    def _apply(self, changes):
+        """The tier's two settings, applied to the running tracker."""
+        cfg = self.mapper.tracker.cfg
+        with self._lock:
+            if "decide_window_s" in changes:
+                cfg.decide_window_s = float(changes["decide_window_s"])
+            if "lock_state" in changes:
+                cfg.lock_state = bool(changes["lock_state"])
+                if not cfg.lock_state:
+                    # Frozen states must be released, or nothing can change.
+                    self.mapper.tracker.unlock_all()
+        self.p.update(changes)
+        self.get_logger().warn(
+            "state decision: %s, window %s"
+            % ("frozen once decided" if cfg.lock_state else "can change",
+               "%.0f s" % cfg.decide_window_s if cfg.decide_window_s
+               else "every sample"))
 
     # ------------------------------------------------------------ files
 

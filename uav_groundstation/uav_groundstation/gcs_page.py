@@ -290,6 +290,14 @@ details.about p{margin:6px 0 0;max-width:920px}
         <span class="seg" title="ON never starts a flight: flip SC into GUIDED to start. OFF makes Ekko hold position."><button
           id="search-off" onclick="setSearch(false)" disabled>Off</button><button
           id="search-on" onclick="setSearch(true)" disabled>On</button></span>
+        <label>Task
+          <select id="searchtask" onchange="setPick('task',this.value)" disabled>
+            <option value="task1">1 &mdash; Safe Passage</option></select></label>
+        <label>Tier
+          <select id="searchtier" onchange="setPick('tier',this.value)" disabled>
+            <option value="advanced">Advanced &mdash; map it, then home</option>
+            <option value="disruptive">Disruptive &mdash; stay with the boat</option>
+          </select></label>
         <label>Buoys to find
           <input id="searchn" type="number" min="1" max="50" step="1" value="10"
             onchange="setCount()" disabled></label>
@@ -733,6 +741,17 @@ function draw(){
       g.fillText(t,at[0],at[1]+h-1);
     });
   }
+  /* Crusader, from the radio. Drawn whenever the boat is being heard; the label
+     says what it is doing, because "where is the boat" and "what is it waiting
+     for" are the same question during a Disruptive run. */
+  var bt=m.boat;
+  if(bt){
+    var BX=sx(bt.x),BY=sy(bt.y);
+    g.beginPath();g.arc(BX,BY,Math.max(7,0.9*scale),0,6.284);
+    g.fillStyle=PAL.warn;g.fill();g.strokeStyle=PAL.fg;g.lineWidth=1.2;g.stroke();
+    g.font='600 12px '+FONTS;g.fillStyle=PAL.fg;
+    g.fillText('Crusader'+(bt.doing?' · '+bt.doing:''),BX+12,BY+4);
+  }
   /* vehicle */
   if(v){
     var X=sx(v.x),Y=sy(v.y),a=(v.heading||0)*Math.PI/180;
@@ -783,6 +802,11 @@ function setSearch(on){
   if(!on&&s.flying&&!confirm('Switch the search OFF? Ekko stops and holds position in GUIDED. '
      +'Flip SC off and on to resume after switching it back on.'))return;
   post('/search/config',{enabled:on}).then(poll)}
+/* The task and tier selectors. The tier decides what happens once the field is
+   mapped: Advanced goes home, Disruptive stays over the boat's next gate and
+   re-reads the lights when one changes. Switching mid-flight is allowed --
+   search_node applies it to the running search. */
+function setPick(what,value){var b={};b[what]=value;post('/search/config',b).then(poll)}
 function setCount(){
   var v=Number(el('searchn').value);
   if(!(v>=1&&v<=50&&Math.floor(v)===v)){toast('Buoys to find: a whole number from 1 to 50',true);return}
@@ -790,9 +814,11 @@ function setCount(){
 var lastSearchPhase=null;
 function renderSearch(){
   var s=(S.map||{}).search||{running:false},on=el('search-on'),off=el('search-off'),
-      n=el('searchn'),
+      n=el('searchn'),tier=el('searchtier'),task=el('searchtask'),
       live=!!s.running&&s.phase!=null;
-  on.disabled=off.disabled=n.disabled=!live;
+  on.disabled=off.disabled=n.disabled=tier.disabled=task.disabled=!live;
+  /* Follow the node, never under the operator's hand. */
+  if(live&&document.activeElement!==tier&&s.tier&&tier.value!==s.tier)tier.value=s.tier;
   on.classList.toggle('on',live&&!!s.enabled);
   off.classList.toggle('on',live&&!s.enabled);
   /* The count follows the node, but never under the pilot's typing. */

@@ -28,7 +28,7 @@ that flies on top of them, and a data-only package over the lot.
 
 | Package | Contains | State |
 |---|---|---|
-| [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 16 msgs |
+| [`uav_msgs`](uav_msgs/) | Message definitions. Depends on nothing but `std_msgs` | 17 msgs |
 | [`uav_common`](uav_common/) | Params loader, node lifecycle, stream cache, drop latch, geodesy, the geofence protocol, the guided-target gate. No nodes | library |
 | [`uav_fcu`](uav_fcu/) | `telemetry_bridge` — the only thing that speaks MAVLink. Uploads the geofence, reads back the one the autopilot holds, and forwards the search's GUIDED targets only while the pilot has GUIDED selected | flown; fence read-back and guided targets tested in ArduCopter 4.7.0 SITL only |
 | [`uav_groundstation`](uav_groundstation/) | `ground_station` (one web page on `:8090`) and `ocs_client` (the OCS heartbeat) | `ground_station` flown; `ocs_client` ran aboard, not yet checked against RoboNation's stub |
@@ -60,6 +60,12 @@ not like two vehicles.
 
 **The boat lives on 1455x, the aircraft on 1454x.**
 `tools/scripts/check_config.py` fails if `mav_endpoint` drifts back.
+
+**Crusader is not on this list, and that is the point.** At the competition the
+boat is reached over the RFD900ux on the autopilot's telemetry port, not over
+IP — MAVLink `TUNNEL`, two payload types, format in
+`uav_common/boat_link.py`. It needs no port here because nothing about it is
+ours to route: the autopilot forwards it (see `uav_fcu/README.md`).
 
 ### The camera is on its own subnet, and it must stay a dead end
 

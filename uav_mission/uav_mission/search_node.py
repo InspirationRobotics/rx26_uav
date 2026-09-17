@@ -31,8 +31,8 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
-from uav_msgs.msg import (BuoyMap, FcuParams, FcuStatus, Fence, FlightState,
-                          GlobalPos, GuidedTarget, SearchStatus)
+from uav_msgs.msg import (BoatState, BuoyMap, FcuParams, FcuStatus, Fence,
+                          FlightState, GlobalPos, GuidedTarget, SearchStatus)
 
 from uav_common import config as uav_config
 from uav_common.node_main import run_node
@@ -50,6 +50,12 @@ PARAM_SPEC = {
     "buoys_to_find": dict(read_only=False, lo=1, hi=50,
                           description="confirmed buoys inside the fence before "
                                       "the search asks for RTL"),
+    "task": dict(read_only=False,
+                 description="which mission task: only \"task1\" so far"),
+    "tier": dict(read_only=False,
+                 description="\"advanced\": map the field then RTL. "
+                             "\"disruptive\": stay on station over the boat's "
+                             "next gate and re-read the lights when one changes"),
     # ---- how it flies (read-only: change the YAML and restart)
     "search_alt_m": dict(read_only=True, lo=3.0, hi=60.0,
                          description="altitude above home for the whole search"),
@@ -83,6 +89,13 @@ PARAM_SPEC = {
                             description="refuse to start when the autopilot's "
                                         "fence was last read longer ago than "
                                         "this; the bridge re-reads every 30 s"),
+    "recheck_dwell_s": dict(read_only=True, lo=1.0, hi=60.0,
+                            description="disruptive: seconds over a buoy when "
+                                        "re-reading its light after a gate went"),
+    "boat_timeout_s": dict(read_only=True, lo=1.0, hi=60.0,
+                           description="disruptive: no boat position for this "
+                                       "long and the escort works from the "
+                                       "entry buoy instead"),
     "rtl_when_done": dict(read_only=True,
                           description="ask for RTL once every buoy is found; "
                                       "false = hold position instead"),
@@ -100,7 +113,8 @@ PARAM_SPEC = {
 CONFIG_KEYS = ("search_alt_m", "speed_mps", "line_spacing_m", "fence_inset_m",
                "arrive_radius_m", "hover_radius_m", "give_up_s",
                "divert_timeout_s", "cluster_radius_m", "recenter_m",
-               "climb_tolerance_m", "fence_max_age_s", "rtl_when_done")
+               "climb_tolerance_m", "fence_max_age_s", "rtl_when_done",
+               "tier", "recheck_dwell_s", "boat_timeout_s")
 
 STATUS_PERIOD_S = 0.5
 _IN_AIR = (FlightState.LANDED_STATE_IN_AIR, FlightState.LANDED_STATE_TAKEOFF,
@@ -146,6 +160,11 @@ class SearchNode(Node):
                                  self._cache(self._flight), 10)
         self.create_subscription(BuoyMap, "/uav/perception/buoy_map",
                                  self._cache(self._map), 10)
+        # Crusader over the radio. Disruptive only; absent otherwise, and the
+        # escort then works from the entry buoy and says so.
+        self._boat = StreamCache(float(p["boat_timeout_s"]))
+        self.create_subscription(BoatState, "/uav/boat",
+                                 self._cache(self._boat), 10)
         self.create_subscription(Fence, "/uav/fence", self._on_fence, _latched())
         self.create_subscription(FcuParams, "/uav/fcu_params", self._on_params,
                                  _latched())
@@ -167,13 +186,28 @@ class SearchNode(Node):
 
     # ------------------------------------------------------------ inputs
 
+    TIERS = ("advanced", "disruptive")
+    TASKS = ("task1",)
+
     def _apply(self, changes):
+        # Strings are not range-checked by make_set_callback, and a tier nobody
+        # implements must not reach the core: it would decide what happens when
+        # the map is finished.
+        if changes.get("tier") not in (None,) + self.TIERS:
+            raise ValueError("tier must be one of %s" % ", ".join(self.TIERS))
+        if changes.get("task") not in (None,) + self.TASKS:
+            raise ValueError("task must be one of %s" % ", ".join(self.TASKS))
         self.p.update(changes)
         if "enabled" in changes:
             self.get_logger().warn("search switched %s from the ground station"
                                    % ("ON" if changes["enabled"] else "OFF"))
         if "buoys_to_find" in changes:
             self.get_logger().info("buoys to find: %d" % changes["buoys_to_find"])
+        if "tier" in changes:
+            # The tier decides what happens when the map is complete, so it is
+            # applied to the running core, not only stored.
+            self.core.cfg.tier = changes["tier"]
+            self.get_logger().warn("tier: %s" % changes["tier"])
 
     @staticmethod
     def _cache(cache):
@@ -198,6 +232,7 @@ class SearchNode(Node):
         st = self._status.get(now)
         fl = self._flight.get(now)
         bm = self._map.get(now)
+        boat = self._boat.get(now)
         fence, problem, read_t = self._fence or (None, "", None)
         return search_core.Inputs(
             now=now,
@@ -214,6 +249,9 @@ class SearchNode(Node):
                 search_core.Buoy(int(b.id), b.latitude, b.longitude,
                                  bool(b.locked), b.label,
                                  _num(b.last_seen_age_s)) for b in bm.buoys],
+            boat=None if boat is None else (boat.latitude, boat.longitude,
+                                            int(boat.activity),
+                                            now - self._boat.recv_t),
             **{k: self._params.get(k) for k in ("fence_enable", "fence_type",
                                                 "fence_alt_max", "fence_margin")})
 
@@ -267,6 +305,10 @@ class SearchNode(Node):
         m.waiting_for = list(s["waiting_for"])
         m.enabled, m.buoys_to_find, m.found = s["enabled"], s["buoys_to_find"], s["found"]
         m.flying = s["flying"]
+        m.tier, m.note = s["tier"], s["note"]
+        m.watching = [int(i) for i in s["watching"]]
+        m.rechecking = [int(i) for i in s["rechecking"]]
+        m.confirmed = [int(i) for i in s["confirmed"]]
         m.pass_number, m.leg, m.legs = s["pass_number"], s["leg"], s["legs"]
         m.hover_buoys = [int(i) for i in s["hover_buoys"]]
         m.hover_s, m.give_up_s = float(s["hover_s"]), float(s["give_up_s"])

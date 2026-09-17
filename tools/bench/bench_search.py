@@ -17,6 +17,9 @@ Three parts:
                asks for RTL only in GUIDED -- not how well it flies.
   guided_gate  telemetry_bridge's last check on every target: each refusal
                fires, and an unchanged target is not re-sent at the publish rate.
+  escort_core  Task 1 DISRUPTIVE: which buoys could ever become a gate, which
+               gate the boat needs next, when a gate has stopped being one, and
+               what order to re-read the lights in when it has.
 
 The real flying is checked against ArduPilot's own simulator, outside this repo.
 """
@@ -29,7 +32,8 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 for pkg in ("uav_common", "uav_mission"):
     sys.path.insert(0, os.path.join(REPO, pkg))
 
-from uav_common import geo, guided_gate  # noqa: E402
+from uav_common import boat_link, geo, guided_gate  # noqa: E402
+from uav_mission import escort_core as ec  # noqa: E402
 from uav_mission import search_core as core  # noqa: E402
 from uav_mission import sweep_core as sc  # noqa: E402
 
@@ -480,8 +484,222 @@ def case_gate():
     return r
 
 
+# ================================================================ escort_core
+
+def case_escort():
+    """A passage: entry at 0, two gates along it, an exit, and one lone buoy."""
+    r = []
+    B = [
+        {"id": 1, "xy": (0.0, 0.0), "label": "FLASHING_BLUE", "age": 1.0},
+        {"id": 2, "xy": (10.0, -1.5), "label": "FLASHING_RED", "age": 1.0},
+        {"id": 3, "xy": (10.0, 1.5), "label": "FLASHING_GREEN", "age": 1.0},
+        {"id": 4, "xy": (22.0, -1.5), "label": "FLASHING_RED", "age": 1.0},
+        {"id": 5, "xy": (22.0, 1.5), "label": "FLASHING_GREEN", "age": 1.0},
+        {"id": 6, "xy": (16.0, 9.0), "label": "OFF", "age": 1.0},        # lone
+        {"id": 7, "xy": (22.0, 4.0), "label": "OFF", "age": 1.0},        # pairs with 5
+        {"id": 8, "xy": (34.0, 0.0), "label": "SOLID_BLUE", "age": 1.0},
+    ]
+    pair = ec.pairable(B)
+    r.append(check("a buoy with no neighbour within 4 m is lone",
+                   6 not in pair and {2, 3, 4, 5, 7} <= pair, sorted(pair)))
+    crs = ec.course(B)
+    r.append(check("course runs entry -> exit", crs is not None
+                   and abs(crs[2][0] - 1.0) < 1e-9, crs and crs[2]))
+    g = ec.gates(B)
+    r.append(check("two gates found, 3 m wide", len(g) == 2
+                   and all(abs(x["width"] - 3.0) < 1e-9 for x in g), len(g)))
+    el = ec.next_element((2.0, 0.0), B, crs)     # boat still at the entry
+    r.append(check("boat at the entry: watch the first gate",
+                   el["kind"] == "gate" and el["gate"]["red"] == 2, el["kind"]))
+    el = ec.next_element((14.0, 0.0), B, crs)    # boat through gate one
+    r.append(check("boat past gate one: watch the second",
+                   el["gate"]["red"] == 4, el["gate"]))
+    el = ec.next_element((26.0, 0.0), B, crs)    # boat past both
+    r.append(check("boat past both gates: watch the exit", el["kind"] == "exit"))
+    ok, why = ec.gate_holds(g[0], B)
+    r.append(check("a gate with both lights still lit holds", ok, why))
+    dark = [dict(b, label="OFF") if b["id"] == 4 else b for b in B]
+    ok, why = ec.gate_holds({"red": 4, "green": 5}, dark)
+    r.append(check("a red gone dark breaks the gate", not ok and "B4" in why, why))
+    stale = [dict(b, age=30.0) if b["id"] == 4 else b for b in B]
+    ok, why = ec.gate_holds({"red": 4, "green": 5}, stale)
+    r.append(check("a state nobody has looked at recently is not evidence",
+                   not ok and "not been seen" in why, why))
+    # The light moves: B4 goes dark and B7 turns red, so 7+5 is the new gate.
+    changed = [dict(b, label="OFF") if b["id"] == 4 else
+               dict(b, label="FLASHING_RED") if b["id"] == 7 else b for b in B]
+    g2 = ec.gates(changed)
+    r.append(check("the new pair is found once the light changes",
+                   any(x["red"] == 7 and x["green"] == 5 for x in g2), len(g2)))
+    order = ec.recheck_order(changed, boat_xy=(14.0, 0.0), drone_xy=(22.0, 0.0),
+                             crs=crs)
+    ids = [b["id"] for b in order]
+    r.append(check("re-check: ahead and pairable first, lone last",
+                   ids.index(7) < ids.index(6) and ids.index(4) < ids.index(6)
+                   and ids.index(2) > ids.index(4), ids))
+    r.append(check("...and entry/exit buoys are never re-checked",
+                   1 not in ids and 8 not in ids, ids))
+    behind = ec.recheck_order(changed, boat_xy=(30.0, 0.0), drone_xy=(30.0, 0.0),
+                              crs=crs)
+    r.append(check("boat near the exit: everything is behind it, still ordered",
+                   len(behind) == 6, [b["id"] for b in behind]))
+
+    # What is ahead that nobody has read: the reason to go and look rather than
+    # park over the exit.
+    unread = [dict(b, label="UNKNOWN") if b["id"] in (4, 5) else b for b in B]
+    got = [b["id"] for b in ec.unread_ahead(unread, (12.0, 0.0), crs)]
+    r.append(check("unread buoys ahead of the boat are listed, nearest first",
+                   got == [4, 5], got))
+    got = [b["id"] for b in ec.unread_ahead(unread, (26.0, 0.0), crs)]
+    r.append(check("...and nothing behind the boat is listed", got == [], got))
+    stale = [dict(b, age=30.0) if b["id"] == 7 else b for b in B]
+    got = [b["id"] for b in ec.unread_ahead(stale, (12.0, 0.0), crs)]
+    r.append(check("a state too old to trust counts as unread", got == [7], got))
+    lone = [dict(b, label="UNKNOWN") if b["id"] == 6 else b for b in B]
+    got = [b["id"] for b in ec.unread_ahead(lone, (0.0, 0.0), crs)]
+    r.append(check("a LONE buoy is never worth reading for a gate", 6 not in got, got))
+
+    # The bytes that cross the radio.
+    packed = boat_link.pack_buoys([(b["id"], 32.9 + b["id"] * 1e-5,
+                                    -117.0 - b["id"] * 1e-5, b["label"])
+                                   for b in B])
+    report = boat_link.unpack_buoys(packed)
+    back = report["buoys"]
+    r.append(check("the whole 8-buoy map fits one radio packet (%d bytes)"
+                   % len(packed), len(packed) <= boat_link.MAX_PAYLOAD
+                   and len(back) == len(B)))
+    r.append(check("...and comes back the same, to 1e-7 degrees",
+                   all(a["id"] == b["id"] and a["label"] == b["label"]
+                       and abs(a["lat"] - (32.9 + b["id"] * 1e-5)) < 1e-7
+                       for a, b in zip(back, B))))
+    boat = boat_link.unpack_boat(boat_link.pack_boat(32.9242, -117.0193, 3, 6))
+    r.append(check("the boat's report survives the round trip",
+                   boat["activity"] == 3 and boat["target"] == 6
+                   and abs(boat["lat"] - 32.9242) < 1e-7, boat))
+    big = boat_link.unpack_buoys(boat_link.pack_buoys(
+        [(i, 32.9, -117.0, "OFF") for i in range(1, 30)]))["buoys"]
+    r.append(check("more buoys than fit are cut, not garbled",
+                   len(big) == boat_link.MAX_BUOYS, len(big)))
+    # The wire field is a fixed 128 bytes whatever the map holds, and what comes
+    # back out is the real bytes only -- a round trip through a padded frame.
+    padded = boat_link.pad(packed)
+    frame = type("T", (), {"payload": list(padded), "payload_length": len(packed)})()
+    # What the boat cannot work out for itself: what Ekko has just confirmed.
+    field = [(b["id"], 32.9 + b["id"] * 1e-5, -117.0 - b["id"] * 1e-5,
+              b["label"]) for b in B]
+    got = [boat_link.unpack_buoys(boat_link.pack_buoys(field, c))["confirmed"]
+           for c in ((), (8,), (2, 3))]
+    r.append(check("confirmed ids survive the round trip: nothing, exit, gate",
+                   got == [[], [8], [2, 3]], got))
+    r.append(check("a full map still fits one packet with the confirmation",
+                   len(boat_link.pack_buoys(
+                       [(i, 32.9, -117.0, "OFF")
+                        for i in range(1, boat_link.MAX_BUOYS + 1)],
+                       (2, 3))) <= boat_link.MAX_PAYLOAD,
+                   "%d buoys" % boat_link.MAX_BUOYS))
+    r.append(check("a TUNNEL payload is padded to 128 and trimmed back",
+                   len(padded) == boat_link.MAX_PAYLOAD
+                   and boat_link.body(frame) == packed,
+                   "%d bytes padded, %d real" % (len(padded), len(packed))))
+    return r
+
+
+def case_confirm():
+    """What Ekko CONFIRMS for Crusader: only what it is over and has just seen.
+
+    Driven through search_core's escort itself, not escort_core's pieces: the
+    confirmation is the one thing the boat moves on, so it is tested where it
+    is made.
+    """
+    r = []
+    fence = latlon_ring(RECT)
+    field = [
+        (1, (-17.0, 0.0), "FLASHING_BLUE"),
+        (2, (-7.0, -1.5), "FLASHING_RED"), (3, (-7.0, 1.5), "FLASHING_GREEN"),
+        (4, (5.0, -1.5), "FLASHING_RED"), (5, (5.0, 1.5), "FLASHING_GREEN"),
+        (6, (-1.0, 9.0), "OFF"), (7, (5.0, 4.0), "OFF"),
+        (8, (17.0, 0.0), "SOLID_BLUE"),
+    ]
+    between = [(9, (-12.0, 1.5), "UNKNOWN"), (10, (-12.0, -1.5), "OFF")]
+
+    def escort(drone, boat, ages=None, extra=(), now=100.0, search=None):
+        search = search or core.BuoySearch(core.SearchConfig(tier="disruptive"))
+        search.sub = "escort"
+        geom = search._geometry(core.Inputs(now=now, fence=fence))
+        org = geom["origin"]
+        buoys = []
+        for bid, xy, label in field + list(extra):
+            lat, lon = geo.xy_to_latlon(xy[0], xy[1], org)
+            buoys.append(core.Buoy(bid, lat, lon, True, label,
+                                   (ages or {}).get(bid, 1.0)))
+        blat, blon = geo.xy_to_latlon(boat[0], boat[1], org)
+        inp = core.Inputs(now=now, fence=fence, buoys=buoys,
+                          boat=(blat, blon, 1, 0.5))
+        ev = []
+        goal = search._escort(inp, geom, drone, ev)
+        return search, goal, ev
+
+    at_entry = (-17.0, -3.0)
+    s, _g, _e = escort(drone=(-20.0, 10.0), boat=at_entry)
+    r.append(check("heading to the boat's gate is NOT confirming it",
+                   s.watch == (2, 3) and s.confirmed == [], s._escort_text()))
+    s, _g, _e = escort(drone=(-7.0, 0.0), boat=at_entry)
+    r.append(check("over the gate, both lights just seen: confirmed",
+                   s.confirmed == [2, 3], s._escort_text()))
+    s, _g, _e = escort(drone=(-7.0, 0.0), boat=at_entry, ages={2: 30.0})
+    r.append(check("over the gate but a light not seen for 30 s: not confirmed",
+                   s.confirmed == [], s.confirmed))
+    s, _g, _e = escort(drone=(-7.0, 0.0), boat=at_entry, ages={3: None})
+    r.append(check("a light with NO age is not fresh: not confirmed",
+                   s.confirmed == [], s.confirmed))
+    s, goal, _e = escort(drone=(-7.0, 0.0), boat=at_entry, extra=between)
+    r.append(check("an unknown buoy between boat and gate is read first",
+                   s.confirmed == [] and _dist(goal, (-12.0, 1.5)) < 0.5,
+                   "goal %s, %s" % ([round(v, 1) for v in goal], s._escort_text())))
+    s = None
+    gave_up = []
+    for t in range(0, 13):
+        s, _g, ev = escort(drone=(-12.0, 1.5), boat=at_entry, extra=between,
+                           now=100.0 + t, search=s)
+        gave_up += ev
+    s, _g, _e = escort(drone=(-7.0, 0.0), boat=at_entry, extra=between,
+                       now=114.0, search=s)
+    r.append(check("...one that never settles is given up on after 10 s, then "
+                   "the gate is confirmed",
+                   any("gave up reading B9" in e for e in gave_up)
+                   and s.confirmed == [2, 3], gave_up))
+    s, _g, _e = escort(drone=(17.0, 0.0), boat=(8.0, 0.0))
+    r.append(check("boat past both gates, Ekko over the exit: the exit confirmed",
+                   s.watch is None and s.confirmed == [8], s._escort_text()))
+    # Through step(), the way the node calls it: confirmed over the gate, then
+    # the pilot flips to LOITER on the very next tick.
+    s, _g, _e = escort(drone=(-7.0, 0.0), boat=at_entry)
+    held = list(s.confirmed)
+    geom = s._geometry(core.Inputs(now=100.5, fence=fence))
+    lat, lon = geo.xy_to_latlon(-7.0, 0.0, geom["origin"])
+    d = s.step(core.Inputs(now=100.5, enabled=True, buoys_to_find=8,
+                           pose=(lat, lon, 10.0, 0.0), mode="LOITER", armed=True,
+                           in_air=True, fence=fence, fence_read_t=99.0,
+                           buoys=[], **FENCE_PARAMS))
+    st = d.status
+    r.append(check("a pilot who takes the aircraft back takes the confirmation "
+                   "with it", held == [2, 3] and st["phase"] != "escort"
+                   and st["confirmed"] == [],
+                   "was %s, now %s %s" % (held, st["phase"], st["confirmed"])))
+    return r
+
+
+FENCE_PARAMS = dict(fence_enable=1.0, fence_type=5.0, fence_alt_max=12.0,
+                    fence_margin=2.0)
+
+
+def _dist(a, b):
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
 def main():
-    results = case_geometry() + case_search() + case_gate()
+    results = (case_geometry() + case_search() + case_gate() + case_escort()
+               + case_confirm())
     print("\n%d/%d" % (sum(results), len(results)))
     return 0 if all(results) else 1
 

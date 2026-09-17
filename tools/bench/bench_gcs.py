@@ -129,6 +129,9 @@ def main():
     r.append(check("search posts only settings",
                    keys <= {b"enabled", b"buoys_to_find", b"b"},
                    b",".join(sorted(keys))))
+    picks = set(re.findall(rb"setPick\('(\w+)'", page))
+    r.append(check("the two selectors set only task and tier",
+                   picks == {b"task", b"tier"}, b",".join(sorted(picks))))
 
     print("\nthe protected-node rule, bypassing the page")
     j = post(base, "/node/stop", {"name": "telemetry_bridge"})

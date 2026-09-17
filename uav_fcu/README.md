@@ -10,7 +10,7 @@ open a MAVLink connection.
 
 **Flown on Ekko** (ArduCopter 4.7.0, CubeOrange+).
 
-## Five jobs
+## Six jobs
 
 **RX** — republishes `/uav/pose`, `/uav/attitude`, `/uav/fcu_status`,
 `/uav/flight_state`, `/uav/rc_channels`, `/uav/battery`, `/uav/gps`,
@@ -50,6 +50,36 @@ other mode, so taking control back never depends on this node.
 
 **TX (geofence)** — `/uav/fence_upload` (`std_srvs/Trigger`) uploads the
 configured polygon and verifies the readback.
+
+**RX/TX (Crusader, over the RFD900ux on the telemetry port)** — MAVLink
+`TUNNEL`, two vendor payload types (`uav_common/boat_link.py`): the boat sends
+where it is and one byte for what it is doing (`/uav/boat`), and this node sends
+the WHOLE buoy map back at `boat_report_hz`, never deltas — one packet resyncs
+the boat completely, so a lost packet costs a second of staleness instead of a
+buoy the boat never hears about. Ten bytes per buoy, 12 buoys to a 128-byte
+payload, behind a count byte and **two confirmed ids**.
+
+Those ids are the one thing the boat cannot work out for itself: what Ekko has
+just CONFIRMED for it — its next gate (red, green), the exit (exit, 0), or
+nothing (0, 0). A buoy the aircraft has not reached yet is missing from the map,
+and a light mapped a minute ago is not a light seen now, so a boat steering by
+the map alone drives a passage nobody has just looked at. The ids come from
+`confirmed` on `/uav/search/status`; two seconds of silence from `search_node`
+sends nothing confirmed, because a search that is not reporting is not a search
+that is still checking. Nothing else goes to the boat.
+
+The path is **through the autopilot**, not a second link of our own: this node
+talks to MAVProxy on 14541, MAVProxy to the USB, and the autopilot routes a
+message addressed to the boat's sysid out the telemetry port the radio is on —
+which is why the boat must send heartbeats, or the autopilot has no route to it.
+We are **sysid 200** (`mav_source_system`) and address the boat at `boat_sysid`
+(2). Verified end to end in SITL on 16 Sep, using SITL's own SERIAL2 as the
+radio port — the same routing the RFD900ux relies on. In `sim_search` that port
+is UDP 14555 and a second one, SERIAL1 on 14556, is free for the stand-in boat:
+
+    python3 tools/scripts/fake_crusader.py --udp udpin:0.0.0.0:14556 --sysid 2
+
+and at the park, the same tool on a laptop with `--port COM5`.
 
 ## There is no disarm path, deliberately
 

@@ -30,7 +30,8 @@ PROJECTOR_KEYS = ("hfov_deg", "nadir_pitch_deg", "max_off_nadir_deg",
                   "launch_height_above_surface_m", "target_height_m",
                   "min_alt_m", "max_pose_age_s", "max_gimbal_age_s",
                   "max_gimbal_yaw_rate_dps")
-TRACKER_KEYS = ("assoc_radius_m", "merge_radius_m", "min_sightings",
+TRACKER_KEYS = ("decide_window_s", "assoc_radius_m", "merge_radius_m",
+                "min_sightings",
                 "min_observe_s", "min_samples", "max_sample_gap_s",
                 "solid_min_lit", "off_max_lit", "min_flash_transitions",
                 "min_colour_agreement", "lock_state")

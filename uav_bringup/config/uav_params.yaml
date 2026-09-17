@@ -114,6 +114,20 @@ telemetry_bridge:
                                            #      stops being republished
     fence_timeout_s: 5.0                   # [RO] per-exchange timeout in the
                                            #      fence mission dialog
+    boat_sysid: 2                          # [RO] Crusader's MAVLink system id on
+                                           #      the RFD900 link. The buoy map is
+                                           #      addressed to it and its reports
+                                           #      are read from it. MUST DIFFER
+                                           #      FROM EKKO'S: two vehicles with
+                                           #      one id are indistinguishable to
+                                           #      every GCS on the link.
+                                           #      0 = no boat; send nothing.
+    boat_report_hz: 1.0                    # [RO] whole-map rate to the boat. Ten
+                                           #      buoys is ~101 bytes, so the
+                                           #      radio is not the constraint --
+                                           #      and the WHOLE map every time,
+                                           #      never deltas, so one lost packet
+                                           #      costs a second of staleness.
     geofence:                              # [RO] = shared.geofence (pinned by
                                            #      check_config.py). CLOSED ring;
                                            #      the closing point is stripped
@@ -775,10 +789,19 @@ buoy_mapper:
     min_colour_agreement: 0.6              # [RO] share of lit samples that must
                                            #      agree on the colour, or the
                                            #      state stays UNKNOWN.
-    lock_state: true                       # [RO] freeze each state once
-                                           #      decided. TRUE for Advanced
-                                           #      tier, where the passage does
-                                           #      not change. Disruptive: false.
+    lock_state: true                       # [DYN] freeze each state once
+                                           #      decided. SET BY THE TIER on the
+                                           #      Map tab: true for Advanced,
+                                           #      false for Disruptive. Nothing
+                                           #      to set by hand.
+    decide_window_s: 0.0                   # [DYN] decide a state from the last N
+                                           #      seconds only; 0 = every sample
+                                           #      ever taken. ALSO SET BY THE
+                                           #      TIER: Disruptive uses 5 s so a
+                                           #      light that changes is seen in
+                                           #      about 4 s instead of being
+                                           #      outvoted by a minute of
+                                           #      history. Advanced keeps 0.
 
     # ---- output
     map_rate_hz: 1.0                       # [RO] /uav/perception/buoy_map, the
@@ -824,6 +847,20 @@ search_node:
     buoys_to_find: 10                      # [DYN] confirmed buoys inside the
                                            #      fence before RTL. 10 = the
                                            #      competition's Task 1 field.
+    task: "task1"                          # [DYN] the page's task selector.
+                                           #      Only Task 1 exists so far.
+    tier: "advanced"                       # [DYN] the page's tier selector.
+                                           #      "advanced": map the field, then
+                                           #      RTL -- the passage does not
+                                           #      change once set.
+                                           #      "disruptive": stay on station
+                                           #      over the boat's next gate and
+                                           #      re-read the lights when one
+                                           #      changes (handbook 3.3.2).
+                                           #      DISRUPTIVE ALSO NEEDS
+                                           #      buoy_mapper.lock_state FALSE,
+                                           #      or a state decided once never
+                                           #      changes again.
 
     # ---- how it flies
     search_alt_m: 10.0                     # [RO] = buoy_mapper.waypoint_alt_m
@@ -857,6 +894,15 @@ search_node:
                                            #      buoy's mapped position shifts
                                            #      this far
     climb_tolerance_m: 1.0                 # [RO]
+    recheck_dwell_s: 6.0                   # [RO] disruptive: seconds spent over
+                                           #      a buoy re-reading its light.
+                                           #      Longer than min_observe_s so a
+                                           #      changed state has time to
+                                           #      settle before moving on.
+    boat_timeout_s: 6.0                    # [RO] disruptive: no position from
+                                           #      Crusader for this long and the
+                                           #      escort measures from the entry
+                                           #      buoy instead, and says so.
     fence_max_age_s: 90.0                  # [RO] the fence must have been read
                                            #      from the autopilot this recently
                                            #      or the search refuses to start.

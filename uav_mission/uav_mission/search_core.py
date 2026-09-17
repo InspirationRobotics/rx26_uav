@@ -42,9 +42,13 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from uav_common import fcu_decode, geo
+from uav_mission import escort_core as ec
 from uav_mission import sweep_core as sc
 
-FLYING = ("climb", "sweep", "divert", "hover", "return")
+FLYING = ("climb", "sweep", "divert", "hover", "return", "escort", "recheck")
+#: Phases that are the DISRUPTIVE half: staying with the boat once the map is
+#: made, instead of going home.
+ESCORT = ("escort", "recheck")
 
 #: Arrived, if within a few metres and barely moving for this long. The fence's
 #: own avoidance can stop the aircraft just short of a point near the edge; a
@@ -75,6 +79,12 @@ class SearchConfig:
     climb_tolerance_m: float = 1.0
     fence_max_age_s: float = 90.0
     rtl_when_done: bool = True
+    # "advanced": map the field, then RTL -- the passage does not change.
+    # "disruptive": stay on station over the boat's next gate and re-check the
+    # lights, because the passage may change while it transits (handbook 3.3.2).
+    tier: str = "advanced"
+    recheck_dwell_s: float = 6.0
+    boat_timeout_s: float = 6.0
 
 
 @dataclass
@@ -106,6 +116,9 @@ class Inputs:
     fence_alt_max: Optional[float] = None
     fence_margin: Optional[float] = None
     buoys: Optional[list] = None            # [Buoy]; None = map not live
+    #: (lat, lon, activity, age_s) from Crusader over the radio, or None.
+    #: activity is the one byte the boat sends about what it is doing.
+    boat: Optional[tuple] = None
 
 
 @dataclass
@@ -164,6 +177,20 @@ class BuoySearch:
         self.slow_since = None
         self.rtl_t = None
         self.flown = False
+        # Disruptive: what the boat's next gate is, what we are re-checking.
+        self.watch = None          # (red id, green id) being kept an eye on
+        self.queue = []            # buoy ids still to re-read after a loss
+        self.dwell_t = None        # when the aircraft got over the one in hand
+        self.escort_note = ""      # the last thing worth saying about the pair
+        # What Crusader is ALLOWED to drive to: the boat's next gate as
+        # [red, green], or the exit as [id], and only while the aircraft is over
+        # it and has just seen it. Empty the rest of the time -- including all
+        # the way through the sweep, which is what keeps the boat at the entry.
+        self.confirmed = []
+        # Unknown buoys between the boat and the gate being watched are read
+        # first; one that will not settle is given up on like any other.
+        self.between_t = {}        # buoy id -> when the aircraft got over it
+        self.between_skip = set()
         # Stopped because an INPUT went away (position, buoy map), not because
         # anyone asked. It comes back by itself when the input does: a one
         # second gap in the pose must not end a search that is mid-passage.
@@ -266,7 +293,11 @@ class BuoySearch:
             r.append("no buoy map: start detector_node and buoy_mapper")
         if inp.buoys_to_find < 1:
             r.append("set how many buoys to find")
-        elif found >= inp.buoys_to_find and not self.flown:
+        elif (found >= inp.buoys_to_find and not self.flown
+              and c.tier != "disruptive"):
+            # Advanced only. In Disruptive a complete map is not "already done",
+            # it is where the job starts: the aircraft goes straight to watching
+            # the boat's next gate.
             r.append("the map already has %d confirmed: clear the buoys, or raise "
                      "the count" % found)
         if (inp.pose is not None and geom is not None and geom["hull"]
@@ -382,7 +413,13 @@ class BuoySearch:
     def _fly(self, inp, geom, xy, found, ev):
         """One tick of flying. -> local-metre goal, or None."""
         c = self.cfg
+        if self.sub in ESCORT:
+            return self._escort(inp, geom, xy, ev)
         if found >= inp.buoys_to_find:
+            if c.tier == "disruptive":
+                ev.append("all %d found: staying on station for the boat" % found)
+                self.sub, self.watch, self.queue = "escort", None, []
+                return self._escort(inp, geom, xy, ev)
             self.sub = "rtl" if c.rtl_when_done else "complete"
             self._hold_here(inp, xy, True, "all %d found" % found)
             ev.append("all %d buoys found%s" % (found, ": asking for RTL"
@@ -463,10 +500,160 @@ class BuoySearch:
                 return xy
         return self.wps[self.wp]
 
+    # ------------------------------------------------------------ disruptive
+
+    def _escort_view(self, inp, geom):
+        """The map in local metres, as escort_core wants it."""
+        return [{"id": b.id, "xy": _local(geom, b.lat, b.lon), "label": b.label,
+                 "age": b.age}
+                for b in (inp.buoys or [])
+                if self._inside_fence(geom, b.lat, b.lon)]
+
+    @staticmethod
+    def _seen_now(bu, ids):
+        """Every one of these buoys actually sighted within FRESH_S. A missing
+        age is NOT fresh: a confirmation is a claim about what was just seen."""
+        by_id = {b["id"]: b for b in bu}
+        return all(i in by_id and by_id[i].get("age") is not None
+                   and by_id[i]["age"] <= ec.FRESH_S for i in ids)
+
+    def _escort(self, inp, geom, xy, ev):
+        """Stay with the boat: watch its next gate, and when a light changes, go
+        and re-read the buoys that could be the new one. -> goal, or None."""
+        c = self.cfg
+        bu = self._escort_view(inp, geom)
+        crs = ec.course(bu)
+        if crs is None:
+            self.escort_note = ("no entry and exit buoys on the map: nothing to "
+                                "measure the passage along")
+            return xy
+        entry, _exit_xy, axis = crs
+        fresh_boat = (inp.boat is not None
+                      and (inp.boat[3] is None or inp.boat[3] <= c.boat_timeout_s))
+        boat_xy = _local(geom, inp.boat[0], inp.boat[1]) if fresh_boat else entry
+        here = ec.along(boat_xy, entry, axis)
+
+        live = {(g["red"], g["green"]) for g in ec.gates(bu, None, axis)}
+        if self.watch is not None and self.watch not in live:
+            # gate_holds names the buoy that actually changed, in the same words
+            # the page shows -- "B2 is now off", not a list of both lights.
+            _ok, why = ec.gate_holds({"red": self.watch[0], "green": self.watch[1]},
+                                     bu, fresh_s=None)
+            why = why or "the pair no longer reads red and green"
+            ev.append("GATE LOST: %s" % why)
+            self.escort_note = why
+            self.watch, self.dwell_t = None, None
+            self.queue = [b["id"] for b in
+                          ec.recheck_order(bu, boat_xy, xy, crs)]
+            self.sub = "recheck"
+
+        if self.sub == "recheck":
+            # A gate only counts as FOUND when it has just been looked at:
+            # the whole point of the re-check is fresh evidence.
+            ahead = [g for g in ec.gates(bu, ec.FRESH_S, axis)
+                     if ec.along(g["mid"], entry, axis) > here + ec.AHEAD_MARGIN_M]
+            if ahead:
+                g = min(ahead, key=lambda g: ec.along(g["mid"], entry, axis))
+                self.watch = (g["red"], g["green"])
+                self.sub, self.dwell_t = "escort", None
+                self.escort_note = ""
+                ev.append("new gate found: B%d/B%d -- sent to the boat"
+                          % (g["red"], g["green"]))
+            elif self.queue:
+                by_id = {b["id"]: b for b in bu}
+                b = by_id.get(self.queue[0])
+                if b is None:
+                    self.queue.pop(0)
+                    return xy
+                goal = sc.clamp_inside(geom["inset"], b["xy"])
+                if _dist(xy, goal) <= c.hover_radius_m:
+                    if self.dwell_t is None:
+                        self.dwell_t = inp.now
+                    elif inp.now - self.dwell_t >= c.recheck_dwell_s:
+                        self.queue.pop(0)
+                        self.dwell_t = None
+                return goal
+            elif ec.unread_ahead(bu, boat_xy, crs):
+                # Something ahead is still unread (it dropped off the map, or
+                # the re-read did not settle): keep reading rather than deciding.
+                self.queue = [b["id"] for b in ec.unread_ahead(bu, boat_xy, crs)]
+                self.escort_note = "still reading ahead of the boat"
+            else:
+                # Everything ahead has been read and none of it is a gate. The
+                # boat's next element is the exit, so go and watch that; sitting
+                # over the boat would tell it nothing it does not know.
+                self.sub, self.dwell_t = "escort", None
+                self.escort_note = ("nothing ahead of the boat is a gate: "
+                                    "watching the exit")
+                ev.append("re-check finished: no gate ahead of the boat")
+
+        el = ec.next_element(boat_xy, bu, crs)
+        if el["kind"] == "gate":
+            g = el["gate"]
+            if self.watch != (g["red"], g["green"]):
+                self.between_t, self.between_skip = {}, set()
+            self.watch = (g["red"], g["green"])
+            # Anything still UNKNOWN between the boat and this gate is read
+            # before the gate is confirmed: it may be half of a nearer one.
+            # UNKNOWN only, never merely stale -- a stale buoy read on the way
+            # would be stale again by the time the aircraft reached the gate,
+            # and it would shuttle between the two for ever.
+            gate_at = ec.along(g["mid"], entry, axis)
+            between = [b for b in ec.unread_ahead(bu, boat_xy, crs)
+                       if b["label"] == "UNKNOWN"
+                       and b["id"] not in self.between_skip
+                       and ec.along(b["xy"], entry, axis) < gate_at]
+            if between:
+                b = between[0]
+                goal = sc.clamp_inside(geom["inset"], b["xy"])
+                self.escort_note = "reading B%d first" % b["id"]
+                if _dist(xy, goal) <= c.hover_radius_m:
+                    t0 = self.between_t.setdefault(b["id"], inp.now)
+                    if inp.now - t0 >= c.give_up_s:
+                        self.between_skip.add(b["id"])
+                        ev.append("gave up reading B%d after %.0f s overhead"
+                                  % (b["id"], c.give_up_s))
+                return goal
+            self.escort_note = ""
+            goal = sc.clamp_inside(geom["inset"], g["mid"])
+            held, _why = ec.gate_holds(g, bu, fresh_s=ec.FRESH_S)
+            if (_dist(xy, goal) <= c.hover_radius_m and held
+                    and self._seen_now(bu, self.watch)):
+                self.confirmed = [g["red"], g["green"]]
+            return goal
+        else:
+            # No gate ahead. If anything ahead is unread, that is why -- go and
+            # read it. Only when the picture ahead is complete does "no gate
+            # ahead" mean the boat's next element really is the exit.
+            unread = ec.unread_ahead(bu, boat_xy, crs)
+            if unread:
+                self.watch, self.dwell_t = None, None
+                self.queue = [b["id"] for b in unread]
+                self.sub = "recheck"
+                self.escort_note = "nothing confirmed ahead of the boat"
+                ev.append("no gate ahead: reading %d buoys in front of the boat"
+                          % len(unread))
+                return sc.clamp_inside(geom["inset"],
+                                       [b for b in bu
+                                        if b["id"] == self.queue[0]][0]["xy"])
+            self.watch = None
+            self.escort_note = "watching the exit buoy"
+            goal = sc.clamp_inside(geom["inset"], el["xy"])
+            ex = min((b for b in bu if b["label"] == ec.EXIT),
+                     key=lambda b: _dist(b["xy"], el["xy"]), default=None)
+            if (ex is not None and _dist(xy, goal) <= c.hover_radius_m
+                    and self._seen_now(bu, [ex["id"]])):
+                self.confirmed = [ex["id"]]
+            return goal
+
     # ------------------------------------------------------------------- step
 
     def step(self, inp: Inputs) -> Decision:
         ev = []
+        # A confirmation is made fresh on every tick the escort runs, and on no
+        # other tick. Without this, the tick the pilot flips back into GUIDED
+        # could report one made before the pause, before anything re-checked.
+        self.confirmed = []
         self._track_arming(inp, ev)
         guided = inp.mode == "GUIDED"
         edge = (guided and self._last_mode is not None
@@ -567,6 +754,11 @@ class BuoySearch:
             "hover": "Confirming %s: %.0f s of %.0f · %s"
                      % (ids, max(overhead) if overhead else 0.0, c.give_up_s, tally),
             "return": "Back to the sweep line · %s" % tally,
+            "escort": self._escort_text(),
+            "recheck": ("Gate lost (%s): re-reading B%s, %d to go"
+                        % (self.escort_note or "a light changed", self.queue[0],
+                           len(self.queue) - 1) if self.queue else
+                        "Gate lost: %s" % (self.escort_note or "looking")),
             "holding": "Holding position: %s%s" % (
                 self.hold[3] if self.hold else "",
                 " (flip SC off and on to resume)" if self.hold and self.hold[2]
@@ -577,6 +769,17 @@ class BuoySearch:
             "complete": "Search complete: %s%s" % (
                 tally, " · autopilot in %s" % inp.mode if inp.mode else ""),
         }[phase]
+
+    def _escort_text(self):
+        """The pilot's line while escorting: confirmed, or still checking."""
+        if self.confirmed and self.watch:
+            return "Confirmed the boat's gate B%d/B%d: Crusader may go" % self.watch
+        if self.confirmed:
+            return "Confirmed the exit B%d: Crusader may go" % self.confirmed[0]
+        if self.watch:
+            return ("Checking the boat's gate B%d/B%d%s" % (
+                self.watch + (": " + self.escort_note if self.escort_note else "",)))
+        return "On station: %s" % (self.escort_note or "watching the passage")
 
     def _status(self, inp, geom, found, waiting, guided, target):
         ph = self.phase(inp, guided, waiting)
@@ -596,6 +799,13 @@ class BuoySearch:
             "pass_number": self.pass_index + 1 if self.wps else 0,
             "leg": min(self.wp + 1, len(self.wps)),
             "legs": len(self.wps),
+            "tier": self.cfg.tier,
+            "watching": list(self.watch) if self.watch else [],
+            # Only ever while escorting: a pilot who takes the aircraft back
+            # takes the confirmation with it, and the boat stops.
+            "confirmed": list(self.confirmed) if ph == "escort" else [],
+            "rechecking": list(self.queue),
+            "note": self.escort_note,
             "hover_buoys": sorted(self.cluster) if ph in ("divert", "hover") else [],
             "hover_s": max(overhead) if overhead and ph == "hover" else 0.0,
             "give_up_s": self.cfg.give_up_s,

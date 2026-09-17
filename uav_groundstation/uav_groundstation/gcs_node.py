@@ -59,9 +59,9 @@ from rcl_interfaces.msg import Log, Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 
 from std_srvs.srv import SetBool, Trigger
-from uav_msgs.msg import (Attitude, Battery, BuoyMap, CameraStatus, FcuParams,
-                          FcuStatus, Fence, FlightState, GlobalPos, GpsStatus,
-                          SearchStatus)
+from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, CameraStatus,
+                          FcuParams, FcuStatus, Fence, FlightState, GlobalPos,
+                          GpsStatus, SearchStatus)
 
 from uav_common import camera_frame
 from uav_common import config as uav_config
@@ -129,7 +129,22 @@ SERVICE_TIMEOUT_S = 5.0
 
 # search_node publishes its status twice a second.
 SEARCH_STATUS_TIMEOUT_S = 2.0
+# Crusader reports about once a second over the radio.
+BOAT_TIMEOUT_S = 5.0
+_BOAT_DOING = {0: "", 1: "holding", 2: "circling the entry buoy",
+               3: "transiting", 4: "circling the exit buoy", 5: "done"}
 BUOYS_TO_FIND_RANGE = (1, 50)
+# The page's two selectors. Only Task 1 exists; the tier decides what happens
+# once the field is mapped (go home, or stay with the boat).
+TASKS = ("task1",)
+TIERS = ("advanced", "disruptive")
+# What each tier means for the buoy mapper. Advanced freezes a state once
+# decided and weighs every sample; Disruptive must SEE a light change, so
+# nothing is frozen and only the last few seconds decide. The operator picks a
+# tier, never these: two settings that must agree with a third are two settings
+# somebody will forget.
+TIER_MAPPER = {"advanced": {"lock_state": True, "decide_window_s": 0.0},
+               "disruptive": {"lock_state": False, "decide_window_s": 5.0}}
 # Farther than this from the params fence, it is not this venue's fence and the
 # map is centred on the aircraft instead.
 FOREIGN_ORIGIN_M = 50_000.0
@@ -249,11 +264,18 @@ class GroundStation(Node):
         self.create_subscription(
             Fence, "/uav/fence", self._on_fence,
             _LATCHED)
+        # Crusader, heard over the radio by telemetry_bridge. Drawn on the map
+        # so the operator can see what the drone is escorting; blank while the
+        # boat is not being heard, never a remembered position.
+        self._boat = StreamCache(BOAT_TIMEOUT_S)
+        self.create_subscription(BoatState, "/uav/boat", self._on_boat, 10)
         self._search = StreamCache(SEARCH_STATUS_TIMEOUT_S)
         self.create_subscription(SearchStatus, "/uav/search/status",
                                  self._on_search, 10)
         self._search_params_cli = self.create_client(
             SetParameters, "/search_node/set_parameters")
+        self._mapper_params_cli = self.create_client(
+            SetParameters, "/buoy_mapper/set_parameters")
 
         # Battery and GPS, for the header and the pre-flight strip. Battery
         # samples also feed the time-to-failsafe estimator; see battery_core
@@ -344,6 +366,18 @@ class GroundStation(Node):
 
     def _on_search(self, msg: SearchStatus):
         self._search.set(msg, time.monotonic())
+
+    def _on_boat(self, msg: BoatState):
+        self._boat.set(msg, time.monotonic())
+
+    def _boat_state(self, now):
+        """Crusader in the map's local metres, or None while it is not heard."""
+        b = self._boat.get(now)
+        if b is None:
+            return None
+        x, y = geo.latlon_to_xy(b.latitude, b.longitude, self._origin)
+        return {"x": x, "y": y, "doing": _BOAT_DOING.get(int(b.activity), ""),
+                "target": int(b.target_buoy)}
 
     def _on_pose(self, msg: GlobalPos):
         # NaN heading is kept, not dropped: the readout says so and the operator
@@ -492,6 +526,7 @@ class GroundStation(Node):
                 "inside": tel.get("inside"),
                 "trail_gate": self.p["trail_min_move_m"],
                 "trail_max": int(self.p["trail_length"]),
+                "boat": self._boat_state(now),
                 "buoys": self._buoy_state(now),
                 "mapper": self._mapper_state(running),
                 "footprint": self._footprint(pose_e, att, tel),
@@ -544,6 +579,8 @@ class GroundStation(Node):
                   list(geo.latlon_to_xy(s.target_latitude, s.target_longitude, o)))
         return {
             "running": True, "phase": s.phase, "text": s.text,
+            "tier": s.tier, "note": s.note,
+            "watching": list(s.watching), "rechecking": list(s.rechecking),
             "waiting": list(s.waiting_for), "enabled": s.enabled,
             "count": s.buoys_to_find, "found": s.found, "flying": s.flying,
             "pass": s.pass_number, "leg": s.leg, "legs": s.legs,
@@ -907,6 +944,14 @@ class GroundStation(Node):
                 return {"ok": False, "message": "enabled must be true or false"}
             params.append(Parameter(name="enabled", value=ParameterValue(
                 type=ParameterType.PARAMETER_BOOL, bool_value=payload["enabled"])))
+        for name, allowed in (("task", TASKS), ("tier", TIERS)):
+            if name in payload:
+                if payload[name] not in allowed:
+                    return {"ok": False, "message": "%s must be one of %s"
+                            % (name, ", ".join(allowed))}
+                params.append(Parameter(name=name, value=ParameterValue(
+                    type=ParameterType.PARAMETER_STRING,
+                    string_value=payload[name])))
         if "buoys_to_find" in payload:
             n = payload["buoys_to_find"]
             lo, hi = BUOYS_TO_FIND_RANGE
@@ -917,7 +962,11 @@ class GroundStation(Node):
                 type=ParameterType.PARAMETER_INTEGER, integer_value=n)))
         if not params:
             return {"ok": False,
-                    "message": 'expected "enabled" and/or "buoys_to_find"'}
+                    "message": 'expected "enabled", "buoys_to_find", "task" '
+                               'and/or "tier"'}
+        tier_note = ""
+        if "tier" in payload:
+            tier_note = self._set_mapper_for_tier(payload["tier"])
         req = SetParameters.Request(parameters=params)
 
         def reply(res):
@@ -931,9 +980,47 @@ class GroundStation(Node):
                                             else "OFF"))
             if "buoys_to_find" in payload:
                 parts.append("find %d buoys" % payload["buoys_to_find"])
-            return True, ", ".join(parts)
+            if "tier" in payload:
+                parts.append("%s tier: %s" % (
+                    payload["tier"],
+                    "stay on station over the boat's gate once mapped"
+                    if payload["tier"] == "disruptive" else "RTL once mapped"))
+            if "task" in payload:
+                parts.append(payload["task"])
+            return True, ", ".join(parts) + tier_note
         return self._call_service(self._search_params_cli, req, "search_node",
                                   "set_parameters", reply)
+
+    def _set_mapper_for_tier(self, tier):
+        """Put buoy_mapper into the state the tier needs. -> a note for the page.
+
+        The tier is one choice on one page; the two settings it implies are set
+        here rather than left to the operator, because a Disruptive run with a
+        frozen state decides the passage once and never notices it change.
+        """
+        want = TIER_MAPPER[tier]
+        if not self._mapper_params_cli.service_is_ready():
+            return (" — buoy_mapper is not running, so its state rules were "
+                    "not set; start it and set the tier again")
+        req = SetParameters.Request(parameters=[
+            Parameter(name="lock_state", value=ParameterValue(
+                type=ParameterType.PARAMETER_BOOL, bool_value=want["lock_state"])),
+            Parameter(name="decide_window_s", value=ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE,
+                double_value=want["decide_window_s"]))])
+        out = self._call_service(self._mapper_params_cli, req, "buoy_mapper",
+                                 "set_parameters",
+                                 lambda res: (all(x.successful for x in res.results),
+                                              "; ".join(x.reason for x in res.results
+                                                        if not x.successful)))
+        if not out["ok"]:
+            self.get_logger().error("buoy_mapper refused the tier settings: %s"
+                                    % out["message"])
+            return " — buoy_mapper refused: %s" % out["message"]
+        return (" — buoy states %s"
+                % ("can change, decided from the last %.0f s"
+                   % want["decide_window_s"] if not want["lock_state"]
+                   else "freeze once decided"))
 
     def _call_service(self, cli, req, who, what, reply=None):
         """Call a service from an HTTP action; -> {ok, message}.
