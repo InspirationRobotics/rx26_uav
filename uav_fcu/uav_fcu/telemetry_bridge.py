@@ -126,9 +126,13 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
-from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, FcuParams,
-                          FcuStatus, Fence, FlightState, GlobalPos, GpsStatus,
-                          GuidedTarget, RadioFrame, RcChannels, SearchStatus)
+from uav_common.param_utils import stale_msgs_message
+try:
+    from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, FcuParams,
+                              FcuStatus, Fence, FlightState, GlobalPos, GpsStatus,
+                              GuidedTarget, RadioFrame, RcChannels, SearchStatus)
+except ImportError as e:          # see stale_msgs_message
+    raise ImportError(stale_msgs_message(e)) from e
 
 from uav_common import config as uav_config
 from uav_common import fcu_decode

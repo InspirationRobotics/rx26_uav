@@ -60,9 +60,13 @@ from rcl_interfaces.msg import Log, Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 
 from std_srvs.srv import SetBool, Trigger
-from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, CameraStatus,
-                          FcuParams, FcuStatus, Fence, FlightState, GlobalPos,
-                          GpsStatus, RadioFrame, SearchStatus)
+from uav_common.param_utils import stale_msgs_message
+try:
+    from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, CameraStatus,
+                              FcuParams, FcuStatus, Fence, FlightState, GlobalPos,
+                              GpsStatus, RadioFrame, SearchStatus)
+except ImportError as e:          # see stale_msgs_message
+    raise ImportError(stale_msgs_message(e)) from e
 
 from uav_common import camera_frame
 from uav_common import config as uav_config
