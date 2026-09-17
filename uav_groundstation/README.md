@@ -18,7 +18,7 @@ nodes in order to launch them — while **importing** none. It depends on `rclpy
 `uav_msgs` and `uav_common` and nothing else, which keeps it off the dependency
 graph of the code it starts.
 
-## `ground_station` — seven tabs
+## `ground_station` — eight tabs
 
 **On every tab:** a battery readout in the header (volts, margin above
 `BATT_LOW_VOLT`, and in flight the minutes to it), a **buoy search** tile while
@@ -39,6 +39,7 @@ attention. The rules live in `preflight_core.py`, the estimate in
 | Camera | the A8 mini's live view or the detector's annotated view, sized to fit the screen, and whether the session will be kept | keep the session, show detections, restart `camera_node` |
 | Camera + Map | the Camera and Map tabs side by side, each fitted to the screen height, for flying | the camera controls, zoom, follow, measure, lock beep |
 | Logs | every node's `/rosout`, filterable by level and node | clear |
+| Radio | every frame `telemetry_bridge` sends to, or hears from, another system over the RFD900 (boat packets, the buoy map, heartbeats, test frames); when each system was last heard; and an **estimate** of the boat link's packet rate against its expected 1 Hz | filter; **send a test frame** (TUNNEL `0x80FE`, acted on by nobody); clear |
 | System | CPU, temp, memory, disk, uptime, **workspace mount** | shut down / reboot the host (gated) |
 
 ### The two rules it holds
@@ -181,4 +182,5 @@ python3 -m uav_groundstation.ocs_link --host 192.168.8.107 --type uav
 | `ocs_link.py` framing | **`rx26_ocs/rx_bridge/framing.py` in the same commit** |
 | `gcs_page.py` | open every tab, and check the **stale** paths: stop the bridge and confirm the banner fires |
 | `system_info.py` | it must return `None`, never raise — one reader that throws blanks every tab |
+| `radio_core.py` | `tools/bench/bench_radio.py`, then open the Radio tab with `tools/scripts/fake_crusader.py` running |
 | `process_manager.py` | restart a systemd-started node and confirm `pgrep -fc` returns exactly 1 |

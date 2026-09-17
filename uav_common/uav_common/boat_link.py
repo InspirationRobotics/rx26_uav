@@ -27,6 +27,9 @@ WHAT CROSSES THE LINK, AND NOTHING ELSE:
   boat -> drone   where the boat is and ONE BYTE for what it is doing, so the
                   aircraft can station over the gate the boat needs NEXT and
                   knows which buoys are already behind it.
+  test            a text line from the ground station's Radio tab, so an
+                  operator can put one known frame on the air and watch for it.
+                  Neither vehicle acts on it.
 
 IDS ARE THE CONTRACT. A buoy keeps its id for the life of the map, so "B4 went
 dark" is unambiguous on the far end. Positions are 1e-7 degrees, the same
@@ -37,6 +40,7 @@ import struct
 #: TUNNEL payload types. Above 32767 is the vendor-specific range.
 PAYLOAD_BOAT = 32768         # boat -> drone
 PAYLOAD_BUOYS = 32769        # drone -> boat
+PAYLOAD_TEST = 33022         # 0x80FE, anyone -> anyone: a text line nobody acts on
 MAX_PAYLOAD = 128
 
 #: Light states, by code. Index IS the wire value; append only, never reorder.
@@ -112,3 +116,43 @@ def unpack_buoys(payload):
         out.append({"id": bid, "lat": lat / 1e7, "lon": lon / 1e7,
                     "label": STATES[state] if state < len(STATES) else "UNKNOWN"})
     return {"buoys": out, "confirmed": confirmed}
+
+
+def pack_test(text):
+    """A PAYLOAD_TEST line, cut to one TUNNEL. ASCII, so it reads the same in
+    QGC's MAVLink Inspector as on the Radio tab."""
+    return str(text).encode("ascii", "replace")[:MAX_PAYLOAD]
+
+
+def describe(payload_type, payload):
+    """(name, one line) for a TUNNEL payload, for the Radio tab.
+
+    NEVER RAISES. A packet that does not decode is still something that crossed
+    the link, and the Radio tab is exactly where it needs to show up -- a
+    describer that threw would hide the one frame worth looking at.
+    """
+    raw = bytes(payload)
+    name = "TUNNEL_0x%04X" % (int(payload_type) & 0xFFFF)
+    try:
+        if payload_type == PAYLOAD_BOAT:
+            b = unpack_boat(raw)
+            doing = (ACTIVITY[b["activity"]] if b["activity"] < len(ACTIVITY)
+                     else "activity %d" % b["activity"])
+            target = ", target B%d" % b["target"] if b["target"] else ""
+            return "BOAT", "%.7f %.7f, %s%s" % (b["lat"], b["lon"], doing, target)
+        if payload_type == PAYLOAD_BUOYS:
+            m = unpack_buoys(raw)
+            ids = m["confirmed"]
+            if len(ids) == 2:
+                confirmed = "gate red B%d / green B%d" % (ids[0], ids[1])
+            elif ids:
+                confirmed = "exit B%d" % ids[0]
+            else:
+                confirmed = "nothing"
+            return "BUOY_MAP", "%d buoys, confirmed %s" % (len(m["buoys"]),
+                                                           confirmed)
+        if payload_type == PAYLOAD_TEST:
+            return "TEST", raw.decode("ascii", "replace")
+    except Exception as e:                     # noqa: BLE001 -- see docstring
+        return name, "does not decode (%d bytes): %s" % (len(raw), e)
+    return name, "%d bytes, not a format boat_link knows" % len(raw)

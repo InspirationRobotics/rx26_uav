@@ -15,6 +15,7 @@ Thirteen messages. Depends on nothing but `std_msgs`, so any container builds it
 | `CameraStatus` | `camera_node` | stream, recording, gimbal pitch/yaw, and the main-stream encoding read from the camera |
 | `BuoyDetection`, `BuoyDetections` | `detector_node` | one frame's boxes, with that frame's pose and gimbal angles |
 | `Buoy`, `BuoyMap` | `buoy_mapper` | the whole Task 1 map, every time |
+| `RadioFrame` | `telemetry_bridge` | one frame sent to or heard from another system over the radio, for the Radio tab. A record: nothing acts on it |
 
 ## Why separate topics and not one
 

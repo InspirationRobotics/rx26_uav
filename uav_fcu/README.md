@@ -81,6 +81,13 @@ is UDP 14555 and a second one, SERIAL1 on 14556, is free for the stand-in boat:
 
 and at the park, the same tool on a laptop with `--port COM5`.
 
+**The radio, as a record.** Every frame that crosses it — the map out, the
+boat's packets in, and any other system's frames in — is also published on
+`/uav/radio/traffic` (`uav_msgs/RadioFrame`) for the ground station's Radio tab,
+after the fact; nothing acts on that topic. `/uav/radio/send_test` puts one
+text TUNNEL (`boat_link.PAYLOAD_TEST`, `0x80FE`) on the air, addressed to the
+boat, that neither end acts on.
+
 ## There is no disarm path, deliberately
 
 The ASV's version carries a force-disarm (`MAV_CMD_COMPONENT_ARM_DISARM` with the

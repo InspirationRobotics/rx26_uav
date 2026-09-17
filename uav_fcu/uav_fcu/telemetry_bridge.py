@@ -52,6 +52,10 @@ MAVLink connection and there may only ever be one:
    now.
    The UAV still sends the boat FACTS AND NOTHING ELSE: never a course, a
    waypoint or an instruction. Crusader plans its own passage from the buoys.
+   Every frame that crosses the radio -- the map out, the boat's packets and any
+   other system's frames in -- is also published on /uav/radio/traffic, after
+   the fact, for the ground station's Radio tab. /uav/radio/send_test puts one
+   text frame (boat_link.PAYLOAD_TEST) on the air that neither end acts on.
 
 6. TX (guided targets, for the buoy search): /uav/guided_target becomes a
    SET_POSITION_TARGET_GLOBAL_INT, and /uav/rtl_from_guided a mode change to
@@ -122,7 +126,7 @@ from std_srvs.srv import Trigger
 
 from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, FcuParams,
                           FcuStatus, Fence, FlightState, GlobalPos, GpsStatus,
-                          GuidedTarget, RcChannels, SearchStatus)
+                          GuidedTarget, RadioFrame, RcChannels, SearchStatus)
 
 from uav_common import config as uav_config
 from uav_common import fcu_decode
@@ -264,6 +268,11 @@ class TelemetryBridge(Node):
         self.drop_pub = self.create_publisher(Bool, "/uav/autonomy_drop", latched_qos)
         self.fence_pub = self.create_publisher(Fence, "/uav/fence", latched_qos)
         self.boat_pub = self.create_publisher(BoatState, "/uav/boat", 10)
+        # Every frame that crosses the radio, for the ground station's Radio tab.
+        # A record published after the fact -- see RadioFrame.msg.
+        self.radio_pub = self.create_publisher(RadioFrame, "/uav/radio/traffic",
+                                               50)
+        self._radio_test_n = 0
         # The buoy map goes out over the radio from HERE, not from the mapper:
         # this node owns the one link, and what leaves the aircraft should leave
         # through the thing that checks what leaves the aircraft.
@@ -284,6 +293,7 @@ class TelemetryBridge(Node):
         self.create_service(Trigger, "/uav/autonomy_drop_reset", self._reset_cb)
         self.create_service(Trigger, "/uav/fence_upload", self._fence_cb)
         self.create_service(Trigger, "/uav/rtl_from_guided", self._rtl_cb)
+        self.create_service(Trigger, "/uav/radio/send_test", self._radio_test_cb)
 
         # Each stream is republished ONLY while it is fresh. See the header.
         self._lock = threading.Lock()
@@ -393,6 +403,7 @@ class TelemetryBridge(Node):
             # carries the age it actually has
             stamp = self.get_clock().now().to_msg()
             att_now = None
+            radio = self._radio_rx(msg, mtype, stamp)
             with self._lock:
                 if mtype == "GLOBAL_POSITION_INT":
                     hdg = msg.hdg / 100.0 if msg.hdg != 65535 else float("nan")
@@ -458,6 +469,8 @@ class TelemetryBridge(Node):
                         self._params_dirty = True
             # Outside the lock: a publish must never be held up by, or hold up,
             # the RC path.
+            if radio is not None:
+                self.radio_pub.publish(radio)
             if att_now is not None:
                 m = Attitude()
                 m.header.stamp = stamp
@@ -595,8 +608,7 @@ class TelemetryBridge(Node):
         self._boat_t = t
         confirmed = self._confirmed()
         payload = boat_link.pack_buoys(self._buoys, confirmed)
-        self.conn.mav.tunnel_send(sysid, 0, boat_link.PAYLOAD_BUOYS,
-                                  len(payload), boat_link.pad(payload))
+        self._send_tunnel(sysid, boat_link.PAYLOAD_BUOYS, payload)
         if len(self._buoys) > boat_link.MAX_BUOYS:
             # Task 1 has ten buoys, so this means a false detection is on the
             # map — and the boat is being told about the first twelve only.
@@ -611,6 +623,94 @@ class TelemetryBridge(Node):
             % (sysid, len(self._buoys), len(payload),
                "/".join("B%d" % i for i in confirmed) or "nothing"),
             throttle_duration_sec=60.0)
+
+    # ---------- the radio, as a record (for the Radio tab) ----------
+
+    def _send_tunnel(self, sysid, payload_type, payload):
+        """Send one TUNNEL to `sysid`, and record it on /uav/radio/traffic.
+
+        tunnel_encode + send is exactly what tunnel_send does in one call; it is
+        split here only so the packed frame is still in hand to measure.
+        """
+        m = self.conn.mav.tunnel_encode(sysid, 0, payload_type, len(payload),
+                                        boat_link.pad(payload))
+        self.conn.mav.send(m)
+        name, summary = boat_link.describe(payload_type, payload)
+        self.radio_pub.publish(self._radio_frame(
+            RadioFrame.DIR_TX, self.conn.source_system,
+            self.conn.source_component, sysid, name, payload_type, summary,
+            len(m.get_msgbuf()), self.get_clock().now().to_msg()))
+
+    def _radio_rx(self, msg, mtype, stamp):
+        """A RadioFrame for a frame another system put on the link, or None.
+
+        Another system is anything that is neither the autopilot this node talks
+        to nor this node. MAVProxy only rebroadcasts what the autopilot hands it,
+        so a frame from any other system id reached the autopilot through one of
+        its telemetry ports -- the RFD900. Ekko's own telemetry is not radio
+        traffic and is never recorded.
+
+        Built before self._lock is taken and published after it is released,
+        like attitude: a record of the link must never hold up the RC path.
+        """
+        src = msg.get_srcSystem()
+        if src in (self.conn.target_system, self.conn.source_system):
+            return None
+        name, ptype, summary = mtype, 0, ""
+        if mtype == "TUNNEL":
+            ptype = msg.payload_type
+            name, summary = boat_link.describe(ptype, boat_link.body(msg))
+        elif mtype == "HEARTBEAT":
+            summary = self._heartbeat_type(msg.type)
+        return self._radio_frame(
+            RadioFrame.DIR_RX, src, msg.get_srcComponent(),
+            getattr(msg, "target_system", 0), name, ptype, summary,
+            len(msg.get_msgbuf()), stamp)
+
+    def _heartbeat_type(self, mav_type):
+        """SURFACE_BOAT, GCS, ... for a HEARTBEAT's type field, or its number."""
+        try:
+            return self._mavutil.mavlink.enums["MAV_TYPE"][mav_type].name[
+                len("MAV_TYPE_"):]
+        except (KeyError, AttributeError):
+            return "type %d" % mav_type
+
+    @staticmethod
+    def _radio_frame(direction, src, comp, dst, name, payload_type, summary,
+                     nbytes, stamp):
+        m = RadioFrame()
+        m.header.stamp = stamp
+        m.direction = direction
+        m.src_system = int(src) & 0xFF
+        m.src_component = int(comp) & 0xFF
+        m.dst_system = int(dst) & 0xFF
+        m.msg_name = str(name)
+        m.payload_type = int(payload_type) & 0xFFFF
+        m.summary = str(summary)
+        m.frame_bytes = min(int(nbytes), 0xFFFF)
+        return m
+
+    def _radio_test_cb(self, request, response):
+        """Put one PAYLOAD_TEST frame on the radio, addressed to the boat.
+
+        For the Radio tab's button. A text line neither end acts on: the point is
+        a known frame an operator can watch arrive, in QGC's MAVLink Inspector or
+        with check_mesh.py on a laptop radio.
+        """
+        sysid = int(self.p["boat_sysid"])
+        if not sysid:
+            response.success = False
+            response.message = ("refused: boat_sysid is 0, so there is no boat "
+                                "to address")
+            self.get_logger().warn(response.message)
+            return response
+        self._radio_test_n += 1
+        text = "test %d from ekko" % self._radio_test_n
+        self._send_tunnel(sysid, boat_link.PAYLOAD_TEST, boat_link.pack_test(text))
+        response.success = True
+        response.message = "sent %r to system %d" % (text, sysid)
+        self.get_logger().info(response.message)
+        return response
 
     def _publish_drop_state(self):
         self.drop_pub.publish(Bool(data=not self.latch.allowed))

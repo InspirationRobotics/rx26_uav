@@ -31,6 +31,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SearchStatus.msg"
   # Crusader's position and what it is doing (Task 1 disruptive).
   "msg/BoatState.msg"
+  "msg/RadioFrame.msg"
   DEPENDENCIES std_msgs
 )
 

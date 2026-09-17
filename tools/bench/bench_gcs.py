@@ -120,7 +120,9 @@ def main():
                          ("lock beep", b"checkLocks"),
                          ("search controls on the map", b'id="searchbar"'),
                          ("search path drawn", b"drawSearch"),
-                         ("search tile in the header", b'id="searchtile"')):
+                         ("search tile in the header", b'id="searchtile"'),
+                         ("radio tab", b"['radio','Radio']"),
+                         ("radio send-test button", b"/radio/send_test")):
         r.append(check(name, needle in page))
     # The page's search controls post SETTINGS and nothing else: on/off, the
     # count, the task and the tier. Anything that could name a position, a mode

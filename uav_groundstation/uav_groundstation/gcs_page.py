@@ -1,6 +1,6 @@
 """gcs_page — the operator's page, as one string.
 
-Seven tabs: Nodes, Telemetry, Camera + Map, Map, Camera, Logs, System. No build
+Eight tabs: Nodes, Telemetry, Camera + Map, Map, Camera, Logs, Radio, System. No build
 step, no framework, no
 CDN — the Jetson serves this to a laptop over field WiFi, and a page that needs
 to fetch anything else is a page that does not load at a flight line.
@@ -70,7 +70,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 body{margin:0;background:var(--bg);color:var(--fg);
      font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
      font-variant-numeric:tabular-nums}
-code,.mono,#logs{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code,.mono,#logs,#radiolog{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 header{position:sticky;top:0;z-index:5;background:var(--panel);
        border-bottom:1px solid var(--line);box-shadow:0 2px 8px rgba(0,0,0,.12)}
 .topbar{display:flex;align-items:center;gap:18px;padding:6px 16px;flex-wrap:wrap}
@@ -220,6 +220,15 @@ main.split details.about,main.split #mapexp,main.split .wide-only{display:none}
 .lg .t{color:var(--dim);flex:none} .lg .n{color:var(--accent);flex:none}
 .lg.WARN .m{color:var(--warn)} .lg.ERROR .m,.lg.FATAL .m{color:var(--bad)}
 .lg.DEBUG{opacity:.62}
+#radiolog{background:var(--sunk);border:1px solid var(--line);border-radius:8px;
+          padding:2px 8px 8px;height:min(52vh,520px);overflow:auto;font-size:12.5px}
+#radiolog table{border-collapse:collapse;width:100%}
+#radiolog th{position:sticky;top:0;background:var(--sunk);text-align:left;
+             color:var(--dim);font-weight:600;padding:6px 12px 4px 0}
+#radiolog td{padding:2px 12px 2px 0;vertical-align:top;white-space:nowrap}
+#radiolog td.sum{white-space:normal;word-break:break-word;width:100%}
+.dir{font-weight:700;font-size:11px;letter-spacing:.5px}
+.dir.TX{color:var(--accent)} .dir.RX{color:var(--ok)}
 .bar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
 select,input{font:inherit;font-size:14px;background:var(--btn);color:var(--fg);
              border:1px solid var(--line);border-radius:6px;padding:5px 8px}
@@ -355,6 +364,38 @@ details.about p{margin:6px 0 0;max-width:920px}
     written straight to stdout, and anything printed before a node finished
     constructing, which is exactly when a bad parameter kills one.</p></details>
   </section>
+  <section id="s-radio">
+    <h3 class="sec">On the radio</h3>
+    <div class="cards" id="radiosys"></div>
+    <h3 class="sec">Boat link (estimate)</h3>
+    <div class="cards" id="radioboat"></div>
+    <h3 class="sec">Frames</h3>
+    <div class="bar">
+      <select id="rdir" onchange="repaintRadio()"><option value="">sent and heard</option>
+        <option value="TX">sent</option><option value="RX">heard</option></select>
+      <select id="rwho" onchange="repaintRadio()"><option value="">all systems</option></select>
+      <select id="rname" onchange="repaintRadio()"><option value="">all messages</option></select>
+      <label class="note"><input type="checkbox" id="rhb" onchange="repaintRadio()"> show heartbeats</label>
+      <button onclick="post('/radio/send_test')">Send test message</button>
+      <button onclick="clearRadio()">clear</button>
+      <span class="note" id="radioinfo"></span>
+    </div>
+    <div id="radiolog"></div>
+    <details class="about"><summary>About this tab</summary>
+    <p>Every frame <code>telemetry_bridge</code> sends to another system, and every
+    frame another system puts on the radio. Ekko's own autopilot telemetry is not
+    shown: a frame from any other system id can only have reached the autopilot
+    through its telemetry port, which is where the RFD900 is.</p>
+    <p>What this tab cannot see: frames the Cube does not pass to the Jetson (a
+    MAVLink message whose id the autopilot does not know is dropped there, so only
+    TUNNEL and standard messages arrive), and the radio's signal strength.</p>
+    <p><b>The boat link numbers are an estimate.</b> Boat packets carry no sequence
+    number, so a lost one cannot be counted; the tab compares how many arrived per
+    second with the 1 Hz the boat is expected to send. <b>Send test message</b>
+    puts one text TUNNEL (type <code>0x80FE</code>) on the air, addressed to the
+    boat, that neither vehicle acts on. Watch for it in QGC's MAVLink Inspector, or
+    with <code>check_mesh.py</code> on a laptop radio.</p></details>
+  </section>
   <section id="s-cam"><div id="camrec"></div><div id="cam"></div>
     <details class="about"><summary>About this tab</summary>
     <p>The video is served by <code>camera_node</code> on its own port, not
@@ -368,8 +409,9 @@ details.about p{margin:6px 0 0;max-width:920px}
 <div id="toast"></div>
 <script>
 var POLL=__POLL_MS__, S={}, tab='nodes', logs=[], logSeq=0, dropped=0;
-var TABS=[['nodes','Nodes'],['tel','Telemetry'],['fly','Camera + Map'],['map','Map'],['cam','Camera'],['logs','Logs'],['sys','System']];
-var SECTIONS=['nodes','tel','map','cam','logs','sys'];
+var radio=[], radioSeq=0, radioStats=null;
+var TABS=[['nodes','Nodes'],['tel','Telemetry'],['fly','Camera + Map'],['map','Map'],['cam','Camera'],['logs','Logs'],['radio','Radio'],['sys','System']];
+var SECTIONS=['nodes','tel','map','cam','logs','radio','sys'];
 /* "fly" has no section of its own: it shows the camera and map sections side by
    side, which is what two browser windows were doing at the park. */
 function mapVisible(){return tab==='map'||tab==='fly'}
@@ -398,7 +440,7 @@ function show(t){tab=t;
     el('s-'+k).className=(k===t||(t==='fly'&&(k==='map'||k==='cam')))?'on':''});
   try{localStorage.setItem('rx26-tab',t)}catch(e){}
   layoutVars();
-  if(mapVisible()){resize();draw()} if(t==='logs')repaintLogs(); render()}
+  if(mapVisible()){resize();draw()} if(t==='logs')repaintLogs(); if(t==='radio')pollRadio(); render()}
 /* Heights the fitted views subtract. Measured, not guessed: the header changes
    height with the checklist, and toolbars wrap on narrow windows. A change
    re-sizes the map canvas, whose pixel size is set from its CSS box. */
@@ -1016,6 +1058,75 @@ function repaintLogs(){
 }
 function clearLogs(){logs=[];logSeq=0;dropped=0;post('/logs/clear').then(repaintLogs)}
 
+/* ---- radio ----
+   Asked for only while the tab is open. The per-system counts and the boat
+   estimate are kept by the ground station, so nothing is missed while it is
+   closed; the page asks only for frames it has not seen. */
+function pollRadio(){
+  if(tab!=='radio')return;
+  post('/radio',{since:radioSeq,limit:400},true).then(function(j){
+    if(!j||!j.rows)return;
+    radioStats=j;
+    j.rows.forEach(function(r){radio.push(r);radioSeq=Math.max(radioSeq,r.seq)});
+    if(radio.length>3000)radio.splice(0,radio.length-3000);
+    addOptions('rwho',j.rows.map(function(r){return r.who}));
+    addOptions('rname',j.rows.map(function(r){return r.name}));
+    renderRadio();
+  })
+}
+function addOptions(id,vals){
+  var sel=el(id),have={};
+  Array.prototype.forEach.call(sel.options,function(o){have[o.value]=1});
+  vals.forEach(function(v){if(v&&!have[v]){have[v]=1;
+    var o=document.createElement('option');o.value=o.textContent=v;sel.appendChild(o)}})}
+function ago(s){return s==null?'never':(s<1.5?'just now':fmt(s,0)+' s ago')}
+function renderRadio(){
+  var j=radioStats; if(!j)return;
+  var sys=j.systems||[];
+  paint('radiosys',sys.length?sys.map(function(v){
+    var cls=v.heard_s==null?'':(v.heard_s<5?'ok':(v.heard_s<30?'warn':'bad'));
+    return '<div class="card '+cls+'"><div class="k">'+esc(v.name)+' · system '+v.sys+'</div>'
+      +'<div class="v">'+(v.heard_s==null?'not heard':'heard '+ago(v.heard_s))+'</div>'
+      +'<div class="note">'+v.rx+' heard · '+v.tx+' sent'
+      +(v.last?' · last '+esc(v.last):'')+'</div></div>'
+  }).join(''):'<p class="note">Nothing sent or heard on the radio yet.</p>');
+  var b=j.boat||{};
+  if(b.sys==null)paint('radioboat','<p class="note">'+esc(b.why||'')+'</p>');
+  else if(b.rate_hz==null)paint('radioboat','<p class="note">No packets from '
+    +esc(b.name)+' (system '+b.sys+') yet.</p>');
+  else{
+    var pc=b.pct,cls=pc>=90?'ok':(pc>=60?'warn':'bad');
+    paint('radioboat',
+      card('Boat packets per second',fmt(b.rate_hz,2)+' <span class="note">of '
+        +fmt(b.expected_hz,1)+' expected</span>',cls)
+      +card('Estimated delivery',fmt(pc,0)+'%',cls)
+      +card('Longest silence, last '+fmt(b.window_s,0)+' s',
+        fmt(b.longest_gap_s,1)+' s',b.longest_gap_s>3?'warn':'')
+      +card('Last boat packet',ago(b.heard_s)));
+  }
+  repaintRadio();
+}
+function repaintRadio(){
+  var box=el('radiolog'); if(!box)return;
+  var d=el('rdir').value,w=el('rwho').value,n=el('rname').value,hb=el('rhb').checked;
+  var near=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
+  var rows=radio.filter(function(r){
+    return (!d||r.dir===d)&&(!w||r.who===w)&&(!n||r.name===n)&&(hb||r.name!=='HEARTBEAT')})
+    .slice(-800).map(function(r){
+      return '<tr><td>'+esc(r.t)+'</td><td class="dir '+r.dir+'">'
+        +(r.dir==='TX'?'SENT →':'HEARD ←')+'</td>'
+        +'<td>'+esc(r.who)+' <span class="note">'+r.src+':'+r.comp+' → '+r.dst+'</span></td>'
+        +'<td>'+esc(r.name)+'</td><td class="sum">'+esc(r.summary)+'</td><td>'+r.bytes+' B</td></tr>'});
+  box.innerHTML='<table><thead><tr><th>time</th><th></th><th>system</th><th>message</th>'
+    +'<th>contents</th><th>size</th></tr></thead><tbody>'
+    +(rows.join('')||'<tr><td colspan="6" class="note">Nothing to show.</td></tr>')
+    +'</tbody></table>';
+  if(near)box.scrollTop=box.scrollHeight;
+  el('radioinfo').textContent=radio.length+' held'
+    +(radioStats&&radioStats.dropped?'  ·  '+radioStats.dropped+' dropped':'');
+}
+function clearRadio(){radio=[];post('/radio/clear').then(function(){repaintRadio();pollRadio()})}
+
 /* ---- system ---- */
 /* #power carries the only text input on the page. It goes through paint() for
    the same reason the buttons do -- see the note there. The rebuild that DOES
@@ -1200,7 +1311,7 @@ setToggle('soundb',soundOn);
 var startTab='nodes';
 try{var t0=localStorage.getItem('rx26-tab');
   if(TABS.some(function(p){return p[0]===t0}))startTab=t0}catch(e){}
-show(startTab);poll();setInterval(poll,POLL);pollLogs();setInterval(pollLogs,1000);
+show(startTab);poll();setInterval(poll,POLL);pollLogs();setInterval(pollLogs,1000);setInterval(pollRadio,1000);
 </script></body></html>
 """
 
