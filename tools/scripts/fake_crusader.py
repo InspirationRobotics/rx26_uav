@@ -53,8 +53,9 @@ def main():
     ap.add_argument("--port", help="serial port of the RFD900 (COM5, /dev/ttyUSB0)")
     ap.add_argument("--baud", type=int, default=57600)
     ap.add_argument("--udp", help="MAVLink endpoint instead of a serial port")
-    ap.add_argument("--sysid", type=int, default=2,
-                    help="this boat's MAVLink system id (must differ from Ekko's)")
+    ap.add_argument("--sysid", type=int, default=42,
+                    help="this boat's MAVLink system id (must differ from Ekko's; "
+                         "42 is what the real Crusader's link node uses)")
     ap.add_argument("--target", type=int, default=0,
                     help="who to address: 0 broadcasts to every channel, which is "
                          "what reaches the Jetson through the autopilot")

@@ -73,11 +73,12 @@ talks to MAVProxy on 14541, MAVProxy to the USB, and the autopilot routes a
 message addressed to the boat's sysid out the telemetry port the radio is on —
 which is why the boat must send heartbeats, or the autopilot has no route to it.
 We are **sysid 200** (`mav_source_system`) and address the boat at `boat_sysid`
-(2). Verified end to end in SITL on 16 Sep, using SITL's own SERIAL2 as the
+(42: Crusader's `rxl_link_node`, not its autopilot, which is not on the radio).
+Verified end to end in SITL on 16 Sep, using SITL's own SERIAL2 as the
 radio port — the same routing the RFD900ux relies on. In `sim_search` that port
 is UDP 14555 and a second one, SERIAL1 on 14556, is free for the stand-in boat:
 
-    python3 tools/scripts/fake_crusader.py --udp udpin:0.0.0.0:14556 --sysid 2
+    python3 tools/scripts/fake_crusader.py --udp udpin:0.0.0.0:14556 --sysid 42
 
 and at the park, the same tool on a laptop with `--port COM5`.
 
