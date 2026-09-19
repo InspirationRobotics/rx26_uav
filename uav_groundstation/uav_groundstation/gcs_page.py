@@ -1294,11 +1294,17 @@ function renderBuoys(){
 }
 
 /* ---- logs ---- */
+/* Same guard as pollRadio, for the same race: an overlapping poll repeated
+   log lines. */
+var logBusy=false;
 function pollLogs(){
+  if(logBusy)return;
+  logBusy=true;
   post('/logs',{since:logSeq,limit:400},true).then(function(j){
+    logBusy=false;
     if(!j||!j.lines)return;
     if(j.dropped)dropped=j.dropped;
-    j.lines.forEach(function(l){logs.push(l);logSeq=Math.max(logSeq,l.seq)});
+    j.lines.forEach(function(l){if(l.seq>logSeq){logs.push(l);logSeq=l.seq}});
     if(logs.length>4000)logs.splice(0,logs.length-4000);
     var sel=el('lnode'),have={};
     Array.prototype.forEach.call(sel.options,function(o){have[o.value]=1});
@@ -1324,12 +1330,21 @@ function clearLogs(){logs=[];logSeq=0;dropped=0;post('/logs/clear').then(repaint
    Asked for only while the tab is open. The per-system counts and the boat
    estimate are kept by the ground station, so nothing is missed while it is
    closed; the page asks only for frames it has not seen. */
+/* ONE REQUEST AT A TIME, AND NEVER A ROW TWICE. This runs every second AND on
+   every switch to the tab; a reply slower than a second let two or three
+   requests carry the same `since`, and each appended the same rows -- every
+   frame from the boat showed up three times while the ground station's own
+   count said once. The busy flag stops the pile-up; the seq check makes an
+   overlap harmless if one still happens. */
+var radioBusy=false;
 function pollRadio(){
-  if(tab!=='radio')return;
+  if(tab!=='radio'||radioBusy)return;
+  radioBusy=true;
   post('/radio',{since:radioSeq,limit:400},true).then(function(j){
+    radioBusy=false;
     if(!j||!j.rows)return;
     radioStats=j;
-    j.rows.forEach(function(r){radio.push(r);radioSeq=Math.max(radioSeq,r.seq)});
+    j.rows.forEach(function(r){if(r.seq>radioSeq){radio.push(r);radioSeq=r.seq}});
     if(radio.length>3000)radio.splice(0,radio.length-3000);
     addOptions('rwho',j.rows.map(function(r){return r.who}));
     addOptions('rname',j.rows.map(function(r){return r.name}));

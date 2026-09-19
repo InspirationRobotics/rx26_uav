@@ -114,8 +114,13 @@ telemetry_bridge:
                                            #      stops being republished
     fence_timeout_s: 5.0                   # [RO] per-exchange timeout in the
                                            #      fence mission dialog
-    boat_sysid: 2                          # [RO] Crusader's MAVLink system id on
-                                           #      the RFD900 link. The buoy map is
+    boat_sysid: 42                         # [RO] Crusader's MAVLink system id on
+                                           #      the RFD900 link: its rxl_link_node
+                                           #      (rx26_asv source_system), NOT its
+                                           #      autopilot (2), which is not on
+                                           #      the radio. Addressed to 2, the
+                                           #      Cube had no route and the map
+                                           #      never left Ekko. The buoy map is
                                            #      addressed to it and its reports
                                            #      are read from it. MUST DIFFER
                                            #      FROM EKKO'S: two vehicles with

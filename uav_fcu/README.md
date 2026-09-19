@@ -75,8 +75,11 @@ silence from `search_node` sends nothing confirmed. Nothing else goes to the boa
 
 Ekko addresses these to **everyone** (target 0), so the autopilot forwards them
 out every link and the ground laptop on the mesh hears them even before a boat
-has said hello. Boat reports are read only from `boat_sysid` (2); `boat_sysid 0`
-turns the link off. We are **sysid 200** (`mav_source_system`). The path is
+has said hello. Boat reports are read only from `boat_sysid` — **42**, Crusader's
+`rxl_link_node`, NOT its autopilot (2), which never transmits on the radio;
+`boat_sysid 0` turns the link off. A BOAT packet from any other system is
+ignored and says so in the log, because the alternative is a link that looks
+dead when it is only mis-addressed. We are **sysid 200** (`mav_source_system`). The path is
 **through the autopilot** — this node talks to MAVProxy on 14541, MAVProxy to the
 USB, the autopilot to the telemetry port the radio is on — so the boat must send
 heartbeats, or nothing it sends back is routed to us.

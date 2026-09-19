@@ -23,8 +23,8 @@ import time
 
 #: MAVLink system ids on the mesh (Fleet ICD), plus telemetry_bridge's own id,
 #: which is the id Ekko's radio frames go out under.
-NAMES = {1: "Ekko", 2: "Crusader", 3: "Graey", 200: "Ekko",
-         255: "Ground station"}
+NAMES = {1: "Ekko", 2: "Crusader", 3: "Graey", 42: "Crusader (link node)",
+         200: "Ekko (bridge)", 255: "Ground station"}
 
 #: Boat packets per second the boat is expected to send.
 BOAT_EXPECTED_HZ = 1.0
@@ -51,7 +51,7 @@ class RadioLog:
     must not become the reason the Jetson runs out of memory.
     """
 
-    def __init__(self, capacity=1000, boat_sysid=2, clock=time.monotonic,
+    def __init__(self, capacity=1000, boat_sysid=42, clock=time.monotonic,
                  wall=time.time):
         self.capacity = capacity
         self.boat_sysid = boat_sysid

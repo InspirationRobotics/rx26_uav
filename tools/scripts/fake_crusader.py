@@ -221,8 +221,9 @@ def main():
     ap.add_argument("--port", help="the RFD900ux's serial port (COM5, /dev/ttyUSB0)")
     ap.add_argument("--baud", type=int, default=57600)
     ap.add_argument("--udp", help="a MAVLink endpoint instead of a serial port")
-    ap.add_argument("--sysid", type=int, default=2,
-                    help="this boat's system id: Ekko reads boat reports from 2")
+    ap.add_argument("--sysid", type=int, default=42,
+                    help="this boat's system id: Ekko reads boat reports from "
+                         "42, the real Crusader's rxl_link_node")
     ap.add_argument("--target", type=int, default=0,
                     help="who reports are addressed to: 0 = everyone on the mesh")
     ap.add_argument("--at", default="", help="starting LAT,LON")
