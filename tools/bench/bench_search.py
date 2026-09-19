@@ -127,6 +127,17 @@ def case_geometry():
                    sc.contains(ins, c) and abs(c[0] - 27.95) < 0.01, c))
     r.append(check("heading of lines along east is 090",
                    abs(sc.heading_deg(0.0) - 90.0) < 1e-9))
+    # Nose-first (19 Sep): face the goal while travelling, freeze within
+    # FACE_HOLD_M of it -- over a buoy or a gate it must not turn.
+    s = core.BuoySearch()
+    r.append(check("no heading yet while already at the goal: autopilot keeps its own",
+                   math.isnan(s._face((0.0, 0.0), (1.0, 0.0)))))
+    r.append(check("travelling east: nose east",
+                   abs(s._face((0.0, 0.0), (20.0, 0.0)) - 90.0) < 1e-9))
+    r.append(check("travelling south-west: nose 225",
+                   abs(s._face((10.0, 10.0), (0.0, 0.0)) - 225.0) < 1e-9))
+    r.append(check("within 3 m of the goal: heading frozen, even beside it",
+                   abs(s._face((0.0, 0.0), (0.0, 2.0)) - 225.0) < 1e-9))
     return r
 
 

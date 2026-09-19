@@ -62,6 +62,13 @@ LEG_SLACK_S = 15.0
 CLIMB_TIMEOUT_S = 45.0
 #: How often RTL is asked for again while the autopilot still says GUIDED.
 RTL_RETRY_S = 3.0
+#: THE NOSE POINTS WHERE THE AIRCRAFT IS GOING (Chris, 19 Sep; it used to hold
+#: the sweep lines' heading for a whole pass and fly the return legs backwards).
+#: Within this of the goal the heading is FROZEN instead: over a buoy, the boat's
+#: gate or a line end it never turns, so nothing is confirmed mid-turn and it
+#: never spins chasing a point it is already over. The cost is a turn at every
+#: line end, while the gimbal catches up and buoy_mapper refuses the frames.
+FACE_HOLD_M = 3.0
 
 
 @dataclass
@@ -166,6 +173,7 @@ class BuoySearch:
         self.plan_key = None      # the fence the waypoints were planned in
         self.pass_index = 0
         self.wps, self.wp, self.yaw = [], 0, float("nan")
+        self.face_yaw = float("nan")   # the heading last commanded; NaN = none yet
         self.skipped = set()
         self.cluster = {}         # buoy id -> time its clock started, or None
         self.hover_xy = None
@@ -316,7 +324,7 @@ class BuoySearch:
         self.wp = 0
         self.yaw = sc.heading_deg(theta)
         self.plan_key = geom["key"]
-        ev.append("pass %d: %d waypoints, heading %03.0f"
+        ev.append("pass %d: %d waypoints, lines at %03.0f"
                   % (self.pass_index + 1, len(self.wps), self.yaw))
 
     def _begin_leg(self, goal, now, xy):
@@ -715,7 +723,7 @@ class BuoySearch:
         target = None
         if goal is not None and self.sub in FLYING:
             lat, lon = geo.xy_to_latlon(goal[0], goal[1], geom["origin"])
-            target = Target(lat, lon, self.cfg.search_alt_m, self.yaw,
+            target = Target(lat, lon, self.cfg.search_alt_m, self._face(xy, goal),
                             self.cfg.speed_mps)
         elif self.hold is not None and guided and geom is not None:
             (hx, hy), alt = self.hold[0], self.hold[1]
@@ -723,6 +731,15 @@ class BuoySearch:
             target = Target(lat, lon, alt, float("nan"), self.cfg.speed_mps)
         return Decision(target, rtl, self._status(inp, geom, found, waiting,
                                                   guided, target), ev)
+
+    def _face(self, xy, goal):
+        """The heading for a target: toward the goal, or frozen within
+        FACE_HOLD_M of it (see FACE_HOLD_M). NaN until there is one to hold,
+        which lets the autopilot keep the heading it has."""
+        if _dist(xy, goal) > FACE_HOLD_M:
+            self.face_yaw = math.degrees(
+                math.atan2(goal[0] - xy[0], goal[1] - xy[1])) % 360.0
+        return self.face_yaw
 
     # ----------------------------------------------------------------- status
 

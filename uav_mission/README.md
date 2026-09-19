@@ -16,8 +16,12 @@ flown.
 1. Sweeps the area inside **the fence the autopilot holds** (read back by
    `telemetry_bridge`, so at practice it is whatever was drawn in QGC) at
    10 m, in lines 10 m apart, keeping every point it flies to 2 m inside the
-   fence. The nose holds one heading for a whole pass; the aircraft flies the
-   return lines backwards, so the gimbal never swings.
+   fence. **The nose points where it is going** (Chris, 19 Sep), and freezes
+   within 3 m of wherever that is (`FACE_HOLD_M`), so it never turns while
+   hovering over a buoy or the boat's gate. It used to hold one heading per
+   pass and fly the return lines backwards so the gimbal never swung; the cost
+   now is a turn at each line end, while the gimbal catches up and
+   `buoy_mapper` refuses the frames (`max_gimbal_yaw_rate_dps`).
 2. The moment the buoy map has an **UNKNOWN** buoy inside the fence, it flies
    over it and hovers until `buoy_mapper` locks its state. Unknown buoys within
    4 m of each other (a 3 m gate) share one hover.
