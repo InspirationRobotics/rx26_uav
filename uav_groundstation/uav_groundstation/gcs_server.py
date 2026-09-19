@@ -27,12 +27,16 @@ class GcsServer:
       page_bytes: the rendered page.
       snapshot_fn: zero-arg callable -> JSON-serialisable dict.
       action_fn: (path, payload) -> dict with at least {ok, message}.
+      attitude_fn: optional zero-arg callable -> a small dict, served on
+        GET /attitude. The 3D view reads it 20 times a second -- far too often
+        for the whole snapshot -- so it gets its own few-dozen-byte answer.
     """
 
-    def __init__(self, page_bytes, snapshot_fn, action_fn):
+    def __init__(self, page_bytes, snapshot_fn, action_fn, attitude_fn=None):
         self.page = page_bytes
         self.snapshot_fn = snapshot_fn
         self.action_fn = action_fn
+        self.attitude_fn = attitude_fn
         self._server = None
 
     def handler(self):
@@ -57,6 +61,12 @@ class GcsServer:
                         # show, and the log needs the traceback's summary.
                         body = json.dumps(
                             {"error": "snapshot failed: %s" % e}).encode()
+                    return self._send(body, "application/json", nocache=True)
+                if self.path == "/attitude" and outer.attitude_fn is not None:
+                    try:
+                        body = json.dumps(outer.attitude_fn()).encode()
+                    except Exception as e:
+                        body = json.dumps({"ok": False, "why": str(e)}).encode()
                     return self._send(body, "application/json", nocache=True)
                 self.send_error(404)
 

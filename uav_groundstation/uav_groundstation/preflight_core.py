@@ -126,7 +126,7 @@ def fence(inp):
     if enable < 0.5:
         return _chip("fence", "fence", "warn", "FENCE_ENABLE is 0: no fence at all")
     bits = int(ftype) if _num(ftype) else None
-    stop = ceiling - (margin if _num(margin) else 0.0)
+    stop = _climb_stop(ceiling, margin)
     if (bits is None or bits & FENCE_TYPE_ALT_MAX) and _num(work):
         if ceiling < work:
             return _chip("fence", "fence", "bad",
@@ -147,6 +147,30 @@ def fence(inp):
                      "triggers too, not just the polygon" % bits)
     return _chip("fence", "fence", "ok",
                  "enabled, ceiling %.0f m, climbs stop at %.0f m" % (ceiling, stop))
+
+
+def altitude_ceiling(inp):
+    """The altitude the autopilot's fence enforces, for the Map tab's readout.
+
+    -> {"state": "unknown"} while the fence parameters are unread,
+       {"state": "off"} when no altitude fence is enforced (FENCE_ENABLE 0, or a
+       FENCE_TYPE without the max-altitude bit),
+       {"state": "on", "alt_max": FENCE_ALT_MAX, "stop": FENCE_ALT_MAX -
+       FENCE_MARGIN} otherwise -- "stop" is where a Loiter climb is held and
+       the number the fence() chip judges.
+    """
+    enable, ceiling = inp.get("fence_enable"), inp.get("fence_alt_max")
+    margin, ftype = inp.get("fence_margin"), inp.get("fence_type")
+    if not _num(enable) or not _num(ceiling):
+        return {"state": "unknown"}
+    if enable < 0.5 or (_num(ftype) and not int(ftype) & FENCE_TYPE_ALT_MAX):
+        return {"state": "off"}
+    return {"state": "on", "alt_max": ceiling, "stop": _climb_stop(ceiling, margin)}
+
+
+def _climb_stop(ceiling, margin):
+    """Where the autopilot holds a climb: FENCE_ALT_MAX - FENCE_MARGIN."""
+    return ceiling - (margin if _num(margin) else 0.0)
 
 
 def gimbal(inp):

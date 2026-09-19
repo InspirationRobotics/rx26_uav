@@ -293,7 +293,7 @@ class GroundStation(Node):
         self._workspace = self._check_workspace(p["workspace_path"])
 
         self.server = GcsServer(render_page(p["poll_period_s"] * 1000.0),
-                                self._snapshot, self._action)
+                                self._snapshot, self._action, self._attitude)
         self.server.start(int(p["port"]), p["bind_host"])
         self.get_logger().info(
             "ground station on http://<JETSON_IP>:%d — nodes, telemetry, map, "
@@ -393,6 +393,18 @@ class GroundStation(Node):
 
     def _on_att(self, msg: Attitude):
         self._att.set(msg, time.monotonic())
+
+    def _attitude(self):
+        """For the Map tab's 3D view, 20 times a second: degrees, or ok False
+        while the attitude stream is stale -- never the last angles held over."""
+        now = time.monotonic()
+        a = self._att.get(now)
+        if a is None:
+            return {"ok": False}
+        return {"ok": True, "roll": math.degrees(a.roll),
+                "pitch": math.degrees(a.pitch),
+                "heading": math.degrees(a.yaw) % 360.0,
+                "age_s": round(now - self._att.recv_t, 3)}
 
     def _on_status(self, msg: FcuStatus):
         self._status.set(msg, time.monotonic())
@@ -529,6 +541,9 @@ class GroundStation(Node):
                 "buoys": self._buoy_state(now),
                 "mapper": self._mapper_state(running),
                 "footprint": self._footprint(placed, att, tel),
+                # What the big altitude readout is judged against: the same
+                # FENCE_ALT_MAX - FENCE_MARGIN the checklist uses.
+                "ceiling": preflight_core.altitude_ceiling(params),
             },
             "sys": self._sys_state(),
             "power": self._power_state(known, armed),

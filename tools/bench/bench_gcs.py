@@ -34,6 +34,9 @@ STATE = {"tel": {"pose_ok": True, "fcu_ok": True, "armed": True,
          "groups": [], "sys": {"hostname": "uav-jetson"}}
 
 
+# What gcs_node._attitude hands the 3D view, 20 times a second.
+ATTITUDE = {"ok": True, "roll": 2.5, "pitch": -4.0, "heading": 87.0, "age_s": 0.03}
+
 # {name: time of its restart}, as gcs_node._restart_t, and the bench's own
 # clock, so the restart grace window can be crossed without sleeping.
 RESTARTED = {}
@@ -92,7 +95,7 @@ def check(name, ok, detail=""):
 
 def main():
     page = render(200.0)
-    srv = GcsServer(page, lambda: STATE, action).start(0, "127.0.0.1")
+    srv = GcsServer(page, lambda: STATE, action, lambda: ATTITUDE).start(0, "127.0.0.1")
     base = "http://127.0.0.1:%d" % srv._server.server_address[1]
     r = []
 
@@ -122,7 +125,10 @@ def main():
                          ("lock beep", b"checkLocks"),
                          ("search controls on the map", b'id="searchbar"'),
                          ("search path drawn", b"drawSearch"),
-                         ("search tile in the header", b'id="searchtile"')):
+                         ("search tile in the header", b'id="searchtile"'),
+                         ("altitude drawn big on the map", b"drawAltitude"),
+                         ("3D attitude view beside the map", b'id="att3d"'),
+                         ("Fit frames the fence and buoys", b"fitView")):
         r.append(check(name, needle in page))
     # The page's search controls post SETTINGS and nothing else: on/off, the
     # count, the task and the tier. Anything that could name a position, a mode
@@ -210,6 +216,11 @@ def main():
     body, status = get(base, "/state")
     r.append(check("GET /state serves JSON", status == 200
                    and json.loads(body)["tel"]["lat"] == 1.2806))
+    body, status = get(base, "/attitude")
+    a = json.loads(body) if status == 200 else {}
+    r.append(check("GET /attitude serves the small JSON", status == 200
+                   and a.get("roll") == ATTITUDE["roll"] and len(body) < 200,
+                   "%d bytes" % len(body)))
 
     print("\nmalformed input")
     req = urllib.request.Request(base + "/node/stop", method="POST",

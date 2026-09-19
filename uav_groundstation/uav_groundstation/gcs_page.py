@@ -178,6 +178,20 @@ button.toggle.on{background:var(--accent);border-color:var(--accent);color:var(-
    something to say and the map bar wraps on a narrow window. */
 #map{width:100%;height:max(300px,calc(100vh - var(--hdr,150px) - var(--mapbar,48px) - 66px));
      display:block;cursor:grab}
+/* The map, and beside it the aircraft's attitude. The map was wider than any
+   buoy field needs; the column it gave up is where the 3D view lives. */
+#maprow{display:flex;align-items:stretch}
+#maprow #map{flex:1;min-width:0}
+#attpanel{flex:none;width:280px;border-left:1px solid var(--line);padding:10px 12px;
+          display:flex;flex-direction:column;gap:8px}
+#att3d{width:100%;height:240px;display:block}
+#attspark{width:100%;height:78px;display:block}
+.attnums{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;text-align:center}
+.attnums .v{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.attnums .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+#atttilt{font-size:13px;font-weight:600;text-align:center;border-radius:6px;padding:4px 6px}
+main.split #attpanel{display:none}
+@media (max-width:900px){#attpanel{display:none}}
 #camimg{display:block;margin:0 auto;max-width:100%;border:1px solid var(--line);
         border-radius:6px;max-height:max(220px,calc(100vh - var(--hdr,150px) - var(--camrec,48px) - 44px))}
 /* Camera + Map: both sections at once, side by side, each fitted to the height. */
@@ -272,8 +286,9 @@ details.about p{margin:6px 0 0;max-width:920px}
       <div id="mapbar">
         <button onclick="zoom(1.4)" title="zoom in">+</button>
         <button onclick="zoom(0.71)" title="zoom out">−</button>
+        <button onclick="fitView()" title="frame the fence, every buoy and the boat">Fit</button>
         <button id="followb" class="toggle on" onclick="toggleFollow()"
-          title="keep the aircraft in the middle">Follow</button>
+          title="keep the aircraft on the map: it pans only when the aircraft nears an edge">Follow</button>
         <span class="sep"></span>
         <button id="measureb" class="toggle" onclick="toggleMeasure()"
           title="click two points, or two buoys, for the distance">Measure</button>
@@ -303,7 +318,19 @@ details.about p{margin:6px 0 0;max-width:920px}
             onchange="setCount()" disabled></label>
         <span id="searchstat"></span>
       </div>
-      <canvas id="map"></canvas>
+      <div id="maprow">
+        <canvas id="map"></canvas>
+        <div id="attpanel">
+          <canvas id="att3d" title="Ekko seen from the south, north away from you, turned, rolled and pitched as the autopilot reports it"></canvas>
+          <div class="attnums">
+            <div><div class="v" id="att-r">&mdash;</div><div class="k">roll</div></div>
+            <div><div class="v" id="att-p">&mdash;</div><div class="k">pitch</div></div>
+            <div><div class="v" id="att-h">&mdash;</div><div class="k">heading</div></div>
+          </div>
+          <div id="atttilt">no attitude yet</div>
+          <canvas id="attspark" title="roll and pitch over the last 10 seconds: wobble shows as ripple"></canvas>
+        </div>
+      </div>
       <div id="mapinfo"></div>
     </div>
     <div id="buoylist"></div>
@@ -398,7 +425,7 @@ function show(t){tab=t;
     el('s-'+k).className=(k===t||(t==='fly'&&(k==='map'||k==='cam')))?'on':''});
   try{localStorage.setItem('rx26-tab',t)}catch(e){}
   layoutVars();
-  if(mapVisible()){resize();draw()} if(t==='logs')repaintLogs(); render()}
+  if(mapVisible()){resize();draw();drawAttitude();drawAttSpark()} if(t==='logs')repaintLogs(); render()}
 /* Heights the fitted views subtract. Measured, not guessed: the header changes
    height with the checklist, and toolbars wrap on narrow windows. A change
    re-sizes the map canvas, whose pixel size is set from its CSS box. */
@@ -436,7 +463,7 @@ function setTheme(t){
   try{localStorage.setItem('rx26-theme',t)}catch(e){}
   var b=el('themeb');b.textContent=t==='light'?'\u263e dark':'\u2600 light';
   b.title='switch to the '+(t==='light'?'dark':'light')+' theme';
-  readPalette();if(mapVisible())draw()}
+  readPalette();if(mapVisible()){draw();drawAttitude();drawAttSpark()}}
 function toggleTheme(){
   setTheme(document.documentElement.getAttribute('data-theme')==='light'?'dark':'light')}
 setTheme(document.documentElement.getAttribute('data-theme')||'dark');
@@ -570,6 +597,38 @@ function zoom(k){scale=Math.max(0.05,Math.min(200,scale*k));
   try{localStorage.setItem('rx26-map-scale',scale)}catch(e){}draw()}
 function setToggle(id,on){var b=el(id);if(b)b.classList.toggle('on',!!on)}
 function toggleFollow(){follow=!follow;setToggle('followb',follow);draw()}
+/* Follow keeps the aircraft ON the map rather than in the middle of it: a map
+   framed on the fence stays put while Ekko flies inside it, so the buoy field
+   does not slide off the narrower map, and it pans only when the aircraft
+   nears an edge. */
+function keepInView(v){
+  var mx=0.35*W/scale,my=0.35*H/scale;
+  if(v.x<view.x-mx)view.x=v.x+mx;else if(v.x>view.x+mx)view.x=v.x-mx;
+  if(v.y<view.y-my)view.y=v.y+my;else if(v.y>view.y+my)view.y=v.y-my}
+/* Frame the fence, every buoy and the boat, with a margin. Done by the Fit
+   button, and once each time the map re-anchors on a fence. */
+var needFit=true;
+function fitView(){
+  var m=S.map||{},pts=(m.fence||[]).slice(),bm=m.buoys;
+  if(bm&&bm.buoys)bm.buoys.forEach(function(b){pts.push([b.x,b.y])});
+  if(m.boat)pts.push([m.boat.x,m.boat.y]);
+  /* Nothing from another venue: the params stand-in fence can be half a world
+     from a map centred on the aircraft (map_origin), and fitting it zooms out
+     to nothing. */
+  pts=pts.filter(function(p){return Math.abs(p[0])<5e4&&Math.abs(p[1])<5e4});
+  if(pts.length<2)return false;
+  resize();
+  /* Not laid out yet (the tab is still opening): try again on the next poll
+     rather than fit to a zero-size map. */
+  if(W<50||H<50)return false;
+  var x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  pts.forEach(function(p){x0=Math.min(x0,p[0]);x1=Math.max(x1,p[0]);
+    y0=Math.min(y0,p[1]);y1=Math.max(y1,p[1])});
+  view.x=(x0+x1)/2;view.y=(y0+y1)/2;
+  scale=Math.max(0.05,Math.min(200,
+    Math.min(W/Math.max(x1-x0,4),H/Math.max(y1-y0,4))/1.25));
+  try{localStorage.setItem('rx26-map-scale',scale)}catch(e){}
+  draw();return true}
 function clearTrail(){trail=[];post('/map/clear_trail');draw()}
 /* Confirmed, because a clear mid-flight throws away the watch time every buoy
    has built up. It never loses the MAP: buoy_mapper writes the files first. */
@@ -673,7 +732,7 @@ function draw(){
   var c=el('map');if(!W)resize();var g=c.getContext('2d');
   g.clearRect(0,0,W,H);
   var m=S.map||{},f=m.fence||[],v=m.veh;
-  if(follow&&v){view.x=v.x;view.y=v.y}
+  if(follow&&v)keepInView(v);
   var st=drawGrid(g);
   /* fence */
   if(f.length>1){
@@ -770,7 +829,30 @@ function draw(){
   g.fillStyle=PAL.panel;g.fillRect(8,H-25,g.measureText(legend).width+12,18);
   g.fillStyle=PAL.dim;g.fillText(legend,14,H-12);
   g.fillText('N \u2191',W-34,20);
+  drawAltitude(g);
 }
+/* Altitude, big, where the eye already is: at SUAS a judge watches the ground
+   station for exactly this. Judged against the fence the autopilot holds:
+   green up to where climbs stop (FENCE_ALT_MAX - FENCE_MARGIN, the checklist's
+   number -- Ekko's 10 m working altitude, on purpose, so it must read green),
+   amber above that, red within 0.5 m of FENCE_ALT_MAX itself, where the fence
+   acts. A stale pose shows a dash, never the last altitude heard. */
+var ALTFONT='700 40px '+FONTS;
+function drawAltitude(g){
+  var t=S.tel||{},c=(S.map||{}).ceiling||{},a=(t.pose_ok&&t.alt_rel!=null)?t.alt_rel:null,
+      col=PAL.fg,sub;
+  if(c.state==='on'){
+    sub='above home \u00b7 climbs stop at '+fmt(c.stop,1)+' m \u00b7 fence '+fmt(c.alt_max,1)+' m';
+    if(a!=null)col=a>=c.alt_max-0.5?PAL.bad:(a>c.stop+0.3?PAL.warn:PAL.ok)}
+  else sub='above home \u00b7 '+(c.state==='off'?'no altitude fence'
+                                  :'ceiling not read from the autopilot yet');
+  var big=(a==null?'\u2014':a.toFixed(1))+' m';
+  g.font=ALTFONT;var w1=g.measureText(big).width;
+  g.font=MAPFONT;var w2=g.measureText(sub).width;
+  g.fillStyle=PAL.panel;g.globalAlpha=0.9;g.fillRect(8,8,Math.max(w1,w2)+22,70);
+  g.globalAlpha=1;
+  g.font=ALTFONT;g.fillStyle=col;g.fillText(big,18,50);
+  g.font=MAPFONT;g.fillStyle=PAL.dim;g.fillText(sub,18,69)}
 /* ---- buoy search ----
    The dotted outline is the fence shrunk by the distance the search keeps from
    it; the blue path is the current pass, faded where it has been flown; the
@@ -835,12 +917,158 @@ function renderSearch(){
   if(live&&s.phase==='rtl'&&lastSearchPhase!==null&&lastSearchPhase!=='rtl'&&soundOn){
     beep();setTimeout(beep,260)}
   lastSearchPhase=live?s.phase:null}
+/* ---- attitude, in 3D ----
+   Ekko seen from the south and above, north away from the viewer, rolled,
+   pitched and TURNED exactly as the autopilot reports it, 20 times a second from
+   GET /attitude (the whole /state is far too big to fetch that often, and wobble
+   is invisible at 5 Hz). Chris chose the turning model over a chase view (19
+   Sep): heading reads at a glance, at the price that with Ekko facing the viewer
+   (heading ~180) a roll to its right shows as a tilt to the viewer's left. The
+   compass ring is fixed to the ground. A stale reading greys it all out and says
+   so: an attitude held over is exactly what this must never show.
+   The model is a stand-in quad until the Onshape export replaces MODEL: body
+   frame x forward, y right, z down, metres; RED marks the front. */
+var ATT={ok:false},attHist=[],attBusy=false,ATT_SPAN_S=10,TILT_WARN=20,TILT_BAD=30;
+function attLoop(){
+  setTimeout(attLoop,50);
+  if(tab!=='map'||document.hidden||attBusy)return;
+  attBusy=true;
+  fetch('/attitude',{cache:'no-store'}).then(function(r){return r.json()})
+    .then(function(j){ATT=j;attBusy=false;attTick()})
+    .catch(function(){ATT={ok:false};attBusy=false;attTick()})}
+function attTick(){
+  var now=Date.now()/1000;
+  if(ATT.ok)attHist.push([now,ATT.roll,ATT.pitch]);
+  while(attHist.length&&attHist[0][0]<now-ATT_SPAN_S)attHist.shift();
+  drawAttitude();drawAttSpark()}
+function hexRgb(h){h=(h||'#888').replace('#','');
+  if(h.length===3)h=h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  return [parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)]}
+function shade(key,k){var c=hexRgb(PAL[key]);
+  return 'rgb('+c.map(function(v){return Math.round(Math.min(255,v*k))}).join(',')+')'}
+var MODEL=(function(){
+  var F=[];
+  function face(pts,c,al){F.push({p:pts,c:c,a:al||1})}
+  function box(c,x0,x1,y0,y1,z0,z1,rot,dx,dy){
+    var v=[[x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0],[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]]
+      .map(function(q){var cr=Math.cos(rot||0),sr=Math.sin(rot||0);
+        return [q[0]*cr-q[1]*sr+(dx||0),q[0]*sr+q[1]*cr+(dy||0),q[2]]});
+    [[0,1,2,3],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]].forEach(function(f){
+      face(f.map(function(i){return v[i]}),c)})}
+  function disc(c,x,y,z,r,n,al){var p=[];
+    for(var i=0;i<n;i++){var a=i*2*Math.PI/n;p.push([x+r*Math.cos(a),y+r*Math.sin(a),z])}
+    face(p,c,al)}
+  function can(c,x,y,z0,z1,r){var n=8;
+    for(var i=0;i<n;i++){var a=i*2*Math.PI/n,b=(i+1)*2*Math.PI/n;
+      face([[x+r*Math.cos(a),y+r*Math.sin(a),z0],[x+r*Math.cos(b),y+r*Math.sin(b),z0],
+            [x+r*Math.cos(b),y+r*Math.sin(b),z1],[x+r*Math.cos(a),y+r*Math.sin(a),z1]],c)}
+    disc(c,x,y,z0,r,n)}
+  box('dim',-0.11,0.11,-0.08,0.08,-0.05,0.04);            /* body */
+  box('fg',-0.09,0.09,-0.045,0.045,-0.1,-0.05);          /* battery on top */
+  box('bRed',0.1,0.16,-0.03,0.03,0.04,0.1);              /* the camera: the FRONT */
+  [45,135,225,315].forEach(function(deg){
+    var a=deg*Math.PI/180,R=0.38,x=R*Math.cos(a),y=R*Math.sin(a),front=deg===45||deg===315;
+    box('fg',0.06,R,-0.014,0.014,-0.02,0.008,a);          /* arm */
+    can('dim',x,y,-0.06,-0.02,0.03);                      /* motor */
+    disc(front?'bRed':'accent',x,y,-0.066,0.18,16,0.5)});  /* prop disc */
+  [-1,1].forEach(function(sgn){
+    box('dim',-0.15,0.15,sgn*0.13-0.01,sgn*0.13+0.01,0.19,0.21);          /* skid */
+    [-0.08,0.08].forEach(function(x){
+      box('dim',x-0.008,x+0.008,sgn*0.13-0.008,sgn*0.13+0.008,0.04,0.19)})});
+  return F})();
+function drawAttitude(){
+  var c=el('att3d');if(!c||!c.clientWidth)return;
+  var w=c.clientWidth,h=c.clientHeight,dpr=devicePixelRatio||1;
+  if(c.width!==Math.round(w*dpr)){c.width=Math.round(w*dpr);c.height=Math.round(h*dpr)}
+  var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,w,h);
+  var ok=!!ATT.ok,r=ok?ATT.roll:0,p=ok?ATT.pitch:0,hd=ok?ATT.heading:0;
+  /* judged on the whole degrees shown, so the number and its colour agree */
+  var tilt=Math.round(Math.acos(Math.cos(r*Math.PI/180)*Math.cos(p*Math.PI/180))*180/Math.PI);
+  var lvl=!ok?'':(tilt>=TILT_BAD?'bad':(tilt>=TILT_WARN?'warn':'ok'));
+  function sgn(v){return (v>0?'+':'')+v.toFixed(0)+'\u00b0'}
+  el('att-r').textContent=ok?sgn(r):'\u2014';el('att-p').textContent=ok?sgn(p):'\u2014';
+  el('att-h').textContent=ok?('00'+Math.round(hd)%360).slice(-3)+'\u00b0':'\u2014';
+  /* each angle coloured by its own size, so the axis that is going is the red one */
+  [['att-r',r],['att-p',p]].forEach(function(k){var v=Math.abs(Math.round(k[1]));
+    el(k[0]).style.color=!ok?'':(v>=TILT_BAD?'var(--bad)':(v>=TILT_WARN?'var(--warn)':''))});
+  var tb=el('atttilt');
+  tb.textContent=!ok?'no attitude from the autopilot':('tilt '+tilt.toFixed(0)+'\u00b0'
+    +(lvl==='bad'?' \u2014 about to tip':(lvl==='warn'?' \u2014 steep':' \u2014 level')));
+  tb.style.background=lvl?'var(--'+lvl+'-bg)':'var(--sunk)';
+  tb.style.color=lvl?'var(--'+lvl+')':'var(--dim)';
+  /* camera: south of Ekko and above, looking north and down at A */
+  var A=0.5,D=1.55,ca=Math.cos(A),sa=Math.sin(A),f=Math.min(w,h)*1.35,cx=w/2,cy=h*0.52;
+  function proj(q){var px=q[0],py=q[1]-D*sa,pz=q[2]+D*ca,
+      yc=py*ca+pz*sa,zc=-py*sa+pz*ca;
+    return [cx+f*px/zc,cy-f*yc/zc,zc]}
+  /* body (FRD) -> ground (NED) by roll, pitch, then heading -> view (x east,
+     y up, z north) */
+  var cr=Math.cos(r*Math.PI/180),sr=Math.sin(r*Math.PI/180),
+      cp=Math.cos(p*Math.PI/180),sp=Math.sin(p*Math.PI/180),
+      ch=Math.cos(hd*Math.PI/180),shd=Math.sin(hd*Math.PI/180);
+  function world(b){var y1=b[1]*cr-b[2]*sr,z1=b[1]*sr+b[2]*cr,
+      x2=b[0]*cp+z1*sp,z2=-b[0]*sp+z1*cp,
+      xn=x2*ch-y1*shd,yn=x2*shd+y1*ch;
+    return [yn,-z2,xn]}
+  /* compass ring on the ground: fixed to the world, so the model's tilt reads against it */
+  var RG=0.52,YG=-0.24,i,pts=[];
+  g.lineWidth=1.2;g.strokeStyle=PAL.ring;g.beginPath();
+  for(i=0;i<=48;i++){var a=i*2*Math.PI/48,q=proj([RG*Math.sin(a),YG,RG*Math.cos(a)]);
+    if(i)g.lineTo(q[0],q[1]);else g.moveTo(q[0],q[1])}
+  g.stroke();
+  g.font='600 12px '+FONTS;g.textAlign='center';
+  [['N',0],['E',90],['S',180],['W',270]].forEach(function(k){
+    var al=k[1]*Math.PI/180,q=proj([1.18*RG*Math.sin(al),YG,1.18*RG*Math.cos(al)]);
+    g.fillStyle=k[0]==='N'?PAL.accent:PAL.dim;g.fillText(k[0],q[0],q[1]+4)});
+  g.textAlign='left';
+  /* the model, far faces first */
+  var L=[-0.35,0.8,-0.48],faces=MODEL.map(function(F){
+    var W3=F.p.map(world),S2=W3.map(proj),z=0;
+    S2.forEach(function(q){z+=q[2]});
+    var u=[W3[1][0]-W3[0][0],W3[1][1]-W3[0][1],W3[1][2]-W3[0][2]],
+        v=[W3[2][0]-W3[0][0],W3[2][1]-W3[0][1],W3[2][2]-W3[0][2]],
+        n=[u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]],
+        nl=Math.hypot(n[0],n[1],n[2])||1,
+        lit=Math.abs((n[0]*L[0]+n[1]*L[1]+n[2]*L[2])/nl);
+    return {s:S2,z:z/S2.length,c:F.c,a:F.a,k:0.55+0.5*lit}});
+  faces.sort(function(a,b){return b.z-a.z});
+  faces.forEach(function(F){
+    g.globalAlpha=(ok?1:0.3)*F.a;g.fillStyle=shade(F.c,F.k);g.beginPath();
+    F.s.forEach(function(q,j){if(j)g.lineTo(q[0],q[1]);else g.moveTo(q[0],q[1])});
+    g.closePath();g.fill()});
+  g.globalAlpha=1;
+  if(!ok){g.font='600 13px '+FONTS;g.fillStyle=PAL.dim;g.textAlign='center';
+    g.fillText('no attitude',w/2,18);g.textAlign='left'}}
+/* Roll and pitch over the last ATT_SPAN_S seconds. The scale grows with the
+   largest angle, so a 2 degree wobble still shows as ripple. */
+function drawAttSpark(){
+  var c=el('attspark');if(!c||!c.clientWidth)return;
+  var w=c.clientWidth,h=c.clientHeight,dpr=devicePixelRatio||1;
+  if(c.width!==Math.round(w*dpr)){c.width=Math.round(w*dpr);c.height=Math.round(h*dpr)}
+  var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,w,h);
+  var now=Date.now()/1000,big=5;
+  attHist.forEach(function(e){big=Math.max(big,Math.abs(e[1]),Math.abs(e[2]))});
+  big=Math.min(60,Math.ceil(big/5)*5);
+  function X(t){return w*(1-(now-t)/ATT_SPAN_S)}
+  function Y(v){return h/2-(v/big)*(h/2-8)}
+  g.strokeStyle=PAL.gridMajor;g.lineWidth=1;g.beginPath();g.moveTo(0,h/2+.5);g.lineTo(w,h/2+.5);g.stroke();
+  [[1,'accent'],[2,'warn']].forEach(function(k){
+    g.strokeStyle=PAL[k[1]];g.lineWidth=1.5;g.beginPath();
+    attHist.forEach(function(e,j){if(j)g.lineTo(X(e[0]),Y(e[k[0]]));else g.moveTo(X(e[0]),Y(e[k[0]]))});
+    g.stroke()});
+  g.font='11px '+FONTS;
+  g.fillStyle=PAL.accent;g.fillText('roll',4,11);
+  g.fillStyle=PAL.warn;g.fillText('pitch',30,11);
+  g.fillStyle=PAL.dim;g.textAlign='right';
+  g.fillText('\u00b1'+big+'\u00b0 \u00b7 last '+ATT_SPAN_S+' s',w-4,11);g.textAlign='left'}
+
 var originSeen=null;
 function renderMap(){
   var m=S.map||{};
   /* The map re-anchors when the autopilot's fence is first read; a trail drawn
      about the old origin would be in the wrong place. */
-  if(m.origin_id!==originSeen){trail=[];originSeen=m.origin_id}
+  if(m.origin_id!==originSeen){trail=[];originSeen=m.origin_id;needFit=true}
+  if(needFit&&mapVisible()&&(m.fence||[]).length>2&&fitView())needFit=false;
   renderSearch();
   if(m.veh){var p=[m.veh.x,m.veh.y];
     if(!trail.length||Math.hypot(p[0]-trail[trail.length-1][0],
@@ -1200,7 +1428,7 @@ setToggle('soundb',soundOn);
 var startTab='nodes';
 try{var t0=localStorage.getItem('rx26-tab');
   if(TABS.some(function(p){return p[0]===t0}))startTab=t0}catch(e){}
-show(startTab);poll();setInterval(poll,POLL);pollLogs();setInterval(pollLogs,1000);
+show(startTab);poll();setInterval(poll,POLL);attLoop();pollLogs();setInterval(pollLogs,1000);
 </script></body></html>
 """
 
