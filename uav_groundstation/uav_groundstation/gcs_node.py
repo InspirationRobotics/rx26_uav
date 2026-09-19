@@ -22,10 +22,11 @@ it (search_core). Switching it OFF makes it hold position.
 
 THE MAP IS DRAWN AROUND THE FENCE THE AUTOPILOT HOLDS (/uav/fence), and falls
 back to the `geofence` param only while none has been read. The map's origin
-follows the same choice; far from both, it is the first position fix. An origin
-half a world away is not cosmetic: local metres are scaled by the cosine of the
-origin's latitude, so a Singapore origin stretched every east-west distance at a
-San Diego park by 19%, the tape measure and the grid with it.
+follows the same choice; far from both, it is the first REAL position heard,
+Ekko's or Crusader's -- never ArduPilot's 0, 0 for "no fix yet" (map_origin). An
+origin half a world away is not cosmetic: local metres are scaled by the cosine
+of the origin's latitude, so a Singapore origin stretched every east-west
+distance at a San Diego park by 19%, the tape measure and the grid with it.
 
 THE TWO RULES THIS NODE HOLDS, and holds again on every request no matter what
 the page rendered:
@@ -71,7 +72,7 @@ from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config, make_set_callback
 from uav_common.stream_cache import StreamCache
 
-from uav_groundstation import armed_clock, battery_core, preflight_core
+from uav_groundstation import armed_clock, battery_core, map_origin, preflight_core
 from uav_groundstation import node_registry as reg
 from uav_groundstation import power_client, proc_scan, system_info
 from uav_groundstation.gcs_page import render as render_page
@@ -145,10 +146,6 @@ TIERS = ("advanced", "disruptive")
 # somebody will forget.
 TIER_MAPPER = {"advanced": {"lock_state": True, "decide_window_s": 0.0},
                "disruptive": {"lock_state": False, "decide_window_s": 5.0}}
-# Farther than this from the params fence, it is not this venue's fence and the
-# map is centred on the aircraft instead.
-FOREIGN_ORIGIN_M = 50_000.0
-
 # Latched topics (telemetry_bridge's /uav/fcu_params and /uav/fence): a
 # subscriber must be TRANSIENT_LOCAL too, or a ground station restarted after the
 # publish never hears the value.
@@ -164,16 +161,6 @@ def _finite(x):
     """A float for JSON: NaN becomes None, because JSON has no NaN and the page
     treats a blank as unknown."""
     return None if x is None or (isinstance(x, float) and math.isnan(x)) else x
-
-
-def _centroid(polygon):
-    """Mean vertex of a polygon given open or closed; (0, 0) if empty."""
-    pts = list(polygon)
-    if len(pts) > 1 and tuple(pts[0]) == tuple(pts[-1]):
-        pts = pts[:-1]
-    if not pts:
-        return (0.0, 0.0)
-    return (sum(a for a, _ in pts) / len(pts), sum(b for _, b in pts) / len(pts))
 
 
 class GroundStation(Node):
@@ -205,10 +192,10 @@ class GroundStation(Node):
         # Flat [lat, lon, ...] in the params because ROS parameters cannot
         # nest; paired here by the one function that owns that conversion.
         self._fence = polygon_from_flat(p["geofence"])
-        self._fence_src = "params"
+        self._fence_src = map_origin.PARAMS
         self._fence_problem = ""
         self._origin_id = 0
-        self._set_origin(_centroid(self._fence))
+        self._set_origin(map_origin.centroid(self._fence))
         self._cpu = system_info.CpuMeter()
         # {port: (checked_at, is_open)} — see _port_open. Bounded by the number
         # of NodeSpecs that declare a port.
@@ -323,6 +310,13 @@ class GroundStation(Node):
         self._trail.clear()
         self._origin_id += 1
 
+    def _recentre_on(self, lat, lon):
+        """Centre the map on a position just heard, if map_origin says so."""
+        moved = map_origin.recentre(self._fence_src, self._origin, lat, lon)
+        if moved is not None:
+            self._fence_src = moved[0]
+            self._set_origin(moved[1])
+
     def _check_workspace(self, path):
         """Is the workspace a bind mount, and say so once at startup.
 
@@ -357,10 +351,10 @@ class GroundStation(Node):
         if not msg.valid:
             return                  # keep drawing the last fence known
         poly = list(zip(msg.latitude, msg.longitude))
-        if poly == self._fence and self._fence_src == "autopilot":
+        if poly == self._fence and self._fence_src == map_origin.AUTOPILOT:
             return
-        self._fence, self._fence_src = poly, "autopilot"
-        self._set_origin(_centroid(poly))
+        self._fence, self._fence_src = poly, map_origin.AUTOPILOT
+        self._set_origin(map_origin.centroid(poly))
         self.get_logger().info("map: drawing the autopilot's %d-corner fence"
                                % len(poly))
 
@@ -368,12 +362,14 @@ class GroundStation(Node):
         self._search.set(msg, time.monotonic())
 
     def _on_boat(self, msg: BoatState):
+        self._recentre_on(msg.latitude, msg.longitude)
         self._boat.set(msg, time.monotonic())
 
     def _boat_state(self, now):
-        """Crusader in the map's local metres, or None while it is not heard."""
+        """Crusader in the map's local metres, or None while it is not heard
+        or has no position fix of its own."""
         b = self._boat.get(now)
-        if b is None:
+        if b is None or not map_origin.is_fix(b.latitude, b.longitude):
             return None
         x, y = geo.latlon_to_xy(b.latitude, b.longitude, self._origin)
         return {"x": x, "y": y, "doing": _BOAT_DOING.get(int(b.activity), ""),
@@ -382,12 +378,13 @@ class GroundStation(Node):
     def _on_pose(self, msg: GlobalPos):
         # NaN heading is kept, not dropped: the readout says so and the operator
         # needs to know GPS yaw is unresolved. Only the trail skips it, because
-        # a NaN cannot be plotted.
+        # a NaN cannot be plotted. Before a GPS fix the readouts still show,
+        # but the aircraft has no place on the map: x, y are None.
+        if not map_origin.is_fix(msg.latitude, msg.longitude):
+            self._pose.set((msg, None, None), time.monotonic())
+            return
+        self._recentre_on(msg.latitude, msg.longitude)
         x, y = geo.latlon_to_xy(msg.latitude, msg.longitude, self._origin)
-        if self._fence_src == "params" and math.hypot(x, y) > FOREIGN_ORIGIN_M:
-            self._fence_src = "params (far away)"
-            self._set_origin((msg.latitude, msg.longitude))
-            x, y = 0.0, 0.0
         self._pose.set((msg, x, y), time.monotonic())
         gate = self.p["trail_min_move_m"]
         if not self._trail or math.hypot(x - self._trail[-1][0],
@@ -465,6 +462,8 @@ class GroundStation(Node):
         st = self._status.get(now)
         fs = self._flight.get(now)
         pose = pose_e[0] if pose_e else None
+        # Where the aircraft is on the map; None before its first GPS fix.
+        placed = pose_e if pose_e and pose_e[1] is not None else None
 
         tel = {
             "pose_ok": pose is not None,
@@ -519,8 +518,8 @@ class GroundStation(Node):
                 "fence_problem": self._fence_problem,
                 "origin_id": self._origin_id,
                 "search": search,
-                "veh": (None if pose is None else
-                        {"x": pose_e[1], "y": pose_e[2],
+                "veh": (None if placed is None else
+                        {"x": placed[1], "y": placed[2],
                          "heading": (0.0 if math.isnan(pose.heading)
                                      else pose.heading)}),
                 "inside": tel.get("inside"),
@@ -529,7 +528,7 @@ class GroundStation(Node):
                 "boat": self._boat_state(now),
                 "buoys": self._buoy_state(now),
                 "mapper": self._mapper_state(running),
-                "footprint": self._footprint(pose_e, att, tel),
+                "footprint": self._footprint(placed, att, tel),
             },
             "sys": self._sys_state(),
             "power": self._power_state(known, armed),

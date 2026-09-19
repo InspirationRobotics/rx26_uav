@@ -21,7 +21,9 @@ import urllib.request
 
 REPO = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, os.path.join(REPO, "uav_groundstation"))
+sys.path.insert(0, os.path.join(REPO, "uav_common"))
 
+from uav_groundstation import map_origin                    # noqa: E402
 from uav_groundstation import node_registry as reg          # noqa: E402
 from uav_groundstation.gcs_page import render               # noqa: E402
 from uav_groundstation.gcs_server import GcsServer          # noqa: E402
@@ -219,8 +221,55 @@ def main():
                    j["message"]))
 
     srv.stop()
+    r += map_centre()
     print("\n%d/%d" % (sum(r), len(r)))
     return 0 if all(r) else 1
+
+
+def map_centre():
+    """Where the map centres, in the order a cold boot delivers things.
+
+    The failure this guards: ArduPilot's 0, 0 before a GPS fix was taken as a
+    far-away position, the map centred on it, and with no fence in the
+    autopilot it stayed there -- Ekko and Crusader drawn 13,000 km away.
+    """
+    print("\nwhere the map centres")
+    r = []
+    mo = map_origin
+    singapore = mo.centroid([(1.28010, 103.85520), (1.28010, 103.85625),
+                             (1.28110, 103.85625), (1.28110, 103.85520),
+                             (1.28010, 103.85520)])
+    park, park2 = (32.9241, -117.0190), (32.9242, -117.0189)
+
+    def near(a, b):
+        return abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9
+
+    r.append(check("0, 0 is not a fix", not mo.is_fix(0.0, 0.0)))
+    r.append(check("NaN is not a fix", not mo.is_fix(float("nan"), 103.0)))
+    r.append(check("a park position is a fix", mo.is_fix(*park)))
+    r.append(check("closed and open fence, same centre",
+                   near(singapore, (1.2806, 103.855725))))
+
+    # Ekko first: 0, 0 before the fix, then the fix.
+    r.append(check("Ekko's 0, 0 does not centre the map",
+                   mo.recentre(mo.PARAMS, singapore, 0.0, 0.0) is None))
+    got = mo.recentre(mo.PARAMS, singapore, *park)
+    r.append(check("Ekko's first fix centres it, far from params",
+                   got is not None and got[0] == mo.FAR and near(got[1], park),
+                   str(got)))
+    r.append(check("...and later fixes do not move it again",
+                   mo.recentre(mo.FAR, park, *park2) is None))
+
+    # Crusader first: heard before Ekko has a fix.
+    got = mo.recentre(mo.PARAMS, singapore, *park2)
+    r.append(check("Crusader heard first centres it instead",
+                   got is not None and near(got[1], park2), str(got)))
+
+    r.append(check("at the params fence's venue: no re-centre",
+                   mo.recentre(mo.PARAMS, singapore, 1.2810, 103.8560) is None))
+    r.append(check("the autopilot's fence is never overridden",
+                   mo.recentre(mo.AUTOPILOT, park, 1.2806, 103.8557) is None))
+    return r
 
 
 if __name__ == "__main__":

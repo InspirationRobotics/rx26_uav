@@ -83,9 +83,17 @@ so. The map is a **readout**; the autopilot enforces.
 The map's origin is the fence centroid, not the first GPS fix, so the polygon
 does not jump when GPS arrives and two sessions draw the same picture. When the
 params fence is more than 50 km away (the Singapore placeholder, at a San Diego
-park) and nothing has been read, the origin is the first fix instead: local
-metres are scaled by the origin's latitude, and a far origin stretched every
-east-west distance on the map, tape measure included.
+park) and nothing has been read, the origin is the first REAL position heard
+instead, Ekko's or Crusader's: local metres are scaled by the origin's latitude,
+and a far origin stretched every east-west distance on the map, tape measure
+included.
+
+**0, 0 is not a position** (`map_origin.py`). ArduPilot reports latitude 0,
+longitude 0 until it has a fix, which on a cold boot comes first. It used to be
+taken as "far from the params fence, centre here", and with no fence in the
+autopilot to take over, Ekko and Crusader were drawn 13,000 km away until the
+ground station restarted. Now, before a fix, the readouts show and the aircraft
+is simply not on the map; a boat reporting 0, 0 is not drawn either.
 
 ### The buoy search's two settings
 
@@ -177,6 +185,7 @@ python3 -m uav_groundstation.ocs_link --host 192.168.8.107 --type uav
 |---|---|
 | `heartbeat_core.py` | `tools/bench/bench_heartbeat.py` — 24 cases, most of them "must go quiet" |
 | `node_registry.py` | `tools/bench/bench_gcs.py`; it is pure, exercise it directly |
+| `map_origin.py` | `tools/bench/bench_gcs.py` ("where the map centres"), then a cold start: nothing drawn more than 50 km away |
 | a protection or power rule | `curl` the endpoint, not the button — the page is not where the rule lives |
 | `ocs_link.py` framing | **`rx26_ocs/rx_bridge/framing.py` in the same commit** |
 | `gcs_page.py` | open every tab, and check the **stale** paths: stop the bridge and confirm the banner fires |
