@@ -511,6 +511,18 @@ def case_escort():
     el = ec.next_element((2.0, 0.0), B, crs)     # boat still at the entry
     r.append(check("boat at the entry: watch the first gate",
                    el["kind"] == "gate" and el["gate"]["red"] == 2, el["kind"]))
+    # Gate one's line is at x = 10. The boat reports once a second, so the gate
+    # it is driving must stay "next" until it is CLEAR_M past the line, or the
+    # go vanishes while the boat is still in the gate (19 Sep, sim).
+    el = ec.next_element((9.5, 0.0), B, crs)     # 0.5 m short of gate one
+    r.append(check("boat 0.5 m short of gate one: still gate one",
+                   el["kind"] == "gate" and el["gate"]["red"] == 2, el["gate"]))
+    el = ec.next_element((11.5, 0.0), B, crs)    # in it, 1.5 m past the line
+    r.append(check("boat 1.5 m past gate one's line: still gate one",
+                   el["kind"] == "gate" and el["gate"]["red"] == 2, el["gate"]))
+    el = ec.next_element((12.5, 0.0), B, crs)    # clear of it
+    r.append(check("boat 2.5 m past gate one: watch the second",
+                   el["kind"] == "gate" and el["gate"]["red"] == 4, el["gate"]))
     el = ec.next_element((14.0, 0.0), B, crs)    # boat through gate one
     r.append(check("boat past gate one: watch the second",
                    el["gate"]["red"] == 4, el["gate"]))

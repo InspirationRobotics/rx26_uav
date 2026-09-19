@@ -30,6 +30,13 @@ import math
 PAIR_MAX_M = 4.0
 #: A buoy this much further along the course than the boat counts as ahead.
 AHEAD_MARGIN_M = 1.0
+#: The gate the boat is driving stays its NEXT element -- watched, and confirmed
+#: while it holds -- until the boat is this far PAST the gate line. It used to
+#: move on 1 m BEFORE the line (AHEAD_MARGIN_M), and with the boat reporting once
+#: a second the "go" vanished while the boat was still in the gate: the sim boat
+#: obeyed and parked in the gate mouth (19 Sep). The boat's half of the rule:
+#: after a gate, carry on at least this far before stopping to wait.
+CLEAR_M = 2.0
 #: A state older than this is not evidence WHEN CONFIRMING a gate: the drone is
 #: hovering over that gate, so it has just looked. It is NOT applied when
 #: choosing which gate to fly to -- the aircraft can only look at one place at a
@@ -122,14 +129,15 @@ def along(point, entry, axis):
 
 
 def next_element(boat_xy, buoys, crs, fresh_s=None):
-    """What the boat has to do next: the first gate ahead of it, else the exit.
+    """What the boat has to do next: the first gate it has not yet cleared by
+    CLEAR_M, else the exit.
 
     -> {"kind": "gate"|"exit", "gate": {...} or None, "xy": station point}
     """
     entry, exit_xy, axis = crs
     boat = along(boat_xy, entry, axis)
     ahead = sorted((g for g in gates(buoys, fresh_s, axis)
-                    if along(g["mid"], entry, axis) > boat + AHEAD_MARGIN_M),
+                    if along(g["mid"], entry, axis) > boat - CLEAR_M),
                    key=lambda g: along(g["mid"], entry, axis))
     if ahead:
         return {"kind": "gate", "gate": ahead[0], "xy": ahead[0]["mid"]}
