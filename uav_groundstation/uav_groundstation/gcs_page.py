@@ -31,6 +31,7 @@ gcs_server has no ROS imports, so this page can be served on a laptop against
 invented state (render() plus a GcsServer handed a fake snapshot function).
 bench_gcs does exactly that.
 """
+import json
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -926,8 +927,12 @@ function renderSearch(){
    (heading ~180) a roll to its right shows as a tilt to the viewer's left. The
    compass ring is fixed to the ground. A stale reading greys it all out and says
    so: an attitude held over is exactly what this must never show.
-   The model is a stand-in quad until the Onshape export replaces MODEL: body
-   frame x forward, y right, z down, metres; RED marks the front. */
+   The model is EKKO'S OWN, from the Onshape assembly: ekko_model.py, made by
+   tools/scripts/make_ekko_model.py -- cut to ~2500 triangles, props drawn as
+   the discs they sweep, RED at the front (props, camera, GPS), BLUE at the
+   rear. A stand-in quad draws only if that file is missing. Body frame x
+   forward, y right, z down, metres; the camera and the ground ring scale to
+   the model's size (MODEL_K). */
 var ATT={ok:false},attHist=[],attBusy=false,ATT_SPAN_S=10,TILT_WARN=20,TILT_BAD=30;
 function attLoop(){
   setTimeout(attLoop,50);
@@ -946,7 +951,22 @@ function hexRgb(h){h=(h||'#888').replace('#','');
   return [parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)]}
 function shade(key,k){var c=hexRgb(PAL[key]);
   return 'rgb('+c.map(function(v){return Math.round(Math.min(255,v*k))}).join(',')+')'}
-var MODEL=(function(){
+var EKKO_MESH=__EKKO_MESH__;
+/* ekko_model.DATA: hex of uint16 nv, uint16 nt, int16 x/y/z mm per vertex,
+   uint16 x3 per triangle, uint8 group per triangle; groups are [PAL key, alpha]. */
+function meshFaces(M){
+  var n=M.hex.length/2,b=new Uint8Array(n),i;
+  for(i=0;i<n;i++)b[i]=parseInt(M.hex.substr(2*i,2),16);
+  var dv=new DataView(b.buffer),nv=dv.getUint16(0,true),nt=dv.getUint16(2,true),
+      o=4,V=[],F=[];
+  for(i=0;i<nv;i++){V.push([dv.getInt16(o,true)/1000,dv.getInt16(o+2,true)/1000,
+                            dv.getInt16(o+4,true)/1000]);o+=6}
+  var gi=o+nt*6;
+  for(i=0;i<nt;i++){var g=M.groups[b[gi+i]],q=o+6*i;
+    F.push({p:[V[dv.getUint16(q,true)],V[dv.getUint16(q+2,true)],V[dv.getUint16(q+4,true)]],
+            c:g[0],a:g[1]})}
+  return F}
+var MODEL=EKKO_MESH?meshFaces(EKKO_MESH):(function(){
   var F=[];
   function face(pts,c,al){F.push({p:pts,c:c,a:al||1})}
   function box(c,x0,x1,y0,y1,z0,z1,rot,dx,dy){
@@ -976,6 +996,10 @@ var MODEL=(function(){
     [-0.08,0.08].forEach(function(x){
       box('dim',x-0.008,x+0.008,sgn*0.13-0.008,sgn*0.13+0.008,0.04,0.19)})});
   return F})();
+/* How big the model is next to the stand-in the camera was set up for (0.56 m
+   from the centre to a prop tip), so any model sits the same in the view. */
+var MODEL_K=MODEL.reduce(function(m,F){return F.p.reduce(function(m2,q){
+  return Math.max(m2,Math.hypot(q[0],q[1]))},m)},0)/0.56||1;
 function drawAttitude(){
   var c=el('att3d');if(!c||!c.clientWidth)return;
   var w=c.clientWidth,h=c.clientHeight,dpr=devicePixelRatio||1;
@@ -997,7 +1021,7 @@ function drawAttitude(){
   tb.style.background=lvl?'var(--'+lvl+'-bg)':'var(--sunk)';
   tb.style.color=lvl?'var(--'+lvl+')':'var(--dim)';
   /* camera: south of Ekko and above, looking north and down at A */
-  var A=0.5,D=1.55,ca=Math.cos(A),sa=Math.sin(A),f=Math.min(w,h)*1.35,cx=w/2,cy=h*0.52;
+  var A=0.5,D=1.55*MODEL_K,ca=Math.cos(A),sa=Math.sin(A),f=Math.min(w,h)*1.35,cx=w/2,cy=h*0.52;
   function proj(q){var px=q[0],py=q[1]-D*sa,pz=q[2]+D*ca,
       yc=py*ca+pz*sa,zc=-py*sa+pz*ca;
     return [cx+f*px/zc,cy-f*yc/zc,zc]}
@@ -1011,7 +1035,7 @@ function drawAttitude(){
       xn=x2*ch-y1*shd,yn=x2*shd+y1*ch;
     return [yn,-z2,xn]}
   /* compass ring on the ground: fixed to the world, so the model's tilt reads against it */
-  var RG=0.52,YG=-0.24,i,pts=[];
+  var RG=0.52*MODEL_K,YG=-0.24*MODEL_K,i,pts=[];
   g.lineWidth=1.2;g.strokeStyle=PAL.ring;g.beginPath();
   for(i=0;i<=48;i++){var a=i*2*Math.PI/48,q=proj([RG*Math.sin(a),YG,RG*Math.cos(a)]);
     if(i)g.lineTo(q[0],q[1]);else g.moveTo(q[0],q[1])}
@@ -1433,11 +1457,22 @@ show(startTab);poll();setInterval(poll,POLL);attLoop();pollLogs();setInterval(po
 """
 
 
+def _ekko_mesh():
+    """Ekko's 3D model for the Map tab, as the page's JSON, or "null" (the
+    page then draws its stand-in quad) if the generated file is missing."""
+    try:
+        from uav_groundstation import ekko_model
+    except ImportError:
+        return "null"
+    return json.dumps({"groups": ekko_model.GROUPS, "hex": "".join(ekko_model.DATA)})
+
+
 def render(poll_ms: float) -> bytes:
-    """The page, with the browser's poll period baked in.
+    """The page, with the browser's poll period and Ekko's model baked in.
 
     Rendered once at node start rather than per request: it is a constant, and
     re-templating it on every GET would put string work on the path a laptop
     hits several times a second.
     """
-    return PAGE.replace("__POLL_MS__", str(int(poll_ms))).encode("utf-8")
+    return (PAGE.replace("__POLL_MS__", str(int(poll_ms)))
+            .replace("__EKKO_MESH__", _ekko_mesh()).encode("utf-8"))

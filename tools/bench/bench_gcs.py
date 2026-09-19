@@ -102,6 +102,7 @@ def main():
     print("\npage")
     r.append(check("poll period substituted", b"__POLL_MS__" not in page,
                    "template placeholder left in" if b"__POLL_MS__" in page else ""))
+    r.append(check("3D model substituted", b"__EKKO_MESH__" not in page))
     r.append(check("has all six tabs",
                    all(t in page for t in (b"'nodes'", b"'tel'", b"'map'",
                                            b"'cam'", b"'logs'", b"'sys'"))))
@@ -128,6 +129,7 @@ def main():
                          ("search tile in the header", b'id="searchtile"'),
                          ("altitude drawn big on the map", b"drawAltitude"),
                          ("3D attitude view beside the map", b'id="att3d"'),
+                         ("Ekko's own model in it, not the stand-in", b'EKKO_MESH={"groups"'),
                          ("Fit frames the fence and buoys", b"fitView")):
         r.append(check(name, needle in page))
     # The page's search controls post SETTINGS and nothing else: on/off, the
