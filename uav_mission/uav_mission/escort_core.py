@@ -30,13 +30,21 @@ import math
 PAIR_MAX_M = 4.0
 #: A buoy this much further along the course than the boat counts as ahead.
 AHEAD_MARGIN_M = 1.0
-#: The gate the boat is driving stays its NEXT element -- watched, and confirmed
-#: while it holds -- until the boat is this far PAST the gate line. It used to
-#: move on 1 m BEFORE the line (AHEAD_MARGIN_M), and with the boat reporting once
-#: a second the "go" vanished while the boat was still in the gate: the sim boat
-#: obeyed and parked in the gate mouth (19 Sep). The boat's half of the rule:
-#: after a gate, carry on at least this far before stopping to wait.
+#: While the boat reports it is TRANSITING, the gate it is driving stays its NEXT
+#: element -- watched, and confirmed while it holds -- until the boat is this far
+#: PAST the gate line. It used to move on 1 m BEFORE the line (AHEAD_MARGIN_M),
+#: and with the boat reporting once a second the "go" vanished while the boat was
+#: still in the gate: the sim boat obeyed and parked in the gate mouth (19 Sep).
+#: A boat that reports anything else is judged by the line itself: one that has
+#: stopped past a gate has passed it, however short of CLEAR_M it stopped --
+#: measured against a MAPPED gate, a boat stopped 2.24 m past the true line read
+#: as inside CLEAR_M, Ekko kept confirming the gate behind it, and the run
+#: deadlocked (19 Sep, sim). The boat's half: report TRANSIT while crossing,
+#: HOLDING once stopped, and carry on at least 2 m past a gate before stopping.
 CLEAR_M = 2.0
+#: uav_msgs/BoatState.ACTIVITY_TRANSIT: the one activity that means "moving
+#: along the passage" (boat_link.ACTIVITY[3]).
+BOAT_TRANSIT = 3
 #: A state older than this is not evidence WHEN CONFIRMING a gate: the drone is
 #: hovering over that gate, so it has just looked. It is NOT applied when
 #: choosing which gate to fly to -- the aircraft can only look at one place at a
@@ -128,16 +136,17 @@ def along(point, entry, axis):
     return (point[0] - entry[0]) * axis[0] + (point[1] - entry[1]) * axis[1]
 
 
-def next_element(boat_xy, buoys, crs, fresh_s=None):
-    """What the boat has to do next: the first gate it has not yet cleared by
-    CLEAR_M, else the exit.
+def next_element(boat_xy, buoys, crs, fresh_s=None, transiting=True):
+    """What the boat has to do next: the first gate it has not yet passed, else
+    the exit. A TRANSITING boat has passed a gate only once it is CLEAR_M beyond
+    its line; any other boat, once it is beyond the line at all.
 
     -> {"kind": "gate"|"exit", "gate": {...} or None, "xy": station point}
     """
     entry, exit_xy, axis = crs
-    boat = along(boat_xy, entry, axis)
+    boat = along(boat_xy, entry, axis) - (CLEAR_M if transiting else 0.0)
     ahead = sorted((g for g in gates(buoys, fresh_s, axis)
-                    if along(g["mid"], entry, axis) > boat - CLEAR_M),
+                    if along(g["mid"], entry, axis) > boat),
                    key=lambda g: along(g["mid"], entry, axis))
     if ahead:
         return {"kind": "gate", "gate": ahead[0], "xy": ahead[0]["mid"]}

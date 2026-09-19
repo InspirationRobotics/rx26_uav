@@ -520,6 +520,15 @@ def case_escort():
     el = ec.next_element((11.5, 0.0), B, crs)    # in it, 1.5 m past the line
     r.append(check("boat 1.5 m past gate one's line: still gate one",
                    el["kind"] == "gate" and el["gate"]["red"] == 2, el["gate"]))
+    # ...but only while it says it is moving. Stopped 1.5 m past, it has passed
+    # the gate: holding the go on a gate behind a stopped boat deadlocked a
+    # Disruptive run (19 Sep) -- the boat never takes a gate it has passed.
+    el = ec.next_element((11.5, 0.0), B, crs, transiting=False)
+    r.append(check("boat STOPPED 1.5 m past gate one: watch the second",
+                   el["kind"] == "gate" and el["gate"]["red"] == 4, el["gate"]))
+    el = ec.next_element((9.5, 0.0), B, crs, transiting=False)
+    r.append(check("boat stopped 0.5 m short of gate one: still gate one",
+                   el["kind"] == "gate" and el["gate"]["red"] == 2, el["gate"]))
     el = ec.next_element((12.5, 0.0), B, crs)    # clear of it
     r.append(check("boat 2.5 m past gate one: watch the second",
                    el["kind"] == "gate" and el["gate"]["red"] == 4, el["gate"]))

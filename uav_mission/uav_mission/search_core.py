@@ -587,7 +587,8 @@ class BuoySearch:
                                     "watching the exit")
                 ev.append("re-check finished: no gate ahead of the boat")
 
-        el = ec.next_element(boat_xy, bu, crs)
+        el = ec.next_element(boat_xy, bu, crs,
+                             transiting=fresh_boat and inp.boat[2] == ec.BOAT_TRANSIT)
         if el["kind"] == "gate":
             g = el["gate"]
             if self.watch != (g["red"], g["green"]):
