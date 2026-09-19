@@ -51,35 +51,44 @@ other mode, so taking control back never depends on this node.
 **TX (geofence)** — `/uav/fence_upload` (`std_srvs/Trigger`) uploads the
 configured polygon and verifies the readback.
 
-**RX/TX (Crusader, over the RFD900ux on the telemetry port)** — MAVLink
-`TUNNEL`, two vendor payload types (`uav_common/boat_link.py`): the boat sends
-where it is and one byte for what it is doing (`/uav/boat`), and this node sends
-the WHOLE buoy map back at `boat_report_hz`, never deltas — one packet resyncs
-the boat completely, so a lost packet costs a second of staleness instead of a
-buoy the boat never hears about. Ten bytes per buoy, 12 buoys to a 128-byte
-payload, behind a count byte and **two confirmed ids**.
+**RX/TX (Crusader and the ground laptop, over the RFD900ux mesh)** — MAVLink
+`TUNNEL`, three vendor payload types, all in `uav_common/boat_link.py`. No field
+names go on the air: the order of the bytes is the meaning.
 
-Those ids are the one thing the boat cannot work out for itself: what Ekko has
-just CONFIRMED for it — its next gate (red, green), the exit (exit, 0), or
-nothing (0, 0). A buoy the aircraft has not reached yet is missing from the map,
-and a light mapped a minute ago is not a light seen now, so a boat steering by
-the map alone drives a passage nobody has just looked at. The ids come from
-`confirmed` on `/uav/search/status`; two seconds of silence from `search_node`
-sends nothing confirmed, because a search that is not reporting is not a search
-that is still checking. Nothing else goes to the boat.
+| Packet | From | When | Bytes |
+|---|---|---|---|
+| POSITIONS | Ekko | once per buoy, when its light is first decided; re-sent only if the boat has not acknowledged it | 1 + 11 per buoy (slot, id, lat, lon) |
+| LIGHTS | Ekko | every `boat_report_hz` | 2 (the confirmed gate or exit) + 1 per buoy (slot in 5 bits, light in 3) — 12 for Task 1 |
+| BOAT | Crusader | every second | 14: lat, lon, activity, target slot, and a 32-bit mask of the positions it holds — the acknowledgement |
 
-The path is **through the autopilot**, not a second link of our own: this node
-talks to MAVProxy on 14541, MAVProxy to the USB, and the autopilot routes a
-message addressed to the boat's sysid out the telemetry port the radio is on —
-which is why the boat must send heartbeats, or the autopilot has no route to it.
-We are **sysid 200** (`mav_source_system`) and address the boat at `boat_sysid`
-(2). Verified end to end in SITL on 16 Sep, using SITL's own SERIAL2 as the
-radio port — the same routing the RFD900ux relies on. In `sim_search` that port
-is UDP 14555 and a second one, SERIAL1 on 14556, is free for the stand-in boat:
+Buoys travel as **radio slots 1–31**, not tracker ids: `buoy_mapper` numbers every
+track it ever starts, false ones included, so ids climb past what 5 bits hold. A
+buoy's POSITIONS record carries its real id once, so every receiver still calls
+it B7. LIGHTS go out whole every period: a lost packet costs a second, never a
+wrong light.
 
-    python3 tools/scripts/fake_crusader.py --udp udpin:0.0.0.0:14556 --sysid 2
+**The confirmation is the one thing the boat cannot work out for itself**: the
+gate (or exit) Ekko is over and has just seen. A buoy the aircraft has not
+reached yet is missing from the map, and a light mapped a minute ago is not a
+light seen now. It comes from `confirmed` on `/uav/search/status`; two seconds of
+silence from `search_node` sends nothing confirmed. Nothing else goes to the boat.
 
-and at the park, the same tool on a laptop with `--port COM5`.
+Ekko addresses these to **everyone** (target 0), so the autopilot forwards them
+out every link and the ground laptop on the mesh hears them even before a boat
+has said hello. Boat reports are read only from `boat_sysid` (2); `boat_sysid 0`
+turns the link off. We are **sysid 200** (`mav_source_system`). The path is
+**through the autopilot** — this node talks to MAVProxy on 14541, MAVProxy to the
+USB, the autopilot to the telemetry port the radio is on — so the boat must send
+heartbeats, or nothing it sends back is routed to us.
+
+Verified in SITL with a stand-in boat on SITL's own SERIAL2 (UDP 14555 in
+`sim_search`); SERIAL1 on 14556 is free for the team-laptop tool:
+
+    python3 tools/scripts/fake_crusader.py --udp udpin:0.0.0.0:14556
+
+and on the mesh, the same tool on a laptop with `--port COM5`. `tools/scripts/
+rfd_setup.py` reads a radio and sets it up for the mesh (Multipoint firmware,
+920–925 MHz, the laptop as master).
 
 ## There is no disarm path, deliberately
 

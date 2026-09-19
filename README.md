@@ -63,7 +63,7 @@ not like two vehicles.
 
 **Crusader is not on this list, and that is the point.** At the competition the
 boat is reached over the RFD900ux on the autopilot's telemetry port, not over
-IP — MAVLink `TUNNEL`, two payload types, format in
+IP — MAVLink `TUNNEL`, three payload types, format in
 `uav_common/boat_link.py`. It needs no port here because nothing about it is
 ours to route: the autopilot forwards it (see `uav_fcu/README.md`).
 

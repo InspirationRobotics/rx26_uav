@@ -591,48 +591,94 @@ def case_escort():
     got = [b["id"] for b in ec.unread_ahead(lone, (0.0, 0.0), crs)]
     r.append(check("a LONE buoy is never worth reading for a gate", 6 not in got, got))
 
-    # The bytes that cross the radio.
-    packed = boat_link.pack_buoys([(b["id"], 32.9 + b["id"] * 1e-5,
-                                    -117.0 - b["id"] * 1e-5, b["label"])
-                                   for b in B])
-    report = boat_link.unpack_buoys(packed)
-    back = report["buoys"]
-    r.append(check("the whole 8-buoy map fits one radio packet (%d bytes)"
-                   % len(packed), len(packed) <= boat_link.MAX_PAYLOAD
-                   and len(back) == len(B)))
-    r.append(check("...and comes back the same, to 1e-7 degrees",
-                   all(a["id"] == b["id"] and a["label"] == b["label"]
-                       and abs(a["lat"] - (32.9 + b["id"] * 1e-5)) < 1e-7
-                       for a, b in zip(back, B))))
-    boat = boat_link.unpack_boat(boat_link.pack_boat(32.9242, -117.0193, 3, 6))
-    r.append(check("the boat's report survives the round trip",
-                   boat["activity"] == 3 and boat["target"] == 6
-                   and abs(boat["lat"] - 32.9242) < 1e-7, boat))
-    big = boat_link.unpack_buoys(boat_link.pack_buoys(
-        [(i, 32.9, -117.0, "OFF") for i in range(1, 30)]))["buoys"]
-    r.append(check("more buoys than fit are cut, not garbled",
-                   len(big) == boat_link.MAX_BUOYS, len(big)))
-    # The wire field is a fixed 128 bytes whatever the map holds, and what comes
-    # back out is the real bytes only -- a round trip through a padded frame.
-    padded = boat_link.pad(packed)
-    frame = type("T", (), {"payload": list(padded), "payload_length": len(packed)})()
-    # What the boat cannot work out for itself: what Ekko has just confirmed.
-    field = [(b["id"], 32.9 + b["id"] * 1e-5, -117.0 - b["id"] * 1e-5,
-              b["label"]) for b in B]
-    got = [boat_link.unpack_buoys(boat_link.pack_buoys(field, c))["confirmed"]
-           for c in ((), (8,), (2, 3))]
-    r.append(check("confirmed ids survive the round trip: nothing, exit, gate",
-                   got == [[], [8], [2, 3]], got))
-    r.append(check("a full map still fits one packet with the confirmation",
-                   len(boat_link.pack_buoys(
-                       [(i, 32.9, -117.0, "OFF")
-                        for i in range(1, boat_link.MAX_BUOYS + 1)],
-                       (2, 3))) <= boat_link.MAX_PAYLOAD,
-                   "%d buoys" % boat_link.MAX_BUOYS))
+    r += case_radio(B)
+    return r
+
+
+def case_radio(B):
+    """The bytes on the RFD900ux mesh: positions once, lights by slot, the
+    boat's acknowledgement -- and the bookkeeping that decides what to resend."""
+    r = []
+    field = [(b["id"], 32.9 + b["id"] * 1e-5, -117.0 - b["id"] * 1e-5, b["label"])
+             for b in B]
+
+    # -- the packets themselves
+    recs = [(i + 1, bid, lat, lon) for i, (bid, lat, lon, _l) in enumerate(field)]
+    pos = boat_link.pack_positions(recs)
+    back = [x for p in pos for x in boat_link.unpack_positions(p)]
+    r.append(check("8 positions fit one packet (%d bytes) and come back to 1e-7 deg"
+                   % len(pos[0]), len(pos) == 1 and len(pos[0]) <= boat_link.MAX_PAYLOAD
+                   and all(a["id"] == bid and abs(a["lat"] - lat) < 1e-7
+                           and abs(a["lon"] - lon) < 1e-7
+                           for a, (_s, bid, lat, lon) in zip(back, recs))))
+    many = boat_link.pack_positions([(i, 1000 + i, 32.9, -117.0) for i in range(1, 25)])
+    r.append(check("24 positions split across packets, none lost, ids above 255 kept",
+                   sum(len(boat_link.unpack_positions(p)) for p in many) == 24
+                   and all(len(p) <= boat_link.MAX_PAYLOAD for p in many)
+                   and boat_link.unpack_positions(many[-1])[-1]["id"] == 1024, len(many)))
+    lights = {i + 1: lab for i, (_b, _la, _lo, lab) in enumerate(field)}
+    lp = boat_link.pack_lights(lights, (2, 3))
+    lb = boat_link.unpack_lights(lp)
+    r.append(check("lights: one byte a buoy plus two for the confirmation (%d bytes)"
+                   % len(lp), len(lp) == 2 + len(lights) and lb["lights"] == lights
+                   and lb["confirmed"] == [2, 3], len(lp)))
+    r.append(check("every light state survives its 3 bits",
+                   all(boat_link.unpack_lights(boat_link.pack_lights({31: st}))
+                       ["lights"][31] == st for st in boat_link.STATES)))
+    bt = boat_link.unpack_boat(boat_link.pack_boat(32.9242, -117.0193, 3, 5, {1, 2, 31}))
+    r.append(check("the boat's report and its acknowledgement survive (14 bytes)",
+                   bt["activity"] == 3 and bt["target_slot"] == 5
+                   and bt["acked"] == {1, 2, 31} and abs(bt["lat"] - 32.9242) < 1e-7,
+                   bt))
+    padded = boat_link.pad(lp)
+    frame = type("T", (), {"payload": list(padded), "payload_length": len(lp)})()
     r.append(check("a TUNNEL payload is padded to 128 and trimmed back",
-                   len(padded) == boat_link.MAX_PAYLOAD
-                   and boat_link.body(frame) == packed,
-                   "%d bytes padded, %d real" % (len(padded), len(packed))))
+                   len(padded) == boat_link.MAX_PAYLOAD and boat_link.body(frame) == lp))
+
+    # -- Ekko's side: what goes on the air, and when
+    tx = boat_link.Sender()
+    unknown = [(bid, la, lo, "UNKNOWN") for bid, la, lo, _l in field]
+    tx.feed(unknown, [], 0.0)
+    r.append(check("an undecided buoy gets no position and no slot",
+                   not tx.slots and not tx.due(0.0)))
+    tx.feed(field, [2, 3], 1.0)
+    first = tx.due(1.0)
+    kinds = [k for k, _p in first]
+    r.append(check("decided buoys: positions sent, then lights, in one tick",
+                   kinds == [boat_link.PAYLOAD_POSITIONS, boat_link.PAYLOAD_LIGHTS], kinds))
+    r.append(check("positions go ONCE: nothing re-sent while no boat is heard",
+                   [k for k, _p in tx.due(10.0)] == [boat_link.PAYLOAD_LIGHTS]))
+    tx.boat_heard({1, 2, 3}, 11.0)
+    again = [p for k, p in tx.due(11.0) if k == boat_link.PAYLOAD_POSITIONS]
+    resent = {x["slot"] for p in again for x in boat_link.unpack_positions(p)}
+    r.append(check("a boat heard: only the positions it has NOT acknowledged are resent",
+                   resent == set(range(4, len(field) + 1)), sorted(resent)))
+    tx.boat_heard(set(range(1, len(field) + 1)), 12.0)
+    r.append(check("everything acknowledged: no more positions",
+                   not [k for k, _p in tx.due(20.0) if k == boat_link.PAYLOAD_POSITIONS]))
+    r.append(check("lights at most once a period",
+                   not [k for k, _p in tx.due(20.2) if k == boat_link.PAYLOAD_LIGHTS]))
+    tx.feed([(b, la, lo, "UNKNOWN" if b == 2 else lab) for b, la, lo, lab in field],
+            [], 30.0)
+    lt = [p for k, p in tx.due(30.0) if k == boat_link.PAYLOAD_LIGHTS]
+    r.append(check("a buoy whose light goes back to UNKNOWN stays on the air, as UNKNOWN",
+                   lt and boat_link.unpack_lights(lt[0])["lights"][tx.slot_of(2)] == "UNKNOWN"))
+
+    # -- the boat's side
+    rx = boat_link.Receiver()
+    for k, p in first:
+        rx.hear(k, p)
+    got = {b["id"]: b["label"] for b in rx.buoys()}
+    r.append(check("the boat rebuilds the map, labelled by the real buoy ids",
+                   got == {bid: lab for bid, _la, _lo, lab in field}, got))
+    r.append(check("...its confirmation comes back as buoy ids, not slots",
+                   rx.confirmed() == [2, 3], rx.confirmed()))
+    r.append(check("...and it acknowledges exactly the positions it holds",
+                   rx.acked() == set(range(1, len(field) + 1))))
+    lonely = boat_link.Receiver()
+    lonely.hear(boat_link.PAYLOAD_LIGHTS, boat_link.pack_lights({1: "FLASHING_RED"}, (1, 2)))
+    r.append(check("lights heard before any position: no buoy, no confirmation",
+                   lonely.buoys() == [] and lonely.confirmed() == []))
     return r
 
 

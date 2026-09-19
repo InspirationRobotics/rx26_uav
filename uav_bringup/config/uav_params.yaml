@@ -122,12 +122,12 @@ telemetry_bridge:
                                            #      one id are indistinguishable to
                                            #      every GCS on the link.
                                            #      0 = no boat; send nothing.
-    boat_report_hz: 1.0                    # [RO] whole-map rate to the boat. Ten
-                                           #      buoys is ~101 bytes, so the
-                                           #      radio is not the constraint --
-                                           #      and the WHOLE map every time,
-                                           #      never deltas, so one lost packet
-                                           #      costs a second of staleness.
+    boat_report_hz: 1.0                    # [RO] how often the LIGHTS go out:
+                                           #      one byte a buoy, 12 bytes for
+                                           #      Task 1, whole every time so a
+                                           #      lost packet costs a second.
+                                           #      Positions go once, re-sent only
+                                           #      if the boat has not acked them.
     geofence:                              # [RO] = shared.geofence (pinned by
                                            #      check_config.py). CLOSED ring;
                                            #      the closing point is stripped

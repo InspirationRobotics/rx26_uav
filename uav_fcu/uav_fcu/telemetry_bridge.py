@@ -41,15 +41,17 @@ MAVLink connection and there may only ever be one:
    On its own worker thread, because a mission dialog blocks for a second and
    the executor is what keeps every topic flowing.
 
-5. RX/TX (Crusader, over the RFD900 on the telemetry port): MAVLink TUNNEL
-   payloads, shapes in uav_common/boat_link.py. IN: where the boat is and the
-   one byte for what it is doing -> /uav/boat. OUT: the whole buoy map -- id,
-   position, light -- once a second, addressed to the boat's system id, plus
-   the ids the SEARCH has confirmed for the boat on a fresh look (its next gate,
-   or the exit; from /uav/search/status). That confirmation is the one thing the
-   boat cannot work out for itself -- a buoy the aircraft has not reached yet is
-   not in the map at all, and a light mapped a minute ago is not a light seen
-   now.
+5. RX/TX (Crusader and the ground laptop, over the RFD900ux mesh on the
+   telemetry port): MAVLink TUNNEL, shapes in uav_common/boat_link.py. OUT, to
+   EVERY radio (target 0, so the laptop hears it before any boat says hello):
+   each buoy's position ONCE, when its light is first decided -- re-sent only if
+   the boat does not acknowledge it -- and every second the lights, one byte a
+   buoy, with the ids the SEARCH has confirmed for the boat on a fresh look
+   (from /uav/search/status). IN: the boat's position, one byte for what it is
+   doing, and the positions it holds (the acknowledgement) -> /uav/boat.
+   The confirmation is the one thing the boat cannot work out for itself -- a
+   buoy the aircraft has not reached yet is not in the map at all, and a light
+   mapped a minute ago is not a light seen now.
    The UAV still sends the boat FACTS AND NOTHING ELSE: never a course, a
    waypoint or an instruction. Crusader plans its own passage from the buoys.
 
@@ -164,12 +166,12 @@ PARAM_SPEC = {
     "fence_timeout_s": dict(read_only=True, lo=1.0, hi=60.0,
                             description="per-exchange timeout, fence dialog"),
     "boat_sysid": dict(read_only=True, lo=0, hi=255,
-                       description="Crusader's MAVLink system id: who the buoy "
-                                   "map is addressed to, and whose reports are "
-                                   "read. 0 = no boat, send nothing"),
+                       description="Crusader's MAVLink system id: whose reports "
+                                   "are read. 0 = no boat link at all, send "
+                                   "nothing"),
     "boat_report_hz": dict(read_only=True, lo=0.1, hi=10.0,
-                           description="how often the whole buoy map goes to the "
-                                       "boat"),
+                           description="how often the lights go out over the "
+                                       "radio"),
 }
 
 RELEASE_FRAMES = 5          # all-zero override frames sent on trip
@@ -268,7 +270,11 @@ class TelemetryBridge(Node):
         # this node owns the one link, and what leaves the aircraft should leave
         # through the thing that checks what leaves the aircraft.
         self._buoys = None
-        self._boat_t = 0.0
+        # What goes on the air and when: positions once (re-sent only if the
+        # boat has not acknowledged them), lights every period.
+        self._radio = boat_link.Sender()
+        self._radio.LIGHTS_PERIOD_S = 1.0 / float(self.p["boat_report_hz"])
+        self._radio_sent = {boat_link.PAYLOAD_POSITIONS: 0, boat_link.PAYLOAD_LIGHTS: 0}
         # What the SEARCH has confirmed for the boat. The boat cannot work this
         # out from the map it receives, so the aircraft has to say it.
         self._search = StreamCache(SEARCH_MAX_AGE_S)
@@ -441,14 +447,17 @@ class TelemetryBridge(Node):
                         msg.fix_type, msg.eph, msg.satellites_visible,
                         getattr(msg, "h_acc", 0)), t, stamp)
                 elif mtype == "TUNNEL":
-                    # Crusader over the radio: where it is and what it is doing.
-                    if msg.payload_type == boat_link.PAYLOAD_BOAT:
+                    # Crusader over the radio: where it is, what it is doing,
+                    # and which buoy positions it holds.
+                    if (msg.payload_type == boat_link.PAYLOAD_BOAT
+                            and msg.get_srcSystem() == int(self.p["boat_sysid"])):
                         boat = boat_link.unpack_boat(boat_link.body(msg))
+                        self._radio.boat_heard(boat["acked"], t)
                         m = BoatState()
                         m.header.stamp = stamp
                         m.latitude, m.longitude = boat["lat"], boat["lon"]
                         m.activity = boat["activity"]
-                        m.target_buoy = boat["target"]
+                        m.target_buoy = self._radio.id_of(boat["target_slot"]) or 0
                         self.boat_pub.publish(m)
                 elif mtype == "PARAM_VALUE":
                     field = fcu_decode.FCU_PARAMS.get(
@@ -568,7 +577,7 @@ class TelemetryBridge(Node):
             m.header.stamp = self._rc.stamp
             m.channels = rc
             self.rc_pub.publish(m)
-        self._send_buoys(t)
+        self._radio_tick(t)
 
     def _search_cb(self, msg: SearchStatus):
         self._search.set(msg, time.monotonic())
@@ -583,33 +592,31 @@ class TelemetryBridge(Node):
     def _buoy_map_cb(self, msg: BuoyMap):
         self._buoys = [(b.id, b.latitude, b.longitude, b.label) for b in msg.buoys]
 
-    def _send_buoys(self, t):
-        """The whole map to Crusader, once a period. Never deltas: one packet
-        resyncs the boat completely, so a lost one costs a second of staleness
-        rather than a boat permanently missing a buoy."""
-        sysid = int(self.p["boat_sysid"])
-        if not sysid or not self._buoys:
+    def _radio_tick(self, t):
+        """Whatever is due on the mesh: new positions, re-sends the boat has not
+        acknowledged, and the lights once a period. Addressed to everyone."""
+        if not int(self.p["boat_sysid"]) or not self._buoys:
             return
-        if t - self._boat_t < 1.0 / float(self.p["boat_report_hz"]):
-            return
-        self._boat_t = t
-        confirmed = self._confirmed()
-        payload = boat_link.pack_buoys(self._buoys, confirmed)
-        self.conn.mav.tunnel_send(sysid, 0, boat_link.PAYLOAD_BUOYS,
-                                  len(payload), boat_link.pad(payload))
-        if len(self._buoys) > boat_link.MAX_BUOYS:
-            # Task 1 has ten buoys, so this means a false detection is on the
-            # map — and the boat is being told about the first twelve only.
+        self._radio.feed(self._buoys, self._confirmed(), t)
+        for ptype, payload in self._radio.due(t):
+            self.conn.mav.tunnel_send(0, 0, ptype, len(payload), boat_link.pad(payload))
+            self._radio_sent[ptype] += 1
+        if self._radio.overflow:
             self.get_logger().warn(
-                "buoy map has %d buoys; only %d fit one packet — the boat is "
-                "not hearing the rest" % (len(self._buoys), boat_link.MAX_BUOYS),
+                "%d buoys have no radio slot left (%d used): the mesh is not "
+                "hearing B%s" % (len(self._radio.overflow), boat_link.MAX_SLOT,
+                                 ", B".join(map(str, self._radio.overflow[:6]))),
                 throttle_duration_sec=60.0)
-        # One line a minute: at the field the question "is the boat being told
-        # anything?" needs an answer that does not require a second laptop.
+        # One line a minute: at the field "is anyone being told anything?" needs
+        # an answer that does not require a second laptop.
+        conf = self._confirmed()
         self.get_logger().info(
-            "buoy map -> boat (sysid %d): %d buoys, %d bytes, confirmed %s"
-            % (sysid, len(self._buoys), len(payload),
-               "/".join("B%d" % i for i in confirmed) or "nothing"),
+            "radio: %d buoy positions sent, %d acknowledged by the boat%s; lights "
+            "packets %d; confirmed %s"
+            % (len(self._radio.slots), len(self._radio.acked),
+               "" if self._radio.boat_listening(t) else " (no boat heard)",
+               self._radio_sent[boat_link.PAYLOAD_LIGHTS],
+               "/".join("B%d" % i for i in conf) or "nothing"),
             throttle_duration_sec=60.0)
 
     def _publish_drop_state(self):
