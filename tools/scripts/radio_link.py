@@ -1,26 +1,39 @@
 #!/usr/bin/env python3
-"""radio_link — the laptop's RFD900ux, shared out to QGC and the ground station.
+"""radio_link — share the RFD900ux when QGroundControl is NOT running.
 
     python tools/scripts/radio_link.py --port COM28
 
-A SERIAL PORT HAS EXACTLY ONE OWNER. QGroundControl and our own ground station
-both want what the radio hears, and whichever opened it first would lock the
-other out — the same rule that makes MAVProxy the sole owner of Ekko's Pixhawk.
-So this owns the radio and rebroadcasts over loopback UDP, and both connect to
-UDP instead:
+NORMALLY YOU DO NOT WANT THIS. QGC owns the radio directly (a serial link on
+COM28 at 115200, exactly as it owned the Holybro through every flight test) and
+feeds the laptop's ground station through its own MAVLink Forwarding —
+Application Settings > Telemetry > MAVLink Forwarding > localhost:14445 — which
+is one less program in the path that carries the aircraft's telemetry:
 
-    127.0.0.1:14550  -> QGroundControl (its automatic UDP link; nothing to set up)
-    127.0.0.1:14543  -> gcs_radio.py, the ground station running on this laptop
+    python tools/scripts/gcs_radio.py --from udpin:127.0.0.1:14445
 
-Both directions: anything either consumer sends is written back to the radio, so
-QGC can still change modes and read parameters. Loopback, so the ports cannot
-collide with the aircraft's 1454x or the boat's 1455x on the field network.
+This exists for the case where QGC is not in the picture and something still has
+to share the radio, because A SERIAL PORT HAS EXACTLY ONE OWNER: the page and a
+test tool would otherwise lock each other out. It holds the radio and
+rebroadcasts over loopback UDP:
 
-It forwards BYTES and counts them. It never parses, rewrites or originates
-MAVLink — a link that edits what crosses it is a link you cannot trust when the
-two ends disagree.
+    127.0.0.1:14550  -> a GCS, if one is running
+    127.0.0.1:14543  -> gcs_radio.py
+    127.0.0.1:14544  -> ad-hoc diagnostics, LISTEN ONLY
+
+Loopback, so the ports cannot collide with the aircraft's 1454x or the boat's
+1455x on the field network. It forwards BYTES and counts them; it never parses,
+rewrites or originates MAVLink.
+
+THE PORT HAS ONE OWNER HERE TOO, and that is this program's main loop: reads and
+writes both happen there, and everything a consumer sends is queued for it.
+The first version wrote to the port from the consumer threads and swallowed the
+failure with a bare `return` — the thread died on the first write error, the
+uplink went silently dead for the rest of the session, and every request looked
+like one the aircraft had ignored. That cost an afternoon on 20 Sep. A write
+that fails now says so and the link carries on.
 """
 import argparse
+import queue
 import socket
 import sys
 import threading
@@ -42,23 +55,29 @@ TEE = ("127.0.0.1", 14544)
 class Counts:
     def __init__(self):
         self.down = 0          # radio -> consumers
-        self.up = 0            # consumers -> radio
+        self.up = 0            # consumers -> radio, written
+        self.queued = 0        # consumers -> radio, offered
         self.bytes = 0
+        self.errors = 0
 
 
-def consumer(sock, port, counts, lock):
-    """Everything a consumer sends goes back out the radio."""
+def consumer(sock, outbound, counts):
+    """Everything a consumer sends is QUEUED for the radio.
+
+    It does not touch the serial port. pyserial is not safe to write from one
+    thread while another reads, and the first version did exactly that and
+    swallowed the failure with a bare `return` -- the thread died, the uplink
+    went silently dead for the rest of the session, and every request looked
+    like an unanswered one. One owner for the port; everything else queues.
+    """
     while True:
         try:
             data, _ = sock.recvfrom(4096)
-        except OSError:
+        except OSError as e:
+            print("  consumer socket closed: %s" % e, flush=True)
             return
-        with lock:
-            try:
-                port.write(data)
-                counts.up += 1
-            except Exception:
-                return
+        outbound.put(data)
+        counts.queued += 1
 
 
 def main():
@@ -76,7 +95,7 @@ def main():
     args = ap.parse_args()
 
     port = serial.Serial(args.port, args.baud, timeout=0.05)
-    counts, lock = Counts(), threading.Lock()
+    counts, outbound = Counts(), queue.Queue()
 
     outs = []
     for udp_port, talks_back in ((args.qgc, True), (args.gcs, True),
@@ -84,8 +103,10 @@ def main():
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.bind(("127.0.0.1", 0))          # consumers reply to this port
         outs.append((s, ("127.0.0.1", udp_port)))
+        print("  -> 127.0.0.1:%d   (replies accepted on 127.0.0.1:%d)"
+              % (udp_port, s.getsockname()[1]), flush=True)
         if talks_back:
-            threading.Thread(target=consumer, args=(s, port, counts, lock),
+            threading.Thread(target=consumer, args=(s, outbound, counts),
                              daemon=True).start()
 
     print("radio %s @ %d  ->  QGC 127.0.0.1:%d   ground station 127.0.0.1:%d"
@@ -101,11 +122,29 @@ def main():
                 counts.bytes += len(data)
                 for sock, addr in outs:
                     sock.sendto(data, addr)
+            # The SAME thread writes: one owner for the port, as MAVProxy is for
+            # the Pixhawk. A write that fails is reported and the link carries
+            # on -- it must never take the uplink down with it.
+            while True:
+                try:
+                    out = outbound.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    port.write(out)
+                    counts.up += 1
+                except Exception as e:                # noqa: BLE001
+                    counts.errors += 1
+                    print("  WRITE FAILED (%d so far): %s" % (counts.errors, e),
+                          flush=True)
             now = time.time()
             if now - last >= 10.0:
-                print("  %6.0f B/s from the radio   %d reads, %d frames sent back"
-                      % (counts.bytes / (now - last), counts.down, counts.up),
-                      flush=True)
+                print("  %6.0f B/s from the radio   %d reads   uplink %d sent"
+                      "/%d offered%s"
+                      % (counts.bytes / (now - last), counts.down, counts.up,
+                         counts.queued,
+                         "   %d WRITE ERRORS" % counts.errors if counts.errors
+                         else ""), flush=True)
                 counts.bytes = 0
                 last = now
     except KeyboardInterrupt:
