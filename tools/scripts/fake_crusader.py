@@ -121,6 +121,17 @@ class Crusader:
                     self.last_confirmed = conf
                 self.write("lights", sysid=src, lights=lights, confirmed=conf,
                            unplaced_slots=sorted(set(self.rx.lights) - set(self.rx.positions)))
+            else:
+                # EVERYTHING ELSE THAT CROSSED THE LINK, including the Radio
+                # tab's test frame. Dropping what it cannot decode made this
+                # tool unable to tell "nothing arrived" from "something arrived
+                # that I ignore" -- which is exactly the question the test frame
+                # exists to answer. describe() never raises.
+                name, summary = boat_link.describe(msg.payload_type,
+                                                   boat_link.body(msg))
+                say("EKKO %s: %s" % (name, summary))
+                self.write("tunnel", sysid=src, name=name, summary=summary,
+                           payload_type=int(msg.payload_type))
 
     # ---- sending
     def report(self, link, target_sysid):
