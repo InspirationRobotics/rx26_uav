@@ -51,6 +51,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
       --b-red:#e2564a;--b-green:#4ec27b;--b-blue:#57a6ff;
       --ok-bg:rgba(78,194,123,.13);--warn-bg:rgba(224,163,62,.14);
       --bad-bg:rgba(226,86,74,.16);--accent-bg:rgba(87,166,255,.13);
+      --logo-bg:#fff;
       color-scheme:dark}
 :root[data-theme=light]{--bg:#fff;--panel:#eef1f5;--line:#a3adbb;--fg:#0a0e13;
       --dim:#3b4655;--ok:#17743a;--warn:#8a5700;--bad:#b3241a;--accent:#0a56bd;
@@ -63,6 +64,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
       --b-red:#c42a1d;--b-green:#157d38;--b-blue:#0a5ccf;
       --ok-bg:rgba(23,116,58,.10);--warn-bg:rgba(138,87,0,.11);
       --bad-bg:rgba(179,36,26,.10);--accent-bg:rgba(10,86,189,.09);
+      --logo-bg:#fff;
       color-scheme:light}
 *{box-sizing:border-box}
 /* A normal reading face for words, monospace only where columns must line up
@@ -75,6 +77,12 @@ code,.mono,#logs{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospac
 header{position:sticky;top:0;z-index:5;background:var(--panel);
        border-bottom:1px solid var(--line);box-shadow:0 2px 8px rgba(0,0,0,.12)}
 .topbar{display:flex;align-items:center;gap:18px;padding:6px 16px;flex-wrap:wrap}
+/* The team's logos, on every tab. Dark line art, so they sit on a white badge
+   in both themes; embedded, because at the flight line there is nothing to
+   fetch them from (team_logos.py, made by tools/scripts/make_team_logos.py). */
+.logos{display:flex;align-items:center;gap:8px;background:var(--logo-bg);
+       border-radius:7px;padding:3px 8px;border:1px solid var(--line)}
+.logos img{height:32px;width:auto;display:block}
 .brand{display:flex;align-items:baseline;gap:8px;margin-right:6px}
 .brand b{font-size:19px;letter-spacing:.2px}
 .brand span{font-size:12px;color:var(--dim)}
@@ -258,6 +266,7 @@ details.about p{margin:6px 0 0;max-width:920px}
 </script></head><body>
 <header>
   <div class="topbar">
+    <div class="logos">__LOGOS__</div>
     <div class="brand"><b>Ekko</b><span>ground station</span></div>
     <div id="tabs"></div>
     <div class="spacer"></div>
@@ -1467,6 +1476,17 @@ def _ekko_mesh():
     return json.dumps({"groups": ekko_model.GROUPS, "hex": "".join(ekko_model.DATA)})
 
 
+def _logos():
+    """The team logos as <img> tags, or nothing if the generated file is
+    missing -- a page without its logos still flies."""
+    try:
+        from uav_groundstation import team_logos
+    except ImportError:
+        return ""
+    return "".join('<img src="%s" alt="%s" title="%s">' % (uri, name, name)
+                   for name, uri in team_logos.LOGOS)
+
+
 def render(poll_ms: float) -> bytes:
     """The page, with the browser's poll period and Ekko's model baked in.
 
@@ -1475,4 +1495,5 @@ def render(poll_ms: float) -> bytes:
     hits several times a second.
     """
     return (PAGE.replace("__POLL_MS__", str(int(poll_ms)))
-            .replace("__EKKO_MESH__", _ekko_mesh()).encode("utf-8"))
+            .replace("__EKKO_MESH__", _ekko_mesh())
+            .replace("__LOGOS__", _logos()).encode("utf-8"))

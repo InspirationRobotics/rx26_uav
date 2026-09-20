@@ -106,9 +106,14 @@ def main():
     r.append(check("has all six tabs",
                    all(t in page for t in (b"'nodes'", b"'tel'", b"'map'",
                                            b"'cam'", b"'logs'", b"'sys'"))))
+    # Embedded images are not fetches, and base64 can spell "cdn" by chance:
+    # judge the page with its data: URIs taken out.
+    bare = re.sub(rb"data:[^\"'\s)]+", b"", page)
     r.append(check("self-contained (no external fetch)",
-                   b"http://" not in page.replace(b"http://<JETSON_IP>", b"")
-                   and b"cdn" not in page.lower()))
+                   b"http://" not in bare.replace(b"http://<JETSON_IP>", b"")
+                   and b"cdn" not in bare.lower()))
+    r.append(check("team logos embedded in the header",
+                   page.count(b'<img src="data:image/') == 2 and b"__LOGOS__" not in page))
     body, status = get(base, "/")
     r.append(check("GET / serves it", status == 200 and body == page))
     r.append(check("light/dark toggle and a light palette",

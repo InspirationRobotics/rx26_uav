@@ -20,8 +20,12 @@ graph of the code it starts.
 
 ## `ground_station` — seven tabs
 
-**On every tab:** a battery readout in the header (volts, margin above
-`BATT_LOW_VOLT`, and in flight the minutes to it), a **buoy search** tile while
+**On every tab:** the team's logos in the header — embedded in the page by
+`team_logos.py`, which `tools/scripts/make_team_logos.py` regenerates when the
+artwork changes; they are dark line art, so they sit on a white badge in both
+themes, and they are embedded rather than fetched because at the flight line
+there is nothing to fetch them from. Beside them a battery readout (volts,
+margin above `BATT_LOW_VOLT`, and in flight the minutes to it), a **buoy search** tile while
 `search_node` runs (found of wanted, and what it is doing), and a **pre-flight
 strip** of nine checks, each one something that has already cost a sortie:
 telemetry, GPS, battery, the fence (where a climb stops, `FENCE_ALT_MAX -
