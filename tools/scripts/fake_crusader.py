@@ -219,7 +219,9 @@ def say(text):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--port", help="the RFD900ux's serial port (COM5, /dev/ttyUSB0)")
-    ap.add_argument("--baud", type=int, default=57600)
+    # 115200 is every radio's SERIAL_SPEED on this mesh; at 57600 the tool hears
+    # nothing and the radio looks dead.
+    ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--udp", help="a MAVLink endpoint instead of a serial port")
     ap.add_argument("--sysid", type=int, default=42,
                     help="this boat's system id: Ekko reads boat reports from "

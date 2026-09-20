@@ -11,6 +11,7 @@ What is checked is the SAFETY of the script as much as its happy path: read-only
 by default, refuses a radio that is not running Multipoint firmware, never
 touches transmit power unless asked, verifies after the reboot.
 """
+import glob
 import os
 import sys
 from types import SimpleNamespace
@@ -128,11 +129,36 @@ def link(modem):
 
 
 def args(**kw):
-    base = dict(apply=False, role=None, node_id=None, nodes=3, air=64, netid=0,
+    base = dict(apply=False, role=None, node_id=None, nodes=3, air=125, netid=0,
                 power=None, channels=None)
     base.update(kw)
     return SimpleNamespace(**base)
 
+
+
+def rs_defaults():
+    """rfd_setup's argparse defaults, read from the parser itself, so this
+    bench cannot drift away from the script it is guarding."""
+    import argparse
+    import contextlib
+    import io as _io
+    seen = {}
+    real = argparse.ArgumentParser.add_argument
+
+    def spy(self, *a, **kw):
+        for name in a:
+            if isinstance(name, str) and name.startswith("--"):
+                seen[name[2:].replace("-", "_")] = kw.get("default")
+        return real(self, *a, **kw)
+
+    argparse.ArgumentParser.add_argument = spy
+    try:
+        with contextlib.redirect_stderr(_io.StringIO()):
+            with contextlib.suppress(SystemExit):
+                rs.main([])            # --port is required: it exits after parsing
+    finally:
+        argparse.ArgumentParser.add_argument = real
+    return seen
 
 RESULTS = []
 
@@ -165,6 +191,34 @@ def main():
           code == 0 and not writes and m.reboots == 0, writes)
     check("the report names the wrong band and the transmit power",
           any("922000-928000" in l for l in lines) and any("30 dBm" in l for l in lines))
+
+    print("\nthe defaults match the mesh that exists")
+    # All three radios were set to SERIAL_SPEED 115200, AIR_SPEED 125 and
+    # NETID 0 on 18 Sep. A default that disagrees is not a slower link: the
+    # radio it is applied to goes DEAF, and a read at the wrong baud looks
+    # exactly like a dead radio (it cost half an hour on 19 Sep).
+    d = rs_defaults()
+    check("--baud defaults to the mesh's serial speed", d["baud"] == 115200,
+          d.get("baud"))
+    check("--air defaults to the mesh's air speed", d["air"] == 125, d.get("air"))
+    check("--netid defaults to multipoint's master net", d["netid"] == 0,
+          d.get("netid"))
+
+    print("\nthe laptop tools compile")
+    # Nothing else checks these: no bench imports them and colcon does not
+    # build tools/scripts, so a SyntaxError here surfaces at the field.
+    scripts = sorted(glob.glob(os.path.join(HERE, '..', 'scripts', '*.py')))
+    bad = []
+    for f in scripts:
+        # compile(), not py_compile: no .pyc is written anywhere, and it behaves
+        # the same on the laptop and on the Jetson.
+        try:
+            with open(f, encoding='utf-8') as fh:
+                compile(fh.read(), f, 'exec')
+        except SyntaxError as e:
+            bad.append('%s line %s: %s' % (os.path.basename(f), e.lineno, e.msg))
+    check("every script in tools/scripts compiles (%d)" % len(scripts),
+          scripts and not bad, bad)
 
     print("\nrefusals")
     m = FakeModem("RFD SiK 3.57 on RFD900ux", SIK_PARAMS)

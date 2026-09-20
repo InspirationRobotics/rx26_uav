@@ -288,6 +288,9 @@ class TelemetryBridge(Node):
         self._radio = boat_link.Sender()
         self._radio.LIGHTS_PERIOD_S = 1.0 / float(self.p["boat_report_hz"])
         self._radio_sent = {boat_link.PAYLOAD_POSITIONS: 0, boat_link.PAYLOAD_LIGHTS: 0}
+        #: A system that sent BOAT packets we are not listening to; see
+        #: the TUNNEL branch of the RX loop. 0 = nobody has.
+        self._wrong_boat = 0
         # What the SEARCH has confirmed for the boat. The boat cannot work this
         # out from the map it receives, so the aircraft has to say it.
         self._search = StreamCache(SEARCH_MAX_AGE_S)
@@ -464,8 +467,15 @@ class TelemetryBridge(Node):
                 elif mtype == "TUNNEL":
                     # Crusader over the radio: where it is, what it is doing,
                     # and which buoy positions it holds.
-                    if (msg.payload_type == boat_link.PAYLOAD_BOAT
-                            and msg.get_srcSystem() == int(self.p["boat_sysid"])):
+                    if msg.payload_type == boat_link.PAYLOAD_BOAT \
+                            and msg.get_srcSystem() != int(self.p["boat_sysid"]):
+                        # A boat packet from the wrong system id is the one
+                        # failure this link can have that looks EXACTLY like no
+                        # boat at all: positions re-send forever and nothing is
+                        # ever confirmed. Record who spoke, so the log can name
+                        # it instead of leaving an operator to guess.
+                        self._wrong_boat = msg.get_srcSystem()
+                    elif msg.payload_type == boat_link.PAYLOAD_BOAT:
                         boat = boat_link.unpack_boat(boat_link.body(msg))
                         self._radio.boat_heard(boat["acked"], t)
                         m = BoatState()
@@ -624,6 +634,13 @@ class TelemetryBridge(Node):
                 "hearing B%s" % (len(self._radio.overflow), boat_link.MAX_SLOT,
                                  ", B".join(map(str, self._radio.overflow[:6]))),
                 throttle_duration_sec=60.0)
+        if self._wrong_boat:
+            self.get_logger().warn(
+                "boat packets are arriving from system %d, but boat_sysid is %d: "
+                "they are being IGNORED, so nothing is acknowledged and nothing "
+                "is confirmed. One of the two is wrong."
+                % (self._wrong_boat, int(self.p["boat_sysid"])),
+                throttle_duration_sec=30.0)
         # One line a minute: at the field "is anyone being told anything?" needs
         # an answer that does not require a second laptop.
         conf = self._confirmed()
@@ -664,7 +681,16 @@ class TelemetryBridge(Node):
 
         Built before self._lock is taken and published after it is released,
         like attitude: a record of the link must never hold up the RC path.
+
+        NOTHING IS RECORDED UNTIL THE AUTOPILOT'S OWN ID IS KNOWN. pymavlink
+        learns target_system from the first heartbeat, and until it does the
+        test below cannot exclude the autopilot -- so Ekko's own telemetry was
+        logged as radio traffic for the first few seconds, and the tab then said
+        "Ekko, heard on the radio", which is exactly what this tab must never
+        invent. A few missed frames at startup is the cheaper error.
         """
+        if not self.conn.target_system:
+            return None
         src = msg.get_srcSystem()
         if src in (self.conn.target_system, self.conn.source_system):
             return None

@@ -39,7 +39,7 @@ class Clock:
 def boat_packet(log, clock):
     payload = boat_link.pack_boat(32.9238, -117.0386, 3, 4)
     name, summary = boat_link.describe(boat_link.PAYLOAD_BOAT, payload)
-    log.add(rc.RX, 2, 191, 200, name, boat_link.PAYLOAD_BOAT, summary, 27)
+    log.add(rc.RX, 42, 191, 200, name, boat_link.PAYLOAD_BOAT, summary, 27)
 
 
 def main():
@@ -50,17 +50,33 @@ def main():
                                  boat_link.pack_boat(32.9238, -117.0386, 3, 4))
     r.append(check("boat packet named BOAT", name == "BOAT", name))
     r.append(check("  ...says what the boat is doing and its target",
-                   "transiting" in s and "target B4" in s, s))
-    buoys = [(1, 32.9, -117.0, "FLASHING_RED"), (2, 32.9001, -117.0, "FLASHING_GREEN")]
-    name, s = boat_link.describe(boat_link.PAYLOAD_BUOYS,
-                                 boat_link.pack_buoys(buoys, [1, 2]))
-    r.append(check("buoy map named BUOY_MAP", name == "BUOY_MAP", name))
+                   "transiting" in s and "wants slot 4" in s, s))
+    _, s2 = boat_link.describe(
+        boat_link.PAYLOAD_BOAT,
+        boat_link.pack_boat(32.9238, -117.0386, 3, 4, acked=(1, 2, 3)))
+    r.append(check("  ...and how many positions it is holding -- the ack",
+                   "holds 3 position(s)" in s2, s2))
+    # v2 splits the old whole-map packet in two: POSITIONS once per buoy, LIGHTS
+    # every period. Both travel as radio SLOTS, so the summaries name slots --
+    # except POSITIONS, which is where a slot is tied to its buoy id.
+    name, s = boat_link.describe(
+        boat_link.PAYLOAD_POSITIONS,
+        boat_link.pack_positions([(1, 7, 32.9, -117.0), (2, 4, 32.9001, -117.0)])[0])
+    r.append(check("positions packet named POSITIONS", name == "POSITIONS", name))
+    r.append(check("  ...ties each buoy id to the slot it travels as",
+                   "2 buoy(s)" in s and "B7 as slot 1" in s and "B4 as slot 2" in s, s))
+    _, s = boat_link.describe(boat_link.PAYLOAD_POSITIONS, b"\x00")
+    r.append(check("  ...an empty positions packet says so", s == "empty", s))
+    lights = {1: "FLASHING_RED", 2: "FLASHING_GREEN"}
+    name, s = boat_link.describe(boat_link.PAYLOAD_LIGHTS,
+                                 boat_link.pack_lights(lights, [1, 2]))
+    r.append(check("lights packet named LIGHTS", name == "LIGHTS", name))
     r.append(check("  ...a confirmed gate reads red then green",
-                   "2 buoys" in s and "red B1" in s and "green B2" in s, s))
-    _, s = boat_link.describe(boat_link.PAYLOAD_BUOYS,
-                              boat_link.pack_buoys(buoys, [2]))
-    r.append(check("  ...a single confirmed id reads as the exit", "exit B2" in s, s))
-    _, s = boat_link.describe(boat_link.PAYLOAD_BUOYS, boat_link.pack_buoys(buoys))
+                   "2 light(s)" in s and "red slot 1" in s and "green slot 2" in s, s))
+    _, s = boat_link.describe(boat_link.PAYLOAD_LIGHTS,
+                              boat_link.pack_lights(lights, [2]))
+    r.append(check("  ...a single confirmed slot reads as the exit", "exit slot 2" in s, s))
+    _, s = boat_link.describe(boat_link.PAYLOAD_LIGHTS, boat_link.pack_lights(lights))
     r.append(check("  ...no confirmation reads as nothing", "confirmed nothing" in s, s))
     name, s = boat_link.describe(boat_link.PAYLOAD_TEST,
                                  boat_link.pack_test("test 1 from ekko"))
@@ -80,16 +96,18 @@ def main():
 
     print("\nRadioLog: records")
     clock = Clock()
-    log = rc.RadioLog(capacity=5, boat_sysid=2, clock=clock, wall=lambda: 0.0)
+    log = rc.RadioLog(capacity=5, boat_sysid=42, clock=clock, wall=lambda: 0.0)
     recs, newest, dropped = log.read()
     r.append(check("empty log reads empty", recs == [] and newest == 0 and dropped == 0))
-    log.add(rc.TX, 200, 1, 2, "BUOY_MAP", boat_link.PAYLOAD_BUOYS, "10 buoys", 120)
+    log.add(rc.TX, 200, 1, 42, "LIGHTS", boat_link.PAYLOAD_LIGHTS,
+        "10 light(s), confirmed nothing", 120)
     boat_packet(log, clock)
     recs, newest, _ = log.read()
     r.append(check("records come back oldest first",
-                   [x["name"] for x in recs] == ["BUOY_MAP", "BOAT"], recs))
+                   [x["name"] for x in recs] == ["LIGHTS", "BOAT"], recs))
     r.append(check("TX is named by where it went, RX by who sent it",
-                   recs[0]["who"] == "Crusader" and recs[1]["who"] == "Crusader"))
+                   recs[0]["who"] == "Crusader (link node)"
+                   and recs[1]["who"] == "Crusader (link node)"))
     r.append(check("the cursor returns only newer records",
                    log.read(since_seq=newest)[0] == []))
     for _ in range(8):
@@ -100,17 +118,17 @@ def main():
                    (len(recs), dropped, newest)))
     systems = {s["sys"]: s for s in log.systems()}
     r.append(check("one entry per peer, sent and heard counted together",
-                   systems[2]["tx"] == 1 and systems[2]["rx"] == 1, systems.get(2)))
+                   systems[42]["tx"] == 1 and systems[42]["rx"] == 1, systems.get(42)))
     r.append(check("the ground station is named", systems[255]["name"] == "Ground station"))
     log.add(rc.TX, 200, 1, 0, "TEST", boat_link.PAYLOAD_TEST, "hi", 34)
     r.append(check("a broadcast is named as one", log.read()[0][-1]["who"] == "broadcast"))
     clock.t += 7
     r.append(check("ages come from the clock",
-                   abs({s["sys"]: s for s in log.systems()}[2]["heard_s"] - 7) < 1e-9))
+                   abs({s["sys"]: s for s in log.systems()}[42]["heard_s"] - 7) < 1e-9))
 
     print("\nRadioLog: boat link estimate")
     clock = Clock()
-    log = rc.RadioLog(boat_sysid=2, clock=clock)
+    log = rc.RadioLog(boat_sysid=42, clock=clock)
     b = log.boat_link()
     r.append(check("never heard: no rate and no percentage",
                    b["rate_hz"] is None and b["pct"] is None))
@@ -122,7 +140,7 @@ def main():
     r.append(check("  ...with a longest silence of about a second",
                    abs(b["longest_gap_s"] - 1.0) < 1e-6, b))
     clock = Clock()
-    log = rc.RadioLog(boat_sysid=2, clock=clock)
+    log = rc.RadioLog(boat_sysid=42, clock=clock)
     for i in range(60):
         if not 20 <= i < 30:
             boat_packet(log, clock)
@@ -133,7 +151,7 @@ def main():
     r.append(check("  ...and show as an eleven-second silence",
                    abs(b["longest_gap_s"] - 11.0) < 1e-6, b))
     clock = Clock()
-    log = rc.RadioLog(boat_sysid=2, clock=clock)
+    log = rc.RadioLog(boat_sysid=42, clock=clock)
     for _ in range(10):
         boat_packet(log, clock)
         clock.t += 1.0

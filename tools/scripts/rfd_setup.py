@@ -269,13 +269,18 @@ def run(link, args, out=print):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--port", required=True, help="COM5, /dev/ttyUSB0 ...")
-    ap.add_argument("--baud", type=int, default=57600)
+    # 115200: what every radio on this team's mesh is set to (SERIAL_SPEED
+    # 115). A read at 57600 gets no answer to +++ and reads as a dead radio.
+    ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--apply", action="store_true", help="write settings (default: read only)")
     ap.add_argument("--role", choices=("master", "node"))
     ap.add_argument("--node-id", type=int, help="2..16 for a node (the master is 1)")
     ap.add_argument("--nodes", type=int, default=3,
                     help="master only: the highest node id on the network (3 = laptop, Ekko, Crusader)")
-    ap.add_argument("--air", type=int, default=64, help="air data rate, kbit/s")
+    ap.add_argument("--air", type=int, default=125,
+                    help="air data rate, kbit/s. MUST MATCH EVERY OTHER RADIO "
+                         "on the mesh -- one radio at a different air speed is "
+                         "deaf, not slow. 125 is what ours run.")
     ap.add_argument("--netid", type=int, default=0)
     ap.add_argument("--power", type=int, help="TXPOWER dBm; unchanged unless given")
     ap.add_argument("--channels", type=int, help="NUM_CHANNELS; unchanged unless given")
