@@ -133,6 +133,40 @@ of reporting a shutdown that will never come.
 first, and a button that silently does nothing is worse than one that is openly
 off.
 
+## The same page, on the laptop, over the radio
+
+```bash
+python tools/scripts/radio_link.py --port COM28     # one terminal
+python tools/scripts/gcs_radio.py                   # another; then localhost:8090
+```
+
+`ground_station` is served BY the Jetson, so its range is WiFi's range.
+`tools/scripts/gcs_radio.py` renders the SAME page (`gcs_page.render`, through
+`GcsServer`) on the operator's laptop and fills it from the RFD900 instead:
+MAVLink for the aircraft — position, attitude, altitude, battery, GPS, mode,
+armed, landed — and the TUNNEL payloads `telemetry_bridge` already broadcasts for
+the buoys, their lights and the confirmation. The **camera stays on WiFi**: it is
+video, and it is never going to fit in a link this size, so the snapshot names
+the aircraft in `cam.host` and the browser fetches the stream straight from it.
+
+`radio_link.py` exists because **a serial port has exactly one owner**: it holds
+the radio and fans it out to QGC (14550), the page (14543) and diagnostics
+(14544, listen-only), the same split MAVProxy makes aboard.
+
+**Control is not on the radio.** Every button posts to the aircraft's own page
+over WiFi, where the server-side rules live; out of range they refuse in words.
+The chips that can only be judged aboard — gimbal, stream, recording, mapping —
+are taken from the aircraft while WiFi reaches it and blank when it does not.
+
+**THE LINK IS HALF-DUPLEX, AND A BUSY DOWNLINK STARVES THE UPLINK.** Measured
+20 Sep: at 23.5 kbit/s down, the autopilot answered NOTHING asked of it over the
+radio — not a parameter, not the fence, not a stream-rate change — while the
+same requests over USB answered instantly. It is also why QGC's parameter
+download over the radio has never worked. Keep the downlink lean: the `MAVn_*`
+group for that port is a BUNDLE (EXTRA1 carries AHRS2, SIMSTATE and ESC
+telemetry along with ATTITUDE), and ArduPilot 4.7 latches those rates AT BOOT,
+so trimming them needs a reboot to take effect.
+
 ## `ocs_client` — the heartbeat
 
 2 Hz to the OCS at `192.168.8.107:37564`. Inbound commands are republished to

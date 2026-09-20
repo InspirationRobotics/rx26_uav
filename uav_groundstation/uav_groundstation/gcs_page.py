@@ -1264,7 +1264,7 @@ function renderBuoys(){
   var m=S.map||{},mp=m.mapper,bm=m.buoys,x;
   if(mp&&mp.serving){
     /* Protocol-relative, like the video: no absolute URL in the page. */
-    var base='//'+location.hostname+':'+mp.port+'/buoys.';
+    var base='//'+(mp.host||location.hostname)+':'+mp.port+'/buoys.';
     x='download: '+['kml','csv','plan','json'].map(function(f){
       return '<a href="'+base+f+'" download style="color:var(--accent)">'+f+'</a>'
     }).join(' · ');
@@ -1509,7 +1509,10 @@ function renderCamRec(){
 }
 function renderCam(){
   renderCamRec();
-  var c=S.cam||{},host=location.hostname,box=el('cam');
+  /* host: the camera and the map downloads are served by the AIRCRAFT. On its
+     own page that is this page's host; on a copy running on a laptop off the
+     radio (tools/scripts/gcs_radio.py) it is not, so the snapshot may name it. */
+  var c=S.cam||{},host=c.host||location.hostname,box=el('cam');
   if(!c.source){
     camSrc=null;
     var cn=nodeItem('camera_node');
