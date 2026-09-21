@@ -187,6 +187,14 @@ class Radio:
                     continue
                 if src != self.sysid:
                     continue            # the boat and the other GCS are not us
+                # COMPONENT 1, THE AUTOPILOT, AND NOTHING ELSE ON IT. Ekko's
+                # system 1 also carries the gimbal, which sends its own
+                # HEARTBEAT with custom_mode 0 and no armed bit. Taking those
+                # made the page flip between LOITER and STABILIZE, and -- far
+                # worse -- made `armed` flicker false several times a second
+                # while QGC, which filters properly, sat steady on LOITER.
+                if msg.get_srcComponent() != 1:
+                    continue
                 if typ == "GLOBAL_POSITION_INT":
                     self.pose.set(msg, t)
                 elif typ == "ATTITUDE":
