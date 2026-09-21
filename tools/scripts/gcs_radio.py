@@ -81,6 +81,20 @@ WANTED = [(30, "ATTITUDE", 8.0),
 #: WiFi reaches it.
 JETSON_CHIPS = {"gimbal", "stream", "rec", "map"}
 
+#: How far back the bandwidth figure looks.
+LINK_WINDOW_S = 5.0
+
+#: The mesh's AIR_SPEED in kbit/s -- the denominator for "how full is the link".
+#: It is the RAW air rate, not throughput: RFDesign measure real throughput at
+#: roughly two thirds of it, and that total is SHARED between every node on the
+#: network, so Ekko's share falls when Crusader joins. Treat the percentage as
+#: "share of the raw air rate", which is why the tile names the number.
+DEFAULT_AIR_KBIT = 125.0
+
+#: A blank line, kept out of the format strings: a literal one inside a
+#: heredoc-written patch has been mangled twice now.
+NL = "\n"
+
 #: How long a stream may be silent before the page shows a blank instead.
 TIMEOUT_S = 3.0
 #: Working altitude of the buoy pass, for the pre-flight fence check.
@@ -128,11 +142,13 @@ class ArmedSince:
 class Radio:
     """Everything heard on the link, and the page's snapshot built from it."""
 
-    def __init__(self, endpoint, jetson, cam_port, sysid):
+    def __init__(self, endpoint, jetson, cam_port, sysid, air_kbit):
         self.sysid = sysid
         self.jetson = jetson
         self.cam_port = cam_port
         self.lock = threading.Lock()
+        self.endpoint = endpoint
+        self.air_kbit = float(air_kbit)
         self.conn = mavutil.mavlink_connection(endpoint, source_system=254,
                                                source_component=190)
         self.pose = StreamCache(TIMEOUT_S)
@@ -153,6 +169,14 @@ class Radio:
         self.wifi = None                        # the Jetson's own snapshot
         self.wifi_t = 0.0
         self.trail_origin = None
+        #: Bytes seen on the link, as (when, size), trimmed to LINK_WINDOW_S.
+        self.bytes_seen = []
+        #: The smallest (local clock - autopilot clock) yet seen. Clocks run at
+        #: the same rate, so the MINIMUM offset is the best estimate of a
+        #: delay-free sample; anything above it is time this data spent queued.
+        self.clock_floor = None
+        self.lag_s = None
+        self.radio_status = None
         #: MISSION_* frames, routed OUT of the read loop. Two threads
         #: calling recv_match on one connection race, and the reader wins:
         #: the fence dialog would wait for a MISSION_COUNT that had already
@@ -174,6 +198,23 @@ class Radio:
             typ = msg.get_type()
             if typ == "BAD_DATA":
                 continue
+            with self.lock:
+                self.bytes_seen.append((t, len(msg.get_msgbuf())))
+                if typ == "RADIO_STATUS":
+                    self.radio_status = msg
+                # LAG, from the autopilot's own clock. A message carries the
+                # boot time it was SAMPLED at, so the gap between that and now
+                # is transport delay plus a fixed clock offset. The offset is
+                # constant, so the smallest gap ever seen is the floor, and
+                # today's excess over it is how far behind this data is. This
+                # is the number that would have explained the 3D model still
+                # moving ten seconds after Chris landed.
+                boot_ms = getattr(msg, "time_boot_ms", None)
+                if boot_ms:
+                    off = t - boot_ms / 1000.0
+                    if self.clock_floor is None or off < self.clock_floor:
+                        self.clock_floor = off
+                    self.lag_s = max(0.0, off - self.clock_floor)
             src = msg.get_srcSystem()
             with self.lock:
                 if typ in ("MISSION_COUNT", "MISSION_ITEM_INT", "MISSION_ACK"):
@@ -231,6 +272,34 @@ class Radio:
                         break
                     time.sleep(0.2)
             time.sleep(30.0)
+
+    def watch_loop(self):
+        """Say, out loud, when telemetry is not arriving.
+
+        This program is fed by QGroundControl's MAVLink Forwarding, so if QGC
+        is closed or its link is down, the page loses everything about the
+        AIRCRAFT while the half that comes over WiFi -- nodes, system, camera,
+        the dropdowns -- keeps working. That reads as "the GUI is broken" and
+        it cost Chris a session on 20 Sep. A window that goes quiet must say
+        why it went quiet.
+        """
+        flowing = None
+        while True:
+            now = time.monotonic()
+            have = self.hb.get(now) is not None
+            if have != flowing:
+                if have:
+                    print("%s  telemetry is flowing from QGC.%s"
+                          % (NL, NL), flush=True)
+                elif flowing is not None:
+                    print("%s  *** TELEMETRY STOPPED ***" % NL,
+                          flush=True)
+                flowing = have
+            if not have:
+                print("  no telemetry on %s -- is QGroundControl running, is "
+                      "its link to Ekko CONNECTED, and is Telemetry > MAVLink "
+                      "Forwarding enabled?" % self.endpoint, flush=True)
+            time.sleep(10.0)
 
     def wifi_loop(self):
         """The Jetson's own snapshot, for what the radio cannot carry.
@@ -441,13 +510,50 @@ class Radio:
                     "footprint": footprint, "ceiling": ceiling,
                 },
                 "sys": (wifi or {}).get("sys"),
-                "power": {"allowed": False,
-                          "reason": ("power is only offered on the aircraft's own "
-                                     "page, over WiFi")},
+                # The aircraft's OWN verdict, whole. Every button posts to
+                # the Jetson, so the checks that matter -- refused while armed,
+                # refused while the armed state is unknown, hostname typed --
+                # run there either way. Hardcoding it off here only removed a
+                # working button (Chris, 20 Sep).
+                "power": ((wifi or {}).get("power")
+                          or {"allowed": False,
+                              "reason": ("no WiFi to %s: power is offered only "
+                                         "when the aircraft is reachable"
+                                         % self.jetson)}),
                 "cam": self._cam(wifi),
-                "link": {"radio": hb is not None, "wifi": wifi is not None},
+                "link": self._link(now, hb is not None, wifi is not None),
             }
             return snap
+
+    def _link(self, now, radio, wifi):
+        """What the radio link is doing, for the tile on every tab.
+
+        Bandwidth is measured, not claimed: the bytes actually parsed off the
+        link over the last few seconds. Lag is the delay-variation described
+        above -- it reads zero on a healthy link and climbs when data is
+        queueing somewhere, which is the failure an operator cannot see.
+        """
+        self.bytes_seen = [(t, n) for t, n in self.bytes_seen
+                           if now - t <= LINK_WINDOW_S]
+        total = sum(n for _, n in self.bytes_seen)
+        span = LINK_WINDOW_S if self.bytes_seen else 0.0
+        kbit = (total * 8 / span / 1000.0) if span else None
+        out = {"radio": radio, "wifi": wifi,
+               "bytes_s": round(total / span, 1) if span else None,
+               # USED, not available: what was actually received and parsed.
+               "kbit_s": round(kbit, 1) if kbit is not None else None,
+               "air_kbit_s": self.air_kbit,
+               "pct": (round(100.0 * kbit / self.air_kbit, 1)
+                       if kbit is not None and self.air_kbit else None),
+               "lag_ms": (int(round(self.lag_s * 1000))
+                          if self.lag_s is not None else None),
+               "source": self.endpoint}
+        r = self.radio_status
+        if r is not None:
+            out.update({"rssi": r.rssi, "remrssi": r.remrssi,
+                        "noise": r.noise, "remnoise": r.remnoise,
+                        "txbuf": r.txbuf, "errors": r.rxerrors})
+        return out
 
     # -------------------------------------------------------------- the pieces
 
@@ -541,11 +647,16 @@ def main():
                     help="the aircraft, for the camera and the buttons, over WiFi")
     ap.add_argument("--port", type=int, default=8090, help="page port")
     ap.add_argument("--sysid", type=int, default=1, help="the autopilot's system id")
+    ap.add_argument("--air", type=float, default=DEFAULT_AIR_KBIT,
+                    help="the mesh's AIR_SPEED in kbit/s, the denominator for "
+                         "the link tile's percentage (default %d)"
+                         % DEFAULT_AIR_KBIT)
     args = ap.parse_args()
 
-    radio = Radio(args.endpoint, args.jetson, args.port + 1, args.sysid)
+    radio = Radio(args.endpoint, args.jetson, args.port + 1, args.sysid,
+                  args.air)
     for fn in (radio.read_loop, radio.request_loop, radio.wifi_loop,
-               radio.fence_loop):
+               radio.fence_loop, radio.watch_loop):
         threading.Thread(target=fn, daemon=True).start()
 
     server = GcsServer(render(200.0), radio.snapshot, radio.action,

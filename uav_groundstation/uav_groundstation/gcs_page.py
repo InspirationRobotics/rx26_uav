@@ -287,6 +287,7 @@ details.about p{margin:6px 0 0;max-width:920px}
     <div id="flighttime" class="tile"></div>
     <div id="gpstile" class="tile"></div>
     <div id="alttile" class="tile"></div>
+    <div id="linktile" class="tile hidden"></div>
     <div id="searchtile" class="tile hidden"></div>
   </div>
   <div id="preflight"></div>
@@ -1237,6 +1238,35 @@ function renderVitals(){
   var altOk=t.pose_ok&&t.alt_rel!=null;
   tile('alttile',altOk?'':'bad','Altitude',altOk?fmt(t.alt_rel,1)+' m':'\u2014',
     altOk?esc(t.mode||'')+(t.landed?' \u00b7 '+esc(t.landed.replace('_',' ').toLowerCase()):''):'position stale')
+  /* The RADIO LINK, on every tab: what it is actually carrying, and how far
+     BEHIND it is. Hidden unless the snapshot carries a link block, so the
+     aircraft's own page -- which is not on the far end of a radio -- is
+     unchanged. Lag is the number an operator cannot otherwise see: a link can
+     be delivering full bandwidth and still be showing the past, which is how
+     a 3D model kept moving ten seconds after the aircraft had landed. */
+  var L=S.link,lt=el('linktile');
+  if(!L){lt.className='tile hidden'}
+  else if(!L.radio){
+    tile('linktile','bad','Radio link','\u2014',
+      'no telemetry \u2014 is QGC connected, with MAVLink forwarding on?')}
+  else{
+    /* USED, and what share of the air rate that is. Percentage first, because
+       "9 kbit/s" means nothing without the ceiling beside it. */
+    var lcls='',lsub=[];
+    if(L.pct!=null)lsub.push(fmt(L.pct,0)+'% of '+fmt(L.air_kbit_s,0)+' kbit/s air');
+    lsub.push(L.lag_ms!=null?'lag '+L.lag_ms+' ms':'lag unknown');
+    if(L.lag_ms!=null&&L.lag_ms>1500)lcls='warn';
+    if(L.pct!=null&&L.pct>50)lcls='warn';
+    if(L.rssi!=null)lsub.push('rssi '+L.rssi+'/'+L.remrssi);
+    if(L.txbuf!=null&&L.txbuf<90){lsub.push('buffer '+L.txbuf+'%');lcls='warn'}
+    tile('linktile',lcls,'Radio link',
+      (L.kbit_s!=null?fmt(L.kbit_s,1)+' kbit/s used':'\u2014'),
+      lsub.join(' \u00b7 '),'',
+      'Used: the bytes actually received over the last few seconds on '
+      +esc(L.source||'')+'. The percentage is of the RAW air rate; real '
+      +'throughput is roughly two thirds of it and is shared between every '
+      +'radio on the mesh, so Ekko\'s share falls when Crusader joins. '
+      +'Lag is how far BEHIND this data is, from the autopilot\'s own clock.')}
   /* The search tile shows only while search_node runs: found of wanted, big,
      and what it is doing in words. Blue while it is the one flying. */
   var se=(S.map||{}).search||{},st=el('searchtile');

@@ -136,6 +136,7 @@ def main():
                          ("3D attitude view beside the map", b'id="att3d"'),
                          ("Ekko's own model in it, not the stand-in", b'EKKO_MESH={"groups"'),
                          ("Fit frames the fence and buoys", b"fitView"),
+                         ("radio link tile on every tab", b'id="linktile"'),
                          ("radio tab", b"['radio','Radio']"),
                          ("radio send-test button", b"/radio/send_test")):
         r.append(check(name, needle in page))
