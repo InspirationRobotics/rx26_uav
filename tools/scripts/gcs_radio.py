@@ -91,6 +91,23 @@ LINK_WINDOW_S = 5.0
 #: "share of the raw air rate", which is why the tile names the number.
 DEFAULT_AIR_KBIT = 125.0
 
+#: RADIO_STATUS carries a RAW 0-255 byte from the radio's own chip, not dBm.
+#: SiK-derived firmware -- which RFDesign's Multipoint is -- documents the
+#: conversion as a straight line:
+#:
+#:     dBm = raw / 1.9 - 127
+#:
+#: so 180 is about -32 dBm and 50 is about -101. It is an APPROXIMATION of the
+#: chip's RSSI register and is not calibrated per unit, so treat it as a strong
+#: relative indicator rather than a measurement: what matters when a link is
+#: about to fail is the MARGIN over the noise floor, in the same units, which is
+#: why both are reported. Confirm against RFDesign's own manual before anyone
+#: quotes it as spec.
+def rssi_dbm(raw):
+    """A SiK RSSI byte as dBm, or None."""
+    return None if raw is None else round(raw / 1.9 - 127.0, 1)
+
+
 #: A blank line, kept out of the format strings: a literal one inside a
 #: heredoc-written patch has been mangled twice now.
 NL = "\n"
@@ -552,7 +569,15 @@ class Radio:
         if r is not None:
             out.update({"rssi": r.rssi, "remrssi": r.remrssi,
                         "noise": r.noise, "remnoise": r.remnoise,
-                        "txbuf": r.txbuf, "errors": r.rxerrors})
+                        "txbuf": r.txbuf, "errors": r.rxerrors,
+                        "dbm": rssi_dbm(r.rssi), "rem_dbm": rssi_dbm(r.remrssi),
+                        "noise_dbm": rssi_dbm(r.noise),
+                        # The number that predicts a link failing: how far the
+                        # signal sits above the noise, in dB. The absolute dBm
+                        # can look healthy while the margin has closed.
+                        "margin_db": (round((r.rssi - r.noise) / 1.9, 1)
+                                      if r.rssi is not None
+                                      and r.noise is not None else None)})
         return out
 
     # -------------------------------------------------------------- the pieces

@@ -115,6 +115,11 @@ header{position:sticky;top:0;z-index:5;background:var(--panel);
    which jumps under the eye. ONE line, always: clipped rather than
    wrapped, with the full text in the tile's tooltip. */
 #linktile .sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* It carries four numbers where the others carry one, so give it two
+   columns of the vitals grid. One line that FITS beats one line that is
+   clipped, and both beat a line that rewraps as a value changes width. */
+#linktile{grid-column:span 2}
+@media(max-width:700px){#linktile{grid-column:span 1}}
 .tile.ok{border-left-color:var(--ok)}
 .tile.warn{border-left-color:var(--warn);background:var(--warn-bg)}
 .tile.bad{border-left-color:var(--bad);background:var(--bad-bg)}
@@ -1258,11 +1263,16 @@ function renderVitals(){
     /* USED, and what share of the air rate that is. Percentage first, because
        "9 kbit/s" means nothing without the ceiling beside it. */
     var lcls='',lsub=[];
-    if(L.pct!=null)lsub.push(fmt(L.pct,0)+'% used');
+    if(L.pct!=null)lsub.push(fmt(L.pct,0)+'% used');   /* of the air rate */
     lsub.push(L.lag_ms!=null?'lag '+L.lag_ms+' ms':'lag unknown');
     if(L.lag_ms!=null&&L.lag_ms>1500)lcls='warn';
     if(L.pct!=null&&L.pct>50)lcls='warn';
-    if(L.rssi!=null)lsub.push('rssi '+L.rssi+'/'+L.remrssi);
+    /* dBm, not the raw 0-255 byte: 180 means nothing, -32 dBm does.
+       Local/remote, then the margin over noise, which is what closes
+       first when a link is about to fail. */
+    if(L.dbm!=null)lsub.push(fmt(L.dbm,0)+'/'+fmt(L.rem_dbm,0)+' dBm');
+    else if(L.rssi!=null)lsub.push('rssi '+L.rssi+'/'+L.remrssi);
+    if(L.margin_db!=null)lsub.push(fmt(L.margin_db,0)+' dB margin');
     if(L.txbuf!=null&&L.txbuf<90){lsub.push('buf '+L.txbuf+'%');lcls='warn'}
     /* used / capacity in the big number: "9.4 / 125 kbit/s" answers "used or
        available" without needing the sub line at all. */
@@ -1274,7 +1284,9 @@ function renderVitals(){
       +esc(L.source||'')+'. The percentage is of the RAW air rate; real '
       +'throughput is roughly two thirds of it and is shared between every '
       +'radio on the mesh, so Ekko\'s share falls when Crusader joins. '
-      +'Lag is how far BEHIND this data is, from the autopilot\'s own clock.')}
+      +'Lag is how far BEHIND this data is, from the autopilot\'s own clock. '
+      +'Signal is converted from the radio\'s raw 0-255 byte as dBm = raw/1.9 - 127 (SiK firmware); the margin over noise is what '
+      +'closes first when a link is failing.')}
   /* The search tile shows only while search_node runs: found of wanted, big,
      and what it is doing in words. Blue while it is the one flying. */
   var se=(S.map||{}).search||{},st=el('searchtile');
