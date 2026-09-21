@@ -110,6 +110,11 @@ header{position:sticky;top:0;z-index:5;background:var(--panel);
 .tile .big{font-size:24px;font-weight:700;line-height:1.15;display:flex;
            align-items:center;gap:9px}
 .tile .sub{font-size:13px;color:var(--dim)}
+/* The radio tile's numbers change width constantly -- lag crossing from
+   two digits to three re-wrapped the line and grew the whole vitals row,
+   which jumps under the eye. ONE line, always: clipped rather than
+   wrapped, with the full text in the tile's tooltip. */
+#linktile .sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile.ok{border-left-color:var(--ok)}
 .tile.warn{border-left-color:var(--warn);background:var(--warn-bg)}
 .tile.bad{border-left-color:var(--bad);background:var(--bad-bg)}
@@ -1253,14 +1258,17 @@ function renderVitals(){
     /* USED, and what share of the air rate that is. Percentage first, because
        "9 kbit/s" means nothing without the ceiling beside it. */
     var lcls='',lsub=[];
-    if(L.pct!=null)lsub.push(fmt(L.pct,0)+'% of '+fmt(L.air_kbit_s,0)+' kbit/s air');
+    if(L.pct!=null)lsub.push(fmt(L.pct,0)+'% used');
     lsub.push(L.lag_ms!=null?'lag '+L.lag_ms+' ms':'lag unknown');
     if(L.lag_ms!=null&&L.lag_ms>1500)lcls='warn';
     if(L.pct!=null&&L.pct>50)lcls='warn';
     if(L.rssi!=null)lsub.push('rssi '+L.rssi+'/'+L.remrssi);
-    if(L.txbuf!=null&&L.txbuf<90){lsub.push('buffer '+L.txbuf+'%');lcls='warn'}
+    if(L.txbuf!=null&&L.txbuf<90){lsub.push('buf '+L.txbuf+'%');lcls='warn'}
+    /* used / capacity in the big number: "9.4 / 125 kbit/s" answers "used or
+       available" without needing the sub line at all. */
     tile('linktile',lcls,'Radio link',
-      (L.kbit_s!=null?fmt(L.kbit_s,1)+' kbit/s used':'\u2014'),
+      (L.kbit_s!=null?fmt(L.kbit_s,1)+' / '+fmt(L.air_kbit_s,0)+' kbit/s'
+                     :'\u2014'),
       lsub.join(' \u00b7 '),'',
       'Used: the bytes actually received over the last few seconds on '
       +esc(L.source||'')+'. The percentage is of the RAW air rate; real '
