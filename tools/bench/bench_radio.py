@@ -56,28 +56,39 @@ def main():
         boat_link.pack_boat(32.9238, -117.0386, 3, 4, acked=(1, 2, 3)))
     r.append(check("  ...and how many positions it is holding -- the ack",
                    "holds 3 position(s)" in s2, s2))
-    # v2 splits the old whole-map packet in two: POSITIONS once per buoy, LIGHTS
-    # every period. Both travel as radio SLOTS, so the summaries name slots --
-    # except POSITIONS, which is where a slot is tied to its buoy id.
+    _, s3 = boat_link.describe(
+        boat_link.PAYLOAD_BOAT,
+        boat_link.pack_boat(32.9238, -117.0386, 3, 4, acked=(1, 2), epoch=37))
+    r.append(check("  ...and which MAP those positions belong to",
+                   "holds 2 position(s) of map 37" in s3, s3))
+    # POSITIONS and LIGHTS travel as radio SLOTS within a numbered MAP, so the
+    # summaries name the map and the slots -- except POSITIONS, which is where a
+    # slot is tied to its buoy id.
     name, s = boat_link.describe(
         boat_link.PAYLOAD_POSITIONS,
-        boat_link.pack_positions([(1, 7, 32.9, -117.0), (2, 4, 32.9001, -117.0)])[0])
+        boat_link.pack_positions([(1, 7, 32.9, -117.0), (2, 4, 32.9001, -117.0)], 37)[0])
     r.append(check("positions packet named POSITIONS", name == "POSITIONS", name))
-    r.append(check("  ...ties each buoy id to the slot it travels as",
-                   "2 buoy(s)" in s and "B7 as slot 1" in s and "B4 as slot 2" in s, s))
-    _, s = boat_link.describe(boat_link.PAYLOAD_POSITIONS, b"\x00")
+    r.append(check("  ...ties each buoy id to the slot it travels as, in its map",
+                   "map 37" in s and "2 buoy(s)" in s and "B7 as slot 1" in s
+                   and "B4 as slot 2" in s, s))
+    _, s = boat_link.describe(boat_link.PAYLOAD_POSITIONS, bytes([37, 0]))
     r.append(check("  ...an empty positions packet says so", s == "empty", s))
     lights = {1: "FLASHING_RED", 2: "FLASHING_GREEN"}
     name, s = boat_link.describe(boat_link.PAYLOAD_LIGHTS,
-                                 boat_link.pack_lights(lights, [1, 2]))
+                                 boat_link.pack_lights(lights, [1, 2], epoch=37))
     r.append(check("lights packet named LIGHTS", name == "LIGHTS", name))
     r.append(check("  ...a confirmed gate reads red then green",
-                   "2 light(s)" in s and "red slot 1" in s and "green slot 2" in s, s))
+                   "map 37" in s and "2 light(s)" in s and "red slot 1" in s
+                   and "green slot 2" in s, s))
     _, s = boat_link.describe(boat_link.PAYLOAD_LIGHTS,
-                              boat_link.pack_lights(lights, [2]))
+                              boat_link.pack_lights(lights, [2], epoch=37))
     r.append(check("  ...a single confirmed slot reads as the exit", "exit slot 2" in s, s))
-    _, s = boat_link.describe(boat_link.PAYLOAD_LIGHTS, boat_link.pack_lights(lights))
+    _, s = boat_link.describe(boat_link.PAYLOAD_LIGHTS,
+                              boat_link.pack_lights(lights, epoch=37))
     r.append(check("  ...no confirmation reads as nothing", "confirmed nothing" in s, s))
+    name, s = boat_link.describe(32770, bytes(12))
+    r.append(check("  ...an old v2 packet is named as retired, not misread",
+                   "retired" in s and "v2 positions" in s, (name, s)))
     name, s = boat_link.describe(boat_link.PAYLOAD_TEST,
                                  boat_link.pack_test("test 1 from ekko"))
     r.append(check("test frame decodes to its text",
@@ -100,7 +111,7 @@ def main():
     recs, newest, dropped = log.read()
     r.append(check("empty log reads empty", recs == [] and newest == 0 and dropped == 0))
     log.add(rc.TX, 200, 1, 42, "LIGHTS", boat_link.PAYLOAD_LIGHTS,
-        "10 light(s), confirmed nothing", 120)
+        "map 37, 10 light(s), confirmed nothing", 120)
     boat_packet(log, clock)
     recs, newest, _ = log.read()
     r.append(check("records come back oldest first",

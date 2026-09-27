@@ -596,73 +596,116 @@ def case_escort():
 
 
 def case_radio(B):
-    """The bytes on the RFD900ux mesh: positions once, lights by slot, the
-    boat's acknowledgement -- and the bookkeeping that decides what to resend."""
+    """The bytes on the RFD900ux mesh -- positions, lights by slot and the boat's
+    acknowledgement, all inside a numbered MAP -- and the bookkeeping that
+    decides what goes on the air. Ends with the 26 Sep 2026 park sequence that
+    lost six of ten buoys under v2, replayed."""
     r = []
     field = [(b["id"], 32.9 + b["id"] * 1e-5, -117.0 - b["id"] * 1e-5, b["label"])
              for b in B]
+    P, L = boat_link.PAYLOAD_POSITIONS, boat_link.PAYLOAD_LIGHTS
+
+    def slots_in(out):
+        return {x["slot"] for k, p in out if k == P
+                for x in boat_link.unpack_positions(p)["buoys"]}
 
     # -- the packets themselves
     recs = [(i + 1, bid, lat, lon) for i, (bid, lat, lon, _l) in enumerate(field)]
-    pos = boat_link.pack_positions(recs)
-    back = [x for p in pos for x in boat_link.unpack_positions(p)]
-    r.append(check("8 positions fit one packet (%d bytes) and come back to 1e-7 deg"
-                   % len(pos[0]), len(pos) == 1 and len(pos[0]) <= boat_link.MAX_PAYLOAD
+    pos = boat_link.pack_positions(recs, 9)
+    back = [x for p in pos for x in boat_link.unpack_positions(p)["buoys"]]
+    r.append(check("%d positions fit one packet (%d bytes), map number kept"
+                   % (len(recs), len(pos[0])),
+                   len(pos) == 1 and len(pos[0]) <= boat_link.MAX_PAYLOAD
+                   and boat_link.unpack_positions(pos[0])["epoch"] == 9
                    and all(a["id"] == bid and abs(a["lat"] - lat) < 1e-7
                            and abs(a["lon"] - lon) < 1e-7
                            for a, (_s, bid, lat, lon) in zip(back, recs))))
-    many = boat_link.pack_positions([(i, 1000 + i, 32.9, -117.0) for i in range(1, 25)])
+    many = boat_link.pack_positions([(i, 1000 + i, 32.9, -117.0) for i in range(1, 25)], 9)
     r.append(check("24 positions split across packets, none lost, ids above 255 kept",
-                   sum(len(boat_link.unpack_positions(p)) for p in many) == 24
+                   sum(len(boat_link.unpack_positions(p)["buoys"]) for p in many) == 24
                    and all(len(p) <= boat_link.MAX_PAYLOAD for p in many)
-                   and boat_link.unpack_positions(many[-1])[-1]["id"] == 1024, len(many)))
+                   and boat_link.unpack_positions(many[-1])["buoys"][-1]["id"] == 1024,
+                   len(many)))
     lights = {i + 1: lab for i, (_b, _la, _lo, lab) in enumerate(field)}
-    lp = boat_link.pack_lights(lights, (2, 3))
+    lp = boat_link.pack_lights(lights, (2, 3), epoch=9)
     lb = boat_link.unpack_lights(lp)
-    r.append(check("lights: one byte a buoy plus two for the confirmation (%d bytes)"
-                   % len(lp), len(lp) == 2 + len(lights) and lb["lights"] == lights
-                   and lb["confirmed"] == [2, 3], len(lp)))
+    r.append(check("lights: a byte a buoy, three for map + confirmation (%d bytes)"
+                   % len(lp), len(lp) == 3 + len(lights) and lb["lights"] == lights
+                   and lb["confirmed"] == [2, 3] and lb["epoch"] == 9, len(lp)))
     r.append(check("every light state survives its 3 bits",
-                   all(boat_link.unpack_lights(boat_link.pack_lights({31: st}))
+                   all(boat_link.unpack_lights(boat_link.pack_lights({31: st}, epoch=1))
                        ["lights"][31] == st for st in boat_link.STATES)))
-    bt = boat_link.unpack_boat(boat_link.pack_boat(32.9242, -117.0193, 3, 5, {1, 2, 31}))
-    r.append(check("the boat's report and its acknowledgement survive (14 bytes)",
-                   bt["activity"] == 3 and bt["target_slot"] == 5
-                   and bt["acked"] == {1, 2, 31} and abs(bt["lat"] - 32.9242) < 1e-7,
-                   bt))
+    bt = boat_link.unpack_boat(boat_link.pack_boat(32.9242, -117.0193, 3, 5, {1, 2, 31},
+                                                   epoch=9))
+    r.append(check("the boat's report, its ack and its map survive (15 bytes)",
+                   bt["activity"] == 3 and bt["target_slot"] == 5 and bt["epoch"] == 9
+                   and bt["acked"] == {1, 2, 31} and abs(bt["lat"] - 32.9242) < 1e-7, bt))
+    old = boat_link.unpack_boat(boat_link.pack_boat(32.9242, -117.0193, 3, 5, {1}))
+    r.append(check("a boat that sends no map number still decodes (map None)",
+                   old["epoch"] is None and old["acked"] == {1}, old))
     padded = boat_link.pad(lp)
     frame = type("T", (), {"payload": list(padded), "payload_length": len(lp)})()
     r.append(check("a TUNNEL payload is padded to 128 and trimmed back",
                    len(padded) == boat_link.MAX_PAYLOAD and boat_link.body(frame) == lp))
 
     # -- Ekko's side: what goes on the air, and when
-    tx = boat_link.Sender()
+    tx = boat_link.Sender(first_epoch=40)
     unknown = [(bid, la, lo, "UNKNOWN") for bid, la, lo, _l in field]
-    tx.feed(unknown, [], 0.0)
-    r.append(check("an undecided buoy gets no position and no slot",
-                   not tx.slots and not tx.due(0.0)))
-    tx.feed(field, [2, 3], 1.0)
-    first = tx.due(1.0)
+    tx.feed(unknown, [], 0.0, "mapA")
+    first0 = tx.due(0.0)
+    r.append(check("undecided buoys: no slot, no position; the map's lights still go",
+                   not tx.slots and [k for k, _p in first0] == [L]))
+    tx.feed(field, [2, 3], 1.0, "mapA")
+    first = tx.due(1.1)
     kinds = [k for k, _p in first]
     r.append(check("decided buoys: positions sent, then lights, in one tick",
-                   kinds == [boat_link.PAYLOAD_POSITIONS, boat_link.PAYLOAD_LIGHTS], kinds))
-    r.append(check("positions go ONCE: nothing re-sent while no boat is heard",
-                   [k for k, _p in tx.due(10.0)] == [boat_link.PAYLOAD_LIGHTS]))
-    tx.boat_heard({1, 2, 3}, 11.0)
-    again = [p for k, p in tx.due(11.0) if k == boat_link.PAYLOAD_POSITIONS]
-    resent = {x["slot"] for p in again for x in boat_link.unpack_positions(p)}
-    r.append(check("a boat heard: only the positions it has NOT acknowledged are resent",
+                   kinds == [P, L], kinds))
+    r.append(check("no boat, nothing moved: no positions before the refresh",
+                   [k for k, _p in tx.due(5.0)] == [L]))
+    r.append(check("...then the WHOLE map again at the refresh, heard or not",
+                   slots_in(tx.due(11.2)) == set(range(1, len(field) + 1))))
+    tx.boat_heard({1, 2, 3}, 12.0, epoch=40)
+    resent = slots_in(tx.due(15.0))
+    r.append(check("a boat heard: only the positions it has NOT acked are resent",
                    resent == set(range(4, len(field) + 1)), sorted(resent)))
-    tx.boat_heard(set(range(1, len(field) + 1)), 12.0)
-    r.append(check("everything acknowledged: no more positions",
-                   not [k for k, _p in tx.due(20.0) if k == boat_link.PAYLOAD_POSITIONS]))
+    tx.boat_heard(set(range(1, len(field) + 1)), 16.0, epoch=40)
+    r.append(check("everything acknowledged: no positions until the next refresh",
+                   not slots_in(tx.due(19.5))))
     r.append(check("lights at most once a period",
-                   not [k for k, _p in tx.due(20.2) if k == boat_link.PAYLOAD_LIGHTS]))
+                   not [k for k, _p in tx.due(19.6) if k == L]))
+    tx.boat_heard(set(), 20.0, epoch=39)
+    r.append(check("an acknowledgement for ANOTHER map is ignored",
+                   tx.acked == set(range(1, len(field) + 1)), sorted(tx.acked)))
+    tx.due(22.0)                                   # the refresh, out of the way
+    b1 = field[0][0]
+    nudged = [(b, la + (0.1 / 111320.0 if b == b1 else 0.0), lo, lab)
+              for b, la, lo, lab in field]
+    tx.feed(nudged, [], 24.0, "mapA")
+    r.append(check("the map moves a buoy 0.1 m: NOT re-sent",
+                   tx.slot_of(b1) not in slots_in(tx.due(24.0))))
+    moved = [(b, la + (0.5 / 111320.0 if b == b1 else 0.0), lo, lab)
+             for b, la, lo, lab in field]
+    tx.feed(moved, [], 24.5, "mapA")
+    got = [x for k, p in tx.due(24.5) if k == P
+           for x in boat_link.unpack_positions(p)["buoys"]]
+    r.append(check("...0.5 m: re-sent, alone, at its NEW position",
+                   len(got) == 1 and got[0]["id"] == b1
+                   and abs(got[0]["lat"] - moved[0][1]) < 2e-7, got))
+    tx.feed(field, [], 25.0, "mapA")
+    r.append(check("...but not again within 2 s, however the track jitters",
+                   not slots_in(tx.due(25.1))))
     tx.feed([(b, la, lo, "UNKNOWN" if b == 2 else lab) for b, la, lo, lab in field],
-            [], 30.0)
-    lt = [p for k, p in tx.due(30.0) if k == boat_link.PAYLOAD_LIGHTS]
-    r.append(check("a buoy whose light goes back to UNKNOWN stays on the air, as UNKNOWN",
+            [], 30.0, "mapA")
+    lt = [p for k, p in tx.due(30.0) if k == L]
+    r.append(check("a light that goes back to UNKNOWN stays on the air, as UNKNOWN",
                    lt and boat_link.unpack_lights(lt[0])["lights"][tx.slot_of(2)] == "UNKNOWN"))
+    gone = field[-1][0]
+    gone_slot = tx.slot_of(gone)
+    tx.feed(field[:-1], [], 31.0, "mapA")
+    lt = [p for k, p in tx.due(31.0) if k == L]
+    r.append(check("a buoy the mapper drops (merged) leaves the lights",
+                   lt and gone_slot not in boat_link.unpack_lights(lt[0])["lights"]
+                   and tx.slot_of(gone) is None))
 
     # -- the boat's side
     rx = boat_link.Receiver()
@@ -673,12 +716,57 @@ def case_radio(B):
                    got == {bid: lab for bid, _la, _lo, lab in field}, got))
     r.append(check("...its confirmation comes back as buoy ids, not slots",
                    rx.confirmed() == [2, 3], rx.confirmed()))
-    r.append(check("...and it acknowledges exactly the positions it holds",
-                   rx.acked() == set(range(1, len(field) + 1))))
+    r.append(check("...and it acks exactly the positions it holds, in map 40",
+                   rx.acked() == set(range(1, len(field) + 1)) and rx.epoch == 40))
+    for k, p in tx.due(32.0):                      # next lights, and a refresh
+        rx.hear(k, p)
+    r.append(check("...and drops the merged buoy when the lights stop naming it",
+                   gone not in {b["id"] for b in rx.buoys()}))
     lonely = boat_link.Receiver()
-    lonely.hear(boat_link.PAYLOAD_LIGHTS, boat_link.pack_lights({1: "FLASHING_RED"}, (1, 2)))
+    lonely.hear(L, boat_link.pack_lights({1: "FLASHING_RED"}, (1, 2), epoch=5))
     r.append(check("lights heard before any position: no buoy, no confirmation",
                    lonely.buoys() == [] and lonely.confirmed() == []))
+    late = boat_link.Receiver()                    # missed the 32.0 refresh
+    for t in (33.6, 34.7):
+        for k, p in tx.due(t):
+            late.hear(k, p)
+    r.append(check("a receiver that starts late hears lights, holds no buoy yet...",
+                   late.buoys() == []))
+    for k, p in tx.due(32.0 + tx.REFRESH_S + 0.1):
+        late.hear(k, p)
+    r.append(check("...and has the whole map after one refresh, with no ack",
+                   {b["id"] for b in late.buoys()} == {b for b, *_ in field[:-1]}))
+
+    # -- 26 Sep 2026, replayed: manual flights map B1-B10, the map is cleared,
+    # and the search finds ten buoys whose ids restart at B1. Under v2 the
+    # laptop ended up with four of them.
+    park = boat_link.Sender(first_epoch=200)
+    ground = boat_link.Receiver()                  # the laptop: listens, never acks
+
+    def air(t):
+        for k, p in park.due(t):
+            ground.hear(k, p)
+
+    before = [(i, 32.9241 + i * 1e-6, -117.0190, "OFF") for i in range(1, 11)]
+    park.feed(before, [], 0.0, "20260927T004800Z")
+    air(0.0)
+    held_before = {b["id"] for b in ground.buoys()}
+    park.feed([], [], 60.0, "20260927T005500Z")    # Clear buoys
+    air(60.0)
+    cleared = ground.buoys()
+    after_ids = [1, 2, 3, 5, 6, 9, 13, 14, 15, 18]
+    after = [(i, 32.9242 + i * 2e-6, -117.0191, "FLASHING_GREEN") for i in after_ids]
+    park.feed(after, [], 120.0, "20260927T005500Z")
+    air(120.0)
+    got = {b["id"]: (b["lat"], b["label"]) for b in ground.buoys()}
+    r.append(check("26 Sep replay: B1-B10 of the first map reach the laptop",
+                   held_before == set(range(1, 11)), sorted(held_before)))
+    r.append(check("...Clear buoys empties the laptop at once",
+                   cleared == [] and ground.epoch == park.epoch, cleared))
+    r.append(check("...ALL TEN of the search's buoys arrive, reused ids or not",
+                   set(got) == set(after_ids), sorted(got)))
+    r.append(check("...each at its NEW position, none at an old one",
+                   all(abs(got[i][0] - (32.9242 + i * 2e-6)) < 2e-7 for i in after_ids)))
     return r
 
 

@@ -1,8 +1,10 @@
 """boat_link -- the bytes Ekko and Crusader exchange over the RFD900ux mesh.
 
-PURE: struct packing and the bookkeeping around it; no ROS, no MAVLink import.
-Every radio on the mesh (Ekko, the ground laptop, Crusader, a laptop standing in
-for Crusader) packs and unpacks with THIS file, so the ends cannot drift apart.
+PURE: struct packing and the bookkeeping around it; no ROS, no MAVLink import,
+no other uav_common module (fake_crusader.py runs on a bare laptop with this
+file beside it). Every radio on the mesh (Ekko, the ground laptop, Crusader, a
+laptop standing in for Crusader) packs and unpacks with THIS file, so the ends
+cannot drift apart.
 
 CARRIED BY MAVLINK `TUNNEL` (128 bytes of vendor payload per message): the mesh
 also carries QGC and the autopilots' own telemetry, and Ekko's Pixhawk parses
@@ -10,35 +12,57 @@ every byte it hears, so anything we send must be a MAVLink frame. Each frame
 costs about 17 bytes of envelope, which is why each packet below carries
 everything of its kind at once rather than one fact per packet.
 
-NO FIELD NAMES ON THE AIR: the order of the bytes IS the meaning. The shapes:
+NO FIELD NAMES ON THE AIR: the order of the bytes IS the meaning. The shapes (v3):
 
-  POSITIONS  drone -> all   each buoy's position, ONCE, when its light is first
-             decided:  count, then per buoy  slot(1) id(2) lat(4) lon(4).
-             Re-sent only if the boat has not acknowledged it (see ACKS).
-  LIGHTS     drone -> all   every second: the confirmed gate or exit (two slots,
-             0 = none), then ONE BYTE per buoy -- slot in the top 5 bits, light
-             in the bottom 3. Ten buoys is 12 bytes. Sent whole each time:
-             a lost packet then costs a second, never a wrong light.
-  BOAT       boat -> all    every second: lat(4) lon(4) activity(1)
-             target slot(1), then a 32-bit mask of the slots whose positions
-             the boat HOLDS. That mask is the acknowledgement.
-  TEST       anyone -> all: a text line the ground station's Radio tab
-             puts on the air so an operator can watch one known frame
-             cross it. NEITHER VEHICLE ACTS ON IT.
+  POSITIONS  drone -> all   map(1) count(1), then per buoy  slot(1) id(2)
+             lat(4) lon(4). Sent when a buoy's light is first decided, again
+             whenever its mapped position moves by MOVE_M, and the WHOLE map
+             every REFRESH_S -- so a listener that joins late, restarts, or
+             lost a packet has the map within one refresh, acknowledged or not.
+  LIGHTS     drone -> all   every second: map(1), the confirmed gate or exit
+             (two slots, 0 = none), then ONE BYTE per buoy -- slot in the top 5
+             bits, light in the bottom 3. It is the WHOLE current map: a slot
+             missing from it is a buoy that is no longer on the map, and every
+             receiver drops it.
+  BOAT       boat -> all    every second: lat(4) lon(4) activity(1) target
+             slot(1), a 32-bit mask of the slots whose positions the boat HOLDS
+             (that mask is the acknowledgement), and optionally map(1) -- which
+             map those slots belong to.
+  TEST       anyone -> all: a text line the ground station's Radio tab puts on
+             the air so an operator can watch one known frame cross it.
+             NEITHER VEHICLE ACTS ON IT.
+
+THE MAP NUMBER, AND WHY v2 NEEDED IT. v2 sent each buoy's position ONCE, keyed
+by buoy_mapper's tracker id -- and the tracker restarts its ids at B1 on every
+"Clear buoys". At the park on 26 Sep 2026 the manual flights had used B1-B10,
+the map was cleared, and the autonomous search then found ten buoys of which six
+(B1, B2, B3, B5, B6, B9) had ids the sender had already sent: their positions
+never went out, and their lights went out under the OLD buoys' slots. The ground
+laptop showed 4 of 10; a boat that had heard the first map would have put the
+new lights on the old positions. Now every map gets a number, slots restart per
+map, and a receiver that hears a new number throws the old map away. The v2
+payload types (32770, 32771) are retired rather than re-shaped, so an old
+decoder ignores v3 packets instead of misreading them.
 
 SLOTS, NOT TRACKER IDS, ON THE AIR. buoy_mapper numbers every track it ever
 starts, false ones included, so ids are not 1-10 in a real session. Each buoy
-gets a radio slot 1-31 the first time its position is sent, and the POSITIONS
-record carries its real id once, so every receiver still labels it "B7".
+gets a radio slot 1-31 within its map the first time its position is sent, and
+the POSITIONS record carries its real id, so every receiver still labels it
+"B7". A slot is never reused within one map, so a merged-away buoy's number can
+never come back meaning someone else.
 """
+import math
+import os
 import struct
 
-#: TUNNEL payload types (vendor range, above 32767). 32769 was the old whole-map
-#: format; it is not reused, so an old sender cannot be misread as a new one.
+#: TUNNEL payload types (vendor range, above 32767). Retired numbers are never
+#: reused, so an old sender cannot be misread as a new one:
+#:   32769  v1 whole-map packet        32770 / 32771  v2 positions / lights
 PAYLOAD_BOAT = 32768         # boat -> all
-PAYLOAD_POSITIONS = 32770    # drone -> all
-PAYLOAD_LIGHTS = 32771       # drone -> all
+PAYLOAD_POSITIONS = 32772    # drone -> all (v3: carries the map number)
+PAYLOAD_LIGHTS = 32773       # drone -> all (v3: carries the map number)
 PAYLOAD_TEST = 33022         # 0x80FE, anyone -> anyone: a text line nobody acts on
+RETIRED = {32769: "v1 whole map", 32770: "v2 positions", 32771: "v2 lights"}
 MAX_PAYLOAD = 128
 
 #: Light states, by code. Index IS the wire value; append only, never reorder.
@@ -54,7 +78,7 @@ ACTIVITY = ("unknown", "holding", "circling the entry buoy", "transiting",
 MAX_SLOT = 31                          # five bits
 _POS = struct.Struct("<BHii")          # slot, id, lat 1e-7, lon 1e-7 = 11 bytes
 _BOAT = struct.Struct("<iiBBI")        # lat, lon, activity, target slot, acked = 14
-MAX_POSITIONS = (MAX_PAYLOAD - 1) // _POS.size   # 11 to a packet
+MAX_POSITIONS = (MAX_PAYLOAD - 2) // _POS.size   # 11 to a packet
 
 
 def pad(payload):
@@ -70,15 +94,23 @@ def body(msg):
     return bytes(msg.payload)[:msg.payload_length]
 
 
+def _metres(a, b):
+    """Ground distance between two (lat, lon), flat-earth: fine for metres."""
+    dn = (a[0] - b[0]) * 111320.0
+    de = (a[1] - b[1]) * 111320.0 * math.cos(math.radians(a[0]))
+    return math.hypot(dn, de)
+
+
 # ------------------------------------------------------------------ packets
 
-def pack_positions(records):
-    """[(slot, buoy_id, lat, lon)] -> [payload, ...], MAX_POSITIONS per packet."""
+def pack_positions(records, epoch):
+    """[(slot, buoy_id, lat, lon)] for map `epoch` -> [payload, ...],
+    MAX_POSITIONS per packet."""
     out = []
     records = list(records)
     for i in range(0, len(records), MAX_POSITIONS):
         chunk = records[i:i + MAX_POSITIONS]
-        buf = bytearray([len(chunk)])
+        buf = bytearray([int(epoch) & 0xFF, len(chunk)])
         for slot, bid, lat, lon in chunk:
             buf += _POS.pack(int(slot), int(bid) & 0xFFFF,
                              int(round(lat * 1e7)), int(round(lon * 1e7)))
@@ -87,54 +119,68 @@ def pack_positions(records):
 
 
 def unpack_positions(payload):
-    """-> [{"slot", "id", "lat", "lon"}]"""
+    """-> {"epoch": map number or None, "buoys": [{"slot", "id", "lat", "lon"}]}"""
     raw = bytes(payload)
-    n = raw[0] if raw else 0
+    if len(raw) < 2:
+        return {"epoch": None, "buoys": []}
+    epoch, n = raw[0], raw[1]
     out = []
     for i in range(min(n, MAX_POSITIONS)):
-        off = 1 + i * _POS.size
+        off = 2 + i * _POS.size
         if off + _POS.size > len(raw):
             break
         slot, bid, lat, lon = _POS.unpack_from(raw, off)
         out.append({"slot": slot, "id": bid, "lat": lat / 1e7, "lon": lon / 1e7})
-    return out
+    return {"epoch": epoch, "buoys": out}
 
 
-def pack_lights(lights, confirmed=()):
-    """{slot: label} + confirmed slots ([red, green], [exit] or []) -> payload."""
+def pack_lights(lights, confirmed=(), *, epoch):
+    """{slot: label} + confirmed slots ([red, green], [exit] or []) for map
+    `epoch` -> payload. `lights` is the WHOLE map: whatever is missing from it
+    every receiver drops."""
     c = [int(s) for s in list(confirmed)[:2]]
-    buf = bytearray(c + [0] * (2 - len(c)))
+    buf = bytearray([int(epoch) & 0xFF] + c + [0] * (2 - len(c)))
     for slot in sorted(lights):
         buf.append((int(slot) & MAX_SLOT) << 3 | CODE.get(lights[slot], 0))
     return bytes(buf)
 
 
 def unpack_lights(payload):
-    """-> {"confirmed": [slots], "lights": {slot: label}}"""
+    """-> {"epoch", "confirmed": [slots], "lights": {slot: label}}"""
     raw = bytes(payload)
-    confirmed = [s for s in raw[:2] if s]
+    if len(raw) < 3:
+        return {"epoch": None, "confirmed": [], "lights": {}}
+    confirmed = [s for s in raw[1:3] if s]
     lights = {}
-    for b in raw[2:]:
+    for b in raw[3:]:
         slot, code = b >> 3, b & 0x07
         if slot:
             lights[slot] = STATES[code] if code < len(STATES) else "UNKNOWN"
-    return {"confirmed": confirmed, "lights": lights}
+    return {"epoch": raw[0], "confirmed": confirmed, "lights": lights}
 
 
-def pack_boat(lat, lon, activity, target_slot=0, acked=()):
-    """-> payload. `acked`: the slots whose positions this boat holds."""
+def pack_boat(lat, lon, activity, target_slot=0, acked=(), epoch=None):
+    """-> payload. `acked`: the slots whose positions this boat holds; `epoch`:
+    the map they belong to (Receiver.epoch). A boat that leaves `epoch` out still
+    works, but its acknowledgements are only trusted a few seconds after a new
+    map starts -- see Sender.ACK_GRACE_S."""
     mask = 0
     for s in acked:
         if 1 <= s <= MAX_SLOT:
             mask |= 1 << s
-    return _BOAT.pack(int(round(lat * 1e7)), int(round(lon * 1e7)),
-                      int(activity) & 0xFF, int(target_slot) & 0xFF, mask)
+    out = _BOAT.pack(int(round(lat * 1e7)), int(round(lon * 1e7)),
+                     int(activity) & 0xFF, int(target_slot) & 0xFF, mask)
+    if epoch:
+        out += bytes([int(epoch) & 0xFF])
+    return out
 
 
 def unpack_boat(payload):
-    lat, lon, activity, target, mask = _BOAT.unpack(bytes(payload)[:_BOAT.size])
+    raw = bytes(payload)
+    lat, lon, activity, target, mask = _BOAT.unpack(raw[:_BOAT.size])
+    epoch = raw[_BOAT.size] if len(raw) > _BOAT.size and raw[_BOAT.size] else None
     return {"lat": lat / 1e7, "lon": lon / 1e7, "activity": activity,
-            "target_slot": target,
+            "target_slot": target, "epoch": epoch,
             "acked": {s for s in range(1, MAX_SLOT + 1) if mask & (1 << s)}}
 
 
@@ -143,28 +189,70 @@ def unpack_boat(payload):
 class Sender:
     """What Ekko puts on the air, and when. Pure: the caller passes the clock.
 
-    feed(buoys, confirmed_ids, now) with the map as [(id, lat, lon, label)] and
-    the ids the search confirms; boat_heard(acked_slots, now) with each boat
-    report; then due(now) -> [(payload_type, payload)] to transmit.
+    feed(buoys, confirmed_ids, now, map_id) with the map as
+    [(id, lat, lon, label)], the ids the search confirms, and WHICH map this is
+    (buoy_mapper's export stem: it changes on every clear); boat_heard(acked,
+    now, epoch) with each boat report; then due(now) -> [(payload_type,
+    payload)] to transmit.
     """
 
     LIGHTS_PERIOD_S = 1.0
     #: How long to wait for the boat to acknowledge a position before sending
-    #: it again. Only while a boat is actually being heard: re-sending to nobody
-    #: fixes nothing.
+    #: it again. Only while a boat is actually being heard.
     RESEND_S = 3.0
+    #: The whole map, to everyone, this often, acknowledged or not. This is what
+    #: lets the ground laptop (which never acknowledges) and a boat that starts
+    #: listening late have every buoy. 10 buoys is one packet: ~0.1 kbit/s.
+    REFRESH_S = 10.0
+    #: A buoy whose mapped position has moved this far since it was last sent is
+    #: sent again. The mapper keeps refining positions after the light is
+    #: decided; v2 froze them at that first moment. Well under the 3 m gate
+    #: spacing, well over the jitter of a converged track.
+    MOVE_M = 0.25
+    #: ...but not more often than this per buoy, so a track still settling does
+    #: not put a packet on the air every second.
+    MIN_MOVE_GAP_S = 2.0
     BOAT_HEARD_S = 5.0
+    #: After a new map starts, a boat report WITHOUT a map number may still be
+    #: describing the old map's slots. Its acknowledgements are not trusted
+    #: until this long after the change; a report that carries the number is
+    #: trusted, or ignored, at once.
+    ACK_GRACE_S = 3.0
 
-    def __init__(self):
-        self.slots = {}            # buoy id -> slot
-        self.sent = {}             # slot -> (id, lat, lon, when last sent)
-        self.pending = []          # slots whose positions are not sent yet
+    def __init__(self, first_epoch=None):
+        # A random first number, so a power cycle mid-session is a new map to
+        # every receiver even though this process has forgotten the last one.
+        self._next_epoch = int(first_epoch) if first_epoch else 1 + os.urandom(1)[0] % 255
+        self.epoch = 0             # 0 = no map yet: nothing goes on the air
+        self.map_id = None
+        self._map_t = None
+        self.boat_t = None
+        self.lights_t = None
+        self.refresh_t = None
+        self.maps = 0              # how many maps this process has started
+        self._reset()
+
+    def _reset(self):
+        self.slots = {}            # buoy id -> slot, THIS map
+        self.pos = {}              # slot -> (id, lat, lon), latest from the mapper
+        self.sent = {}             # slot -> (lat, lon, when) last put on the air
+        self.pending = set()       # slots whose position is due now
         self.lights = {}           # slot -> label
         self.confirmed = []        # slots
         self.acked = set()
-        self.boat_t = None
-        self.lights_t = None
-        self.overflow = []         # buoy ids with no slot left
+        self.overflow = []         # buoy ids with no slot left in this map
+        self._next_slot = 1
+
+    def new_map(self, map_id, now):
+        """Forget the old map and start numbering again under a new map number."""
+        self._reset()
+        self.map_id = map_id
+        self.epoch = self._next_epoch
+        self._next_epoch = self._next_epoch % 255 + 1
+        self._map_t = now
+        self.lights_t = None       # tell every receiver at once
+        self.refresh_t = now
+        self.maps += 1
 
     def slot_of(self, buoy_id):
         return self.slots.get(buoy_id)
@@ -172,50 +260,80 @@ class Sender:
     def id_of(self, slot):
         return next((b for b, s in self.slots.items() if s == slot), None)
 
-    def feed(self, buoys, confirmed_ids, now):
+    def feed(self, buoys, confirmed_ids, now, map_id=None):
+        if self.epoch == 0 or map_id != self.map_id:
+            self.new_map(map_id, now)
+        present = set()
         for bid, lat, lon, label in buoys:
             slot = self.slots.get(bid)
             if slot is None:
                 if label == "UNKNOWN":
                     continue          # not decided yet: nothing worth a position
-                if len(self.slots) >= MAX_SLOT:
+                if self._next_slot > MAX_SLOT:
                     if bid not in self.overflow:
                         self.overflow.append(bid)
                     continue
-                slot = len(self.slots) + 1
+                slot = self._next_slot
+                self._next_slot += 1
                 self.slots[bid] = slot
-                self.sent[slot] = (bid, lat, lon, None)
-                self.pending.append(slot)
+                self.pending.add(slot)
+            self.pos[slot] = (bid, lat, lon)
+            last = self.sent.get(slot)
+            if (last is not None and slot not in self.pending
+                    and now - last[2] >= self.MIN_MOVE_GAP_S
+                    and _metres((lat, lon), last[:2]) >= self.MOVE_M):
+                self.pending.add(slot)
             self.lights[slot] = label
+            present.add(slot)
+        # A buoy the mapper no longer has -- merged into another track, or
+        # deleted -- leaves the air: absent from LIGHTS, every receiver drops it.
+        for bid, slot in list(self.slots.items()):
+            if slot not in present:
+                del self.slots[bid]
+                for held in (self.pos, self.sent, self.lights):
+                    held.pop(slot, None)
+                self.pending.discard(slot)
+                self.acked.discard(slot)
         self.confirmed = [self.slots[b] for b in confirmed_ids if b in self.slots][:2]
 
-    def boat_heard(self, acked_slots, now):
-        self.acked = set(acked_slots)
+    def boat_heard(self, acked_slots, now, epoch=None):
         self.boat_t = now
+        if epoch is not None and epoch != self.epoch:
+            return                # acknowledging a map that is not this one
+        if epoch is None and (self._map_t is None
+                              or now - self._map_t < self.ACK_GRACE_S):
+            return                # may still be the old map's slots
+        self.acked = set(acked_slots) & set(self.pos)
 
     def boat_listening(self, now):
         return self.boat_t is not None and now - self.boat_t <= self.BOAT_HEARD_S
 
     def due(self, now):
         out = []
-        resend = []
+        if self.epoch == 0:
+            return out
+        send = set(self.pending)
         if self.boat_listening(now):
-            resend = [s for s, (_b, _la, _lo, t) in self.sent.items()
-                      if t is not None and s not in self.acked
-                      and now - t >= self.RESEND_S]
-        send = self.pending + [s for s in resend if s not in self.pending]
-        if send:
-            records = []
-            for s in send:
-                bid, lat, lon, _t = self.sent[s]
+            send |= {s for s, (_la, _lo, t) in self.sent.items()
+                     if s not in self.acked and now - t >= self.RESEND_S}
+        if self.pos and (self.refresh_t is None
+                         or now - self.refresh_t >= self.REFRESH_S):
+            send |= set(self.pos)
+            self.refresh_t = now
+        records = []
+        for s in sorted(send):
+            if s in self.pos:
+                bid, lat, lon = self.pos[s]
                 records.append((s, bid, lat, lon))
-                self.sent[s] = (bid, lat, lon, now)
-            out += [(PAYLOAD_POSITIONS, p) for p in pack_positions(records)]
-            self.pending = []
-        if self.lights and (self.lights_t is None
-                            or now - self.lights_t >= self.LIGHTS_PERIOD_S):
+                self.sent[s] = (lat, lon, now)
+        out += [(PAYLOAD_POSITIONS, p) for p in pack_positions(records, self.epoch)]
+        self.pending = set()
+        # Every period, even for an EMPTY map: that is how a Clear reaches the
+        # receivers -- a new map number with no buoys in it.
+        if self.lights_t is None or now - self.lights_t >= self.LIGHTS_PERIOD_S:
             self.lights_t = now
-            out.append((PAYLOAD_LIGHTS, pack_lights(self.lights, self.confirmed)))
+            out.append((PAYLOAD_LIGHTS, pack_lights(self.lights, self.confirmed,
+                                                    epoch=self.epoch)))
         return out
 
 
@@ -225,25 +343,48 @@ class Receiver:
     """What a boat (or any laptop on the mesh) builds from what it hears."""
 
     def __init__(self):
+        self.epoch = None          # the map being held
         self.positions = {}        # slot -> {"slot","id","lat","lon"}
         self.lights = {}           # slot -> label
         self.confirmed_slots = []
+        self.maps = 0              # how many maps have been heard
+
+    def _map(self, epoch):
+        """A packet from another map: everything held belongs to the old one."""
+        if epoch != self.epoch:
+            self.epoch = epoch
+            self.positions = {}
+            self.lights = {}
+            self.confirmed_slots = []
+            self.maps += 1
 
     def hear(self, payload_type, payload):
         """Feed one TUNNEL payload. -> the packet kind it was, or None."""
         if payload_type == PAYLOAD_POSITIONS:
-            for rec in unpack_positions(payload):
+            rep = unpack_positions(payload)
+            if rep["epoch"] is None:
+                return None
+            self._map(rep["epoch"])
+            for rec in rep["buoys"]:
                 self.positions[rec["slot"]] = rec
             return "positions"
         if payload_type == PAYLOAD_LIGHTS:
             rep = unpack_lights(payload)
+            if rep["epoch"] is None:
+                return None
+            self._map(rep["epoch"])
             self.lights = rep["lights"]
             self.confirmed_slots = rep["confirmed"]
+            # LIGHTS is the whole map: a held position it no longer lists is a
+            # buoy Ekko merged or dropped.
+            for s in [s for s in self.positions if s not in self.lights]:
+                del self.positions[s]
             return "lights"
         return None
 
     def acked(self):
-        """The slots whose positions are held: sent back as the acknowledgement."""
+        """The slots whose positions are held: sent back as the acknowledgement
+        (with self.epoch, so Ekko knows which map they belong to)."""
         return set(self.positions)
 
     def slot_of(self, buoy_id):
@@ -286,15 +427,16 @@ def describe(payload_type, payload):
             # The ack mask is the whole point of the boat's packet: say how many
             # positions it holds, not just where it is.
             target = ", wants slot %d" % b["target_slot"] if b["target_slot"] else ""
-            return "BOAT", "%.7f %.7f, %s%s, holds %d position(s)" % (
-                b["lat"], b["lon"], doing, target, len(b["acked"]))
+            of_map = " of map %d" % b["epoch"] if b["epoch"] else ""
+            return "BOAT", "%.7f %.7f, %s%s, holds %d position(s)%s" % (
+                b["lat"], b["lon"], doing, target, len(b["acked"]), of_map)
         if payload_type == PAYLOAD_POSITIONS:
-            recs = unpack_positions(raw)
-            if not recs:
+            rep = unpack_positions(raw)
+            if not rep["buoys"]:
                 return "POSITIONS", "empty"
-            return "POSITIONS", "%d buoy(s): %s" % (
-                len(recs), ", ".join("B%d as slot %d" % (r["id"], r["slot"])
-                                     for r in recs))
+            return "POSITIONS", "map %d, %d buoy(s): %s" % (
+                rep["epoch"], len(rep["buoys"]),
+                ", ".join("B%d as slot %d" % (r["id"], r["slot"]) for r in rep["buoys"]))
         if payload_type == PAYLOAD_LIGHTS:
             rep = unpack_lights(raw)
             c = rep["confirmed"]
@@ -304,10 +446,13 @@ def describe(payload_type, payload):
                 confirmed = "exit slot %d" % c[0]
             else:
                 confirmed = "nothing"
-            return "LIGHTS", "%d light(s), confirmed %s" % (len(rep["lights"]),
-                                                            confirmed)
+            return "LIGHTS", "map %s, %d light(s), confirmed %s" % (
+                rep["epoch"], len(rep["lights"]), confirmed)
         if payload_type == PAYLOAD_TEST:
             return "TEST", raw.decode("ascii", "replace")
+        if payload_type in RETIRED:
+            return name, "%s (retired format, %d bytes): update the sender" % (
+                RETIRED[payload_type], len(raw))
     except Exception as e:                     # noqa: BLE001 -- see docstring
         return name, "does not decode (%d bytes): %s" % (len(raw), e)
     return name, "%d bytes, not a format boat_link knows" % len(raw)

@@ -104,10 +104,11 @@ class Crusader:
         with self.lock:
             kind = self.rx.hear(msg.payload_type, boat_link.body(msg))
             if kind == "positions":
-                recs = boat_link.unpack_positions(boat_link.body(msg))
-                say("EKKO positions: %s" % ", ".join(
-                    "B%d (%.7f, %.7f)" % (r["id"], r["lat"], r["lon"]) for r in recs))
-                self.write("positions", sysid=src, buoys=recs)
+                rep = boat_link.unpack_positions(boat_link.body(msg))
+                recs = rep["buoys"]
+                say("EKKO positions, map %d: %s" % (rep["epoch"], ", ".join(
+                    "B%d (%.7f, %.7f)" % (r["id"], r["lat"], r["lon"]) for r in recs)))
+                self.write("positions", sysid=src, map=rep["epoch"], buoys=recs)
             elif kind == "lights":
                 lights = {b["id"]: b["label"] for b in self.rx.buoys()}
                 changed = {k: v for k, v in lights.items() if self.last_lights.get(k) != v}
@@ -137,7 +138,8 @@ class Crusader:
     def report(self, link, target_sysid):
         with self.lock:
             payload = boat_link.pack_boat(self.lat, self.lon, self.activity,
-                                          self.rx.slot_of(self.target), self.rx.acked())
+                                          self.rx.slot_of(self.target), self.rx.acked(),
+                                          epoch=self.rx.epoch)
             acked = sorted(self.rx.acked())
         link.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_SURFACE_BOAT,
                                 mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0,

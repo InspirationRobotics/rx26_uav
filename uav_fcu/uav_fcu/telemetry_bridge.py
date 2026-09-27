@@ -283,8 +283,14 @@ class TelemetryBridge(Node):
         # this node owns the one link, and what leaves the aircraft should leave
         # through the thing that checks what leaves the aircraft.
         self._buoys = None
-        # What goes on the air and when: positions once (re-sent only if the
-        # boat has not acknowledged them), lights every period.
+        # WHICH map self._buoys is: buoy_mapper's export stem, which changes on
+        # every Clear. The radio numbers maps by it -- buoy ids restart at B1 on
+        # a clear, and keying the air by id alone lost six of ten buoys at the
+        # park on 26 Sep 2026 (see boat_link's docstring).
+        self._map_id = None
+        # What goes on the air and when: a buoy's position when its light is
+        # first decided, again when the map moves it, the whole map every
+        # refresh; lights every period, even for an empty map.
         self._radio = boat_link.Sender()
         self._radio.LIGHTS_PERIOD_S = 1.0 / float(self.p["boat_report_hz"])
         self._radio_sent = {boat_link.PAYLOAD_POSITIONS: 0, boat_link.PAYLOAD_LIGHTS: 0}
@@ -477,7 +483,7 @@ class TelemetryBridge(Node):
                         self._wrong_boat = msg.get_srcSystem()
                     elif msg.payload_type == boat_link.PAYLOAD_BOAT:
                         boat = boat_link.unpack_boat(boat_link.body(msg))
-                        self._radio.boat_heard(boat["acked"], t)
+                        self._radio.boat_heard(boat["acked"], t, boat["epoch"])
                         m = BoatState()
                         m.header.stamp = stamp
                         m.latitude, m.longitude = boat["lat"], boat["lon"]
@@ -618,13 +624,16 @@ class TelemetryBridge(Node):
 
     def _buoy_map_cb(self, msg: BuoyMap):
         self._buoys = [(b.id, b.latitude, b.longitude, b.label) for b in msg.buoys]
+        self._map_id = msg.export_stem
 
     def _radio_tick(self, t):
         """Whatever is due on the mesh: new positions, re-sends the boat has not
         acknowledged, and the lights once a period. Addressed to everyone."""
-        if not int(self.p["boat_sysid"]) or not self._buoys:
+        # Not "no buoys": an EMPTY map still goes on the air, because a new
+        # map number with nothing in it is how a Clear reaches every receiver.
+        if not int(self.p["boat_sysid"]) or self._map_id is None:
             return
-        self._radio.feed(self._buoys, self._confirmed(), t)
+        self._radio.feed(self._buoys or [], self._confirmed(), t, self._map_id)
         for ptype, payload in self._radio.due(t):
             self._send_tunnel(0, ptype, payload)
             self._radio_sent[ptype] += 1
@@ -645,9 +654,9 @@ class TelemetryBridge(Node):
         # an answer that does not require a second laptop.
         conf = self._confirmed()
         self.get_logger().info(
-            "radio: %d buoy positions sent, %d acknowledged by the boat%s; lights "
-            "packets %d; confirmed %s"
-            % (len(self._radio.slots), len(self._radio.acked),
+            "radio: map %d, %d buoy positions on the air, %d acknowledged by the "
+            "boat%s; lights packets %d; confirmed %s"
+            % (self._radio.epoch, len(self._radio.slots), len(self._radio.acked),
                "" if self._radio.boat_listening(t) else " (no boat heard)",
                self._radio_sent[boat_link.PAYLOAD_LIGHTS],
                "/".join("B%d" % i for i in conf) or "nothing"),

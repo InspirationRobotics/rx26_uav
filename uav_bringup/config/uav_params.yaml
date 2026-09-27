@@ -544,16 +544,25 @@ detector_node:
     # The trained buoy detector, and the operator's view of it. This node owns
     # NO device: it consumes the MJPEG stream camera_node already serves, so a
     # detector that crashes or fills the GPU cannot stop the recording.
-    model_path: "/root/robotx_ws/models/ekko_colour_yolo26n.pt"
+    model_path: "/root/robotx_ws/models/ekko_colour_yolo26n_v2.pt"
                                            # [RO] YOLO26n, FOUR classes read
                                            #      from the weights (blue, dark,
-                                           #      green, red), imgsz 1920,
-                                           #      trained 12-13 Sep 2026 on the
-                                           #      12 Sep park flights and chosen
-                                           #      over YOLO11n on a time-split
-                                           #      validation set. The class is
-                                           #      per FRAME: buoy_mapper decides
-                                           #      each buoy's state over time.
+                                           #      green, red), imgsz 1920.
+                                           #      v2 (26 Sep 2026) adds the new
+                                           #      beacons flown 21 Sep: 468
+                                           #      stills, pre-labelled then
+                                           #      hand-corrected, trained with
+                                           #      the September sets on a
+                                           #      time-block split (val mAP50
+                                           #      0.995, 291/291 val buoys found
+                                           #      with the right colour; nothing
+                                           #      in it above ~11 m). v1,
+                                           #      ekko_colour_yolo26n.pt (12 Sep
+                                           #      flights), stays in models/:
+                                           #      rolling back is this one line.
+                                           #      The class is per FRAME:
+                                           #      buoy_mapper decides each
+                                           #      buoy's state over time.
                                            #      The one-class buoy_yolo11n_v1
                                            #      is still in models/.
                                            #      A TensorRT .engine goes here
