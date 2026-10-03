@@ -205,6 +205,29 @@ def case_preflight():
     one(lambda i: i.update(gps={"fix_type": 3, "satellites": 8, "hdop": 1.6}),
         "gps", "warn", "3D fix, 8 sats, HDOP 1.6 -> warn")
     one(lambda i: i.update(gps=None), "gps", "unknown", "no GPS data -> unknown")
+    # The receiver's own accuracy decides when it gives one (Septentrio HAS).
+    has = lambda **k: dict({"fix_type": 3, "satellites": 11, "hdop": 1.42, "h_acc_m": 0.10}, **k)
+    one(lambda i: i.update(gps=has()), "gps", "ok",
+        "2 Oct HAS: 11 sats, HDOP 1.42, 0.10 m -> ok")
+    one(lambda i: i.update(gps=has(h_acc_m=0.9)), "gps", "warn",
+        "HAS still settling, 0.9 m -> warn")
+    one(lambda i: i.update(gps=has(h_acc_m=1.9)), "gps", "bad",
+        "standalone just after power-on, 1.9 m -> bad")
+    one(lambda i: i.update(gps=has(satellites=8)), "gps", "warn",
+        "HAS on 8 sats -> warn even at 0.10 m")
+    one(lambda i: i.update(gps=has(satellites=5)), "gps", "bad",
+        "HAS on 5 sats -> bad even at 0.10 m")
+    one(lambda i: i.update(gps=has(hdop=2.4)), "gps", "warn", "HAS at HDOP 2.4 -> warn")
+    one(lambda i: i.update(gps=has(hdop=3.5)), "gps", "bad", "HAS at HDOP 3.5 -> bad")
+    one(lambda i: i.update(gps=has(h_acc_m=0.0)), "gps", "warn",
+        "accuracy 0 = not reported -> old rule (11, 1.42) -> warn")
+    gap = [c for c in preflight_core.checks(dict(good_inputs(), gps=has(fix_type=1)))
+           if c["key"] == "gps"][0]
+    r.append(check("HAS gap (no fix, 11 sats) -> bad, says restart",
+                   gap["state"] == "bad" and "restart the receiver" in gap["detail"], gap["detail"][:60]))
+    ok = [c for c in preflight_core.checks(dict(good_inputs(), gps=has()))
+          if c["key"] == "gps"][0]
+    r.append(check("detail shows the accuracy", "±0.10 m" in ok["detail"], ok["detail"]))
     one(lambda i: i["battery"].update(voltage=22.8), "batt", "warn",
         "13 Sep pack at 22.8 V resting -> warn")
     one(lambda i: i.update(armed=True, battery={"voltage": 21.8, "low_volt": 21.6,

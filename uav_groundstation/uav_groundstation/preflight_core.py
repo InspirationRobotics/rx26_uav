@@ -27,10 +27,23 @@ MAIN_RESOLUTION = (1920, 1080)
 ENCODING_STALE_S = 180.0
 #: How far off nadir the gimbal may sit and still count as pointing down.
 NADIR_TOLERANCE_DEG = 5.0
-#: GPS good enough to map on. 13 Sep mapped to 0.5 m on 23-26 satellites, HDOP
-#: 0.57; these are the floor for "fine", not the target.
+#: GPS good enough to map on, for a receiver that gives NO accuracy estimate.
+#: 13 Sep mapped to 0.5 m on 23-26 satellites, HDOP 0.57; these are the floor
+#: for "fine", not the target.
 GPS_MIN_SATS = 10
 GPS_MAX_HDOP = 1.2
+#: When the receiver reports its own accuracy, THAT decides, because satellite
+#: count and HDOP stop meaning what they used to. Galileo HAS (the Septentrio's
+#: PPP mode) positions only from the GPS + Galileo satellites it has corrections
+#: for: on 2 Oct 2026 it used 11 of ~28 tracked at HDOP 1.2-1.4 while its own
+#: estimate read 0.10 m -- and the rule above called that "Degraded". The buoy
+#: budget is 1.5 m (half a 3 m gate); GPS should take a third of it at most.
+GPS_GOOD_ACC_M = 0.5
+GPS_POOR_ACC_M = 1.5
+#: ...but satellites and HDOP still veto when they are bad even for HAS: a fix
+#: on this few satellites is a lost satellite or two from dropping out of HAS.
+GPS_WARN_SATS, GPS_POOR_SATS = 9, 6
+GPS_WARN_HDOP, GPS_POOR_HDOP = 2.0, 3.0
 #: Resting volts per cell before takeoff. 3.80 V/cell is roughly half charge,
 #: which is where the 13 Sep pack started and nearly met the failsafe.
 REST_OK_PER_CELL = 3.85
@@ -68,18 +81,44 @@ def gps(inp):
     if not g:
         return _chip("gps", "GPS", "unknown", "no GPS data yet")
     fix, sats, hdop = g.get("fix_type", 0), g.get("satellites", 255), g.get("hdop")
+    acc = g.get("h_acc_m")
+    acc = acc if _num(acc) and acc > 0 else None
     name = FIX_NAMES.get(fix, "fix %d" % fix)
     parts = [name]
     if sats != 255:
         parts.append("%d sats" % sats)
     if _num(hdop):
         parts.append("HDOP %.2f" % hdop)
+    if acc is not None:
+        parts.append("±%.2f m" % acc)
     detail = " · ".join(parts)
     if fix < 3:
-        return _chip("gps", "GPS", "bad", detail + ". No 3D fix: do not fly a map.")
-    if (sats != 255 and sats < GPS_MIN_SATS) or (_num(hdop) and hdop > GPS_MAX_HDOP):
-        return _chip("gps", "GPS", "warn",
-                     detail + ". Flyable, but buoy positions will be worse.")
+        hint = ""
+        if fix == 1 and sats != 255 and sats >= 4:
+            # ArduPilot 4.7 has no fix type for the Septentrio's HAS (PPP) mode,
+            # so after an autopilot-only reboot the receiver keeps sending
+            # positions while the autopilot keeps calling it "no fix".
+            hint = (" The receiver still reports %d satellites: if the autopilot was"
+                    " just rebooted on its own, the Septentrio is stuck in HAS mode --"
+                    " power-cycle the drone or restart the receiver." % sats)
+        return _chip("gps", "GPS", "bad", detail + ". No 3D fix: do not fly a map." + hint)
+    low_sats = lambda n: sats != 255 and sats < n
+    high_hdop = lambda h: _num(hdop) and hdop > h
+    if acc is None:
+        if low_sats(GPS_MIN_SATS) or high_hdop(GPS_MAX_HDOP):
+            return _chip("gps", "GPS", "warn",
+                         detail + ". Flyable, but buoy positions will be worse.")
+        return _chip("gps", "GPS", "ok", detail)
+    settling = " If the drone was just powered on, wait: HAS settles over 5-10 minutes."
+    if acc > GPS_POOR_ACC_M or low_sats(GPS_POOR_SATS) or high_hdop(GPS_POOR_HDOP):
+        return _chip("gps", "GPS", "bad", detail + ". Too weak to map on: buoy positions"
+                     " would be off by more than half a gate." + settling)
+    why = [w for w, bad in (("accuracy %.1f m" % acc, acc > GPS_GOOD_ACC_M),
+                            ("only %d satellites" % sats, low_sats(GPS_WARN_SATS)),
+                            ("HDOP %.1f" % (hdop or 0), high_hdop(GPS_WARN_HDOP))) if bad]
+    if why:
+        return _chip("gps", "GPS", "warn", detail + ". Flyable, but buoy positions will"
+                     " be worse (" + ", ".join(why) + ")." + settling)
     return _chip("gps", "GPS", "ok", detail)
 
 
