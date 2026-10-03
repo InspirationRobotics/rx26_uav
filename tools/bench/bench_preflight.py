@@ -228,6 +228,17 @@ def case_preflight():
     ok = [c for c in preflight_core.checks(dict(good_inputs(), gps=has()))
           if c["key"] == "gps"][0]
     r.append(check("detail shows the accuracy", "±0.10 m" in ok["detail"], ok["detail"]))
+    # The receiver's own word, when the radio carries it (boat_link GNSS packet).
+    rx = {"mode": 10, "mode_name": "HAS", "satellites": 11, "h_acc_m": 0.10, "v_acc_m": 0.71}
+    lab = [c for c in preflight_core.checks(dict(good_inputs(), gps=has(), gnss=rx))
+           if c["key"] == "gps"][0]
+    r.append(check("receiver says HAS -> the chip says HAS, not 3D",
+                   lab["state"] == "ok" and lab["detail"].startswith("HAS · 11 sats"), lab["detail"]))
+    gap = [c for c in preflight_core.checks(dict(good_inputs(), gps=has(fix_type=1), gnss=rx))
+           if c["key"] == "gps"][0]
+    r.append(check("autopilot no fix + receiver HAS -> bad, names the gap",
+                   gap["state"] == "bad" and "itself is in HAS on 11" in gap["detail"]
+                   and gap["detail"].startswith("no fix (receiver: HAS)"), gap["detail"]))
     one(lambda i: i["battery"].update(voltage=22.8), "batt", "warn",
         "13 Sep pack at 22.8 V resting -> warn")
     one(lambda i: i.update(armed=True, battery={"voltage": 21.8, "low_volt": 21.6,

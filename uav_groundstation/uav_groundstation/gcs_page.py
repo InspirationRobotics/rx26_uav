@@ -589,6 +589,9 @@ function card(k,v,cls,dot){return '<div class="card '+(dot||'')+'"><div class="k
 function section(title,cards){
   return '<h3 class="sec">'+esc(title)+'</h3><div class="cards">'+cards.join('')+'</div>'}
 var QUALITY={ok:'Good',warn:'Degraded',bad:'Poor',unknown:'No data'};
+/* The GPS label: the receiver's own mode when the radio carries it ("HAS" --
+   the autopilot has no fix type for that), else the autopilot's fix name. */
+function gpsName(G){return G.mode||G.fix_name}
 function renderTel(){
   var t=S.tel||{},out=[];
   var stale=function(ok){return ok?'':'bad'};
@@ -621,7 +624,7 @@ function renderTel(){
       bs=B?chipState('batt'):'bad';
   out.push(section('GPS',[
     card('GPS quality',QUALITY[gs],gs==='unknown'?'':gs,gs==='unknown'?'':gs),
-    card('Fix',G?esc(G.fix_name):'\u2014',''),
+    card('Fix',G?esc(gpsName(G)):'\u2014',''),
     card('Satellites',G&&G.satellites!==255?G.satellites:'\u2014',''),
     card('HDOP',G?fmt(G.hdop,2):'\u2014',''),
     card('Accuracy (m)',G?fmt(G.h_acc_m,2):'\u2014','')]));
@@ -1166,7 +1169,7 @@ function renderMap(){
   el('mapinfo').textContent=(m.veh
     ?((m.inside===false?'OUTSIDE FENCE  ':'inside fence  ')+
       'alt '+fmt((S.tel||{}).alt_rel,1)+' m  ·  '+trail.length+' trail pts')
-    :'no pose')+'  ·  '+(G?'GPS '+G.fix_name
+    :'no pose')+'  ·  '+(G?'GPS '+gpsName(G)
       +(G.satellites!==255?' '+G.satellites+' sats':'')
       +(G.hdop!=null?' HDOP '+fmt(G.hdop,2):''):'no GPS')
     +'  ·  fence: '+(m.fence_src==='autopilot'?'read from the autopilot'
@@ -1243,7 +1246,7 @@ function renderVitals(){
     '',A.resumed?'resumed after a ground station restart':'')}
   var gs=G?(chipState('gps')||'unknown'):'unknown';
   tile('gpstile',gs==='unknown'?'':gs,'GPS','<span class="dot '+gs+'"></span>'+QUALITY[gs],
-    G?esc(G.fix_name)+(G.satellites!==255?' \u00b7 '+G.satellites+' sats':'')
+    G?esc(gpsName(G))+(G.satellites!==255?' \u00b7 '+G.satellites+' sats':'')
       +(G.hdop!=null?' \u00b7 HDOP '+fmt(G.hdop,2):''):'no GPS data');
   var altOk=t.pose_ok&&t.alt_rel!=null;
   tile('alttile',altOk?'':'bad','Altitude',altOk?fmt(t.alt_rel,1)+' m':'\u2014',

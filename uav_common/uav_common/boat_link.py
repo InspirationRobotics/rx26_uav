@@ -31,6 +31,11 @@ NO FIELD NAMES ON THE AIR: the order of the bytes IS the meaning. The shapes (v3
   TEST       anyone -> all: a text line the ground station's Radio tab puts on
              the air so an operator can watch one known frame cross it.
              NEITHER VEHICLE ACTS ON IT.
+  GNSS       drone -> all   every second while fresh: mode(1) satellites(1)
+             h-accuracy cm(2) v-accuracy cm(2), from Ekko's Septentrio ITSELF.
+             For the ground laptop: the autopilot cannot say "HAS" (ArduPilot
+             4.7 has no fix type for the receiver's PPP mode), and the laptop's
+             page only knows what crosses this link. NOTHING ACTS ON IT.
 
 THE MAP NUMBER, AND WHY v2 NEEDED IT. v2 sent each buoy's position ONCE, keyed
 by buoy_mapper's tracker id -- and the tracker restarts its ids at B1 on every
@@ -61,9 +66,18 @@ import struct
 PAYLOAD_BOAT = 32768         # boat -> all
 PAYLOAD_POSITIONS = 32772    # drone -> all (v3: carries the map number)
 PAYLOAD_LIGHTS = 32773       # drone -> all (v3: carries the map number)
+PAYLOAD_GNSS = 32774         # drone -> all: the main GNSS receiver's own status
 PAYLOAD_TEST = 33022         # 0x80FE, anyone -> anyone: a text line nobody acts on
 RETIRED = {32769: "v1 whole map", 32770: "v2 positions", 32771: "v2 lights"}
 MAX_PAYLOAD = 128
+
+#: The receiver's PVT mode, as the Septentrio numbers it (SBF PVTGeodetic Mode
+#: bits 0-3) and as the GNSS packet carries it. 10 is PPP; the only PPP service
+#: Ekko's mosaic-G5 P8 is permitted is Galileo HAS, so it is shown as "HAS".
+GNSS_MODES = {0: "no fix", 1: "standalone", 2: "DGNSS", 3: "fixed position",
+              4: "RTK fixed", 5: "RTK float", 6: "SBAS", 7: "moving-base RTK fixed",
+              8: "moving-base RTK float", 10: "HAS"}
+_GNSS = struct.Struct("<BBHH")         # mode, satellites, h/v accuracy cm = 6 bytes
 
 #: Light states, by code. Index IS the wire value; append only, never reorder.
 #: Three bits: at most eight.
@@ -410,6 +424,30 @@ def pack_test(text):
     return str(text).encode("ascii", "replace")[:MAX_PAYLOAD]
 
 
+def _cm(m):
+    return 65535 if m is None else max(0, min(65534, int(round(m * 100))))
+
+
+def pack_gnss(mode, satellites, h_acc_m, v_acc_m):
+    """-> payload. Unknowns (None) travel as the "unknown" values, 255 and
+    65535, so a receiver shows a blank rather than a made-up number."""
+    return _GNSS.pack(int(mode) & 0xFF, 255 if satellites is None else min(254, int(satellites)),
+                      _cm(h_acc_m), _cm(v_acc_m))
+
+
+def unpack_gnss(payload):
+    """-> {"mode", "mode_name", "satellites", "h_acc_m", "v_acc_m"}, or None if
+    the payload is too short to be one."""
+    raw = bytes(payload)
+    if len(raw) < _GNSS.size:
+        return None
+    mode, nsv, h, v = _GNSS.unpack_from(raw)
+    return {"mode": mode, "mode_name": GNSS_MODES.get(mode, "mode %d" % mode),
+            "satellites": None if nsv == 255 else nsv,
+            "h_acc_m": None if h == 65535 else h / 100.0,
+            "v_acc_m": None if v == 65535 else v / 100.0}
+
+
 def describe(payload_type, payload):
     """(name, one line) for a TUNNEL payload, for the Radio tab.
 
@@ -450,6 +488,14 @@ def describe(payload_type, payload):
                 rep["epoch"], len(rep["lights"]), confirmed)
         if payload_type == PAYLOAD_TEST:
             return "TEST", raw.decode("ascii", "replace")
+        if payload_type == PAYLOAD_GNSS:
+            g = unpack_gnss(raw)
+            if g is None:
+                return "GNSS", "too short (%d bytes)" % len(raw)
+            acc = lambda m: "?" if m is None else "%.2f m" % m
+            return "GNSS", "%s, %s sats, accuracy %s H / %s V" % (
+                g["mode_name"], "?" if g["satellites"] is None else g["satellites"],
+                acc(g["h_acc_m"]), acc(g["v_acc_m"]))
         if payload_type in RETIRED:
             return name, "%s (retired format, %d bytes): update the sender" % (
                 RETIRED[payload_type], len(raw))

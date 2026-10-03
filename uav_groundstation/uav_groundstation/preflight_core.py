@@ -83,7 +83,13 @@ def gps(inp):
     fix, sats, hdop = g.get("fix_type", 0), g.get("satellites", 255), g.get("hdop")
     acc = g.get("h_acc_m")
     acc = acc if _num(acc) and acc > 0 else None
+    # The receiver's own report, when the radio carries it (boat_link GNSS
+    # packet): the only source that can say "HAS". The autopilot's fix type
+    # still decides "no fix", because that is what the autopilot flies on.
+    rx = inp.get("gnss") or None
     name = FIX_NAMES.get(fix, "fix %d" % fix)
+    if rx:
+        name = rx["mode_name"] if fix >= 3 else "%s (receiver: %s)" % (name, rx["mode_name"])
     parts = [name]
     if sats != 255:
         parts.append("%d sats" % sats)
@@ -94,7 +100,12 @@ def gps(inp):
     detail = " · ".join(parts)
     if fix < 3:
         hint = ""
-        if fix == 1 and sats != 255 and sats >= 4:
+        if rx and rx.get("mode") and (rx.get("satellites") or 0) >= 4:
+            hint = (" The Septentrio itself is in %s on %d satellites: the autopilot was"
+                    " rebooted on its own and ArduPilot 4.7 cannot read that mode --"
+                    " power-cycle the drone or restart the receiver."
+                    % (rx["mode_name"], rx["satellites"]))
+        elif fix == 1 and sats != 255 and sats >= 4:
             # ArduPilot 4.7 has no fix type for the Septentrio's HAS (PPP) mode,
             # so after an autopilot-only reboot the receiver keeps sending
             # positions while the autopilot keeps calling it "no fix".

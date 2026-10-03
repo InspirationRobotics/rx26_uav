@@ -172,6 +172,10 @@ class Radio:
         self.att = StreamCache(TIMEOUT_S)
         self.hb = StreamCache(TIMEOUT_S)
         self.gps = StreamCache(TIMEOUT_S)
+        #: The Septentrio's OWN status (boat_link.PAYLOAD_GNSS), from
+        #: telemetry_bridge on the aircraft: the only source that can say "HAS",
+        #: because the autopilot has no fix type for the receiver's PPP mode.
+        self.gnss = StreamCache(TIMEOUT_S)
         self.sys_status = StreamCache(TIMEOUT_S)
         self.vfr = StreamCache(TIMEOUT_S)
         self.flight = StreamCache(TIMEOUT_S)
@@ -238,7 +242,13 @@ class Radio:
                     self.mission_q.put(msg)
                     continue
                 if typ == "TUNNEL":
-                    self.rx.hear(msg.payload_type, boat_link.body(msg))
+                    raw = boat_link.body(msg)
+                    if msg.payload_type == boat_link.PAYLOAD_GNSS:
+                        g = boat_link.unpack_gnss(raw)
+                        if g is not None:
+                            self.gnss.set(g, t)
+                        continue
+                    self.rx.hear(msg.payload_type, raw)
                     if msg.payload_type in (boat_link.PAYLOAD_POSITIONS,
                                             boat_link.PAYLOAD_LIGHTS):
                         self.buoy_seen = t
@@ -413,6 +423,7 @@ class Radio:
             now = time.monotonic()
             pose, att = self.pose.get(now), self.att.get(now)
             hb, gps_m = self.hb.get(now), self.gps.get(now)
+            gnss = self.gnss.get(now)
             st, vfr = self.sys_status.get(now), self.vfr.get(now)
             fl = self.flight.get(now)
             wifi = self.wifi if (now - self.wifi_t) < 6.0 else None
@@ -437,6 +448,8 @@ class Radio:
                        "satellites": gps_m.satellites_visible,
                        "hdop": (gps_m.eph / 100.0) if gps_m.eph not in (0, 65535) else None,
                        "h_acc_m": (getattr(gps_m, "h_acc", 0) or 0) / 1000.0 or None}
+                if gnss is not None:
+                    gps["mode"] = gnss["mode_name"]     # what the page shows: "HAS"
             batt = None
             if st is not None:
                 self.batt.feed(now, (st.voltage_battery or 0) / 1000.0,
@@ -466,7 +479,7 @@ class Radio:
 
             pre = preflight_core.checks({
                 "fcu_ok": hb is not None, "pose_ok": pose is not None,
-                "armed": armed, "gps": gps, "battery": batt,
+                "armed": armed, "gps": gps, "gnss": gnss, "battery": batt,
                 "working_alt_m": WORKING_ALT_M, "search": search,
                 "camera": (wifi or {}).get("preflight_camera"),
                 "record_gate": ((wifi or {}).get("cam") or {}).get("record_gate"),
@@ -486,7 +499,7 @@ class Radio:
 
             snap = {
                 "groups": (wifi or {}).get("groups", []),
-                "batt": batt, "gps": gps,
+                "batt": batt, "gps": gps, "gnss": gnss,
                 "armed_time": self.clock.snapshot(now),
                 "preflight": pre,
                 "tel": {

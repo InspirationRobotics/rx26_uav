@@ -133,6 +133,16 @@ telemetry_bridge:
                                            #      lost packet costs a second.
                                            #      Positions go once, re-sent only
                                            #      if the boat has not acked them.
+    gnss_rx_port: "/dev/serial/by-id/usb-Septentrio_*-if02"
+                                           # [RO] the Septentrio's USB2 port on
+                                           #      the Jetson (powered from it too).
+                                           #      Its PVT mode goes on the radio
+                                           #      once a second so the laptop page
+                                           #      can say "HAS" -- the autopilot
+                                           #      cannot (no fix type for PPP in
+                                           #      ArduPilot 4.7). USB2, never COM1
+                                           #      (the autopilot's) and never USB1
+                                           #      (free for diagnostics). "" = off.
     geofence:                              # [RO] = shared.geofence (pinned by
                                            #      check_config.py). CLOSED ring;
                                            #      the closing point is stripped

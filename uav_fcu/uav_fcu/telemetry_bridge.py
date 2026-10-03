@@ -67,6 +67,17 @@ MAVLink connection and there may only ever be one:
    switch, and the autopilot itself ignores position targets in any other mode,
    so the pilot's way back never depends on this node or its checks.
 
+7. RX/TX (the main GNSS receiver's own status, for the ground laptop): the
+   Septentrio is read DIRECTLY on its second USB port (gnss_rx_port; never its
+   COM1, which the autopilot owns, never the Cube) for its PVTGeodetic block,
+   and once a second while that is fresh its mode, satellites and accuracy go
+   on the mesh as boat_link.PAYLOAD_GNSS. Why: in Galileo HAS the receiver is in
+   PPP mode, which ArduPilot 4.7 has no fix type for -- the autopilot calls a
+   0.1 m HAS fix "3D", and after an autopilot-only reboot "no fix" -- and the
+   ground laptop's page knows only what crosses the radio. On its own thread
+   with timeouts: a missing, silent or garbled receiver stops the GNSS packet
+   and nothing else. Display only; nothing acts on it.
+
 THERE IS NO DISARM PATH IN THIS NODE, AND THAT IS DELIBERATE.
 -------------------------------------------------------------
 The ASV's telemetry_bridge carries a force-disarm TX path — a
@@ -115,11 +126,17 @@ Parameters:
                                    parameters cannot nest — see
                                    fence_core.polygon_from_flat
   fence_timeout_s    (float, 5.0)  per-exchange timeout in the mission dialog
+  gnss_rx_port       (str)         glob for the GNSS receiver's USB2 port; ""
+                                   turns the GNSS packet off
 """
+import glob
 import math
+import os
 import queue
+import select
 import threading
 import time
+import tty
 
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
@@ -139,6 +156,7 @@ from uav_common import fcu_decode
 from uav_common import geo
 from uav_common import boat_link
 from uav_common import guided_gate
+from uav_common import sbf
 from uav_common.drop_latch import DropLatch
 from uav_common.fence_core import (MISSION_TYPE_FENCE, FenceError, FenceProtocol,
                                    MavFenceTransport, items_from_polygon,
@@ -180,7 +198,27 @@ PARAM_SPEC = {
     "boat_report_hz": dict(read_only=True, lo=0.1, hi=10.0,
                            description="how often the lights go out over the "
                                        "radio"),
+    "gnss_rx_port": dict(read_only=True,
+                         description="glob for the GNSS receiver's USB2 port "
+                                     "(never its COM1, which the autopilot "
+                                     "owns); empty = no GNSS packet"),
 }
+
+#: The GNSS packet (job 7). One a second; only a reading this fresh is sent, so
+#: a receiver that went quiet becomes a blank on the page, not a stale number.
+GNSS_SEND_PERIOD_S = 1.0
+GNSS_FRESH_S = 3.0
+#: No PVTGeodetic for this long -> ask for the stream again. The request is not
+#: saved in the receiver, so a receiver reboot forgets it.
+GNSS_SILENT_S = 5.0
+#: One PVTGeodetic a second on USB2. Stream10 because ArduPilot configures
+#: Stream1 (COM1) and Stream2 (its disk log). The command ALONE: a USB port takes
+#: commands as they come, and prefixing the "SSSSSSSSSS" wake-up string in the
+#: same write makes the receiver drop the command -- measured on Ekko 2 Oct 2026,
+#: when the first version of this asked for its stream and never got one.
+GNSS_STREAM_CMD = b"sso, Stream10, USB2, PVTGeodetic, sec1\r\n"
+#: Asked this many times with no PVT back -> say so in the log, once.
+GNSS_ASKS_BEFORE_WARN = 3
 
 RELEASE_FRAMES = 5          # all-zero override frames sent on trip
 PUB_RATE_HZ = 20.0
@@ -367,6 +405,14 @@ class TelemetryBridge(Node):
         self._fence_thread = threading.Thread(target=self._fence_read_loop,
                                               daemon=True)
         self._fence_thread.start()
+        # Job 7: (PVTGeodetic dict, monotonic time it arrived) from the reader
+        # thread. A tuple swap is atomic, so the tick reads it without a lock.
+        self._gnss = None
+        self._gnss_sent_t = 0.0
+        self._gnss_thread = None
+        if p["gnss_rx_port"]:
+            self._gnss_thread = threading.Thread(target=self._gnss_loop, daemon=True)
+            self._gnss_thread.start()
 
         self.create_timer(1.0 / PUB_RATE_HZ, self._publish_tick)
         self._publish_drop_state()               # initial state (STARTUP=blocked)
@@ -611,6 +657,7 @@ class TelemetryBridge(Node):
             m.channels = rc
             self.rc_pub.publish(m)
         self._radio_tick(t)
+        self._gnss_tick(t)
 
     def _search_cb(self, msg: SearchStatus):
         self._search.set(msg, time.monotonic())
@@ -661,6 +708,99 @@ class TelemetryBridge(Node):
                self._radio_sent[boat_link.PAYLOAD_LIGHTS],
                "/".join("B%d" % i for i in conf) or "nothing"),
             throttle_duration_sec=60.0)
+
+    # ---------- the GNSS receiver's own status (job 7) ----------
+
+    def _gnss_tick(self, t):
+        """Once a second, the receiver's mode, satellites and accuracy onto the
+        mesh -- only while fresh. Separate from _radio_tick, which sends nothing
+        until there is a buoy map; the receiver's status matters before that."""
+        g = self._gnss
+        if g is None or t - self._gnss_sent_t < GNSS_SEND_PERIOD_S:
+            return
+        pvt, seen = g
+        if t - seen > GNSS_FRESH_S:
+            return
+        self._gnss_sent_t = t
+        self._send_tunnel(0, boat_link.PAYLOAD_GNSS, boat_link.pack_gnss(
+            pvt["mode"], pvt["satellites"], pvt["h_acc_m"], pvt["v_acc_m"]))
+
+    def _gnss_loop(self):
+        """Read PVTGeodetic off the receiver's USB2 port, forever, until stop.
+
+        Plain os/termios/select: the container has no pyserial, and a USB
+        virtual serial port needs no baud rate. Every failure -- no receiver, a
+        receiver that is unplugged or reboots, garbage on the port -- is logged
+        once and retried, and can only ever stop the GNSS packet.
+        """
+        log = self.get_logger()
+        pattern = self.p["gnss_rx_port"]
+        said = None
+
+        def once(state, text, warn=False):
+            nonlocal said
+            if said != state:
+                (log.warn if warn else log.info)(text)
+                said = state
+
+        while not self._stop.is_set():
+            paths = sorted(glob.glob(pattern))
+            if not paths:
+                once("absent", "GNSS receiver not found at %s: no GNSS packet "
+                     "until it appears" % pattern, warn=True)
+                self._stop.wait(5.0)
+                continue
+            try:
+                fd = os.open(paths[0], os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            except OSError as e:
+                once("open-failed", "GNSS receiver %s will not open: %s" % (paths[0], e),
+                     warn=True)
+                self._stop.wait(5.0)
+                continue
+            try:
+                tty.setraw(fd)
+                reader = sbf.BlockReader()
+                heard = asked = -1e9
+                asks = 0
+                while not self._stop.is_set():
+                    now = time.monotonic()
+                    if now - heard > GNSS_SILENT_S and now - asked > GNSS_SILENT_S:
+                        os.write(fd, GNSS_STREAM_CMD)
+                        asked = now
+                        asks += 1
+                        if asks == GNSS_ASKS_BEFORE_WARN:
+                            # A tool must say what it is NOT getting: an open
+                            # port with no PVT looks exactly like no receiver.
+                            once("silent", "GNSS receiver %s: asked %d times for its "
+                                 "status, no PVTGeodetic back" % (paths[0], asks),
+                                 warn=True)
+                    ready, _, _ = select.select([fd], [], [], 0.5)
+                    if not ready:
+                        continue
+                    data = os.read(fd, 4096)
+                    if not data:
+                        raise OSError("the port returned nothing (unplugged?)")
+                    for number, _rev, block in reader.feed(data):
+                        if number != sbf.PVT_GEODETIC:
+                            continue
+                        pvt = sbf.pvt_geodetic(block)
+                        if pvt is not None:
+                            heard = time.monotonic()
+                            asks = 0
+                            self._gnss = (pvt, heard)
+                            once("reading", "GNSS receiver %s: reading its status "
+                                 "(mode %s, %s sats)" % (paths[0], boat_link.GNSS_MODES.get(
+                                     pvt["mode"], pvt["mode"]), pvt["satellites"]))
+            except Exception as e:             # noqa: BLE001
+                # EVERYTHING, not just OSError: a thread that dies on an
+                # unexpected exception goes silent with no trace, and the page
+                # just shows a blank forever. (radio_link.py once lost its whole
+                # uplink exactly that way.) Log it, close, retry.
+                once("lost:%s" % type(e).__name__, "GNSS receiver %s: %s: %s -- "
+                     "retrying" % (paths[0], type(e).__name__, e), warn=True)
+            finally:
+                os.close(fd)
+            self._stop.wait(2.0)
 
     # ---------- the radio, as a record (for the Radio tab) ----------
 
@@ -1039,6 +1179,8 @@ class TelemetryBridge(Node):
         self._stop.set()
         self._rx_thread.join(timeout=2.0)
         self._fence_thread.join(timeout=float(self.p["fence_timeout_s"]) + 1.0)
+        if self._gnss_thread is not None:
+            self._gnss_thread.join(timeout=2.0)
         try:
             self.conn.close()
         except Exception:
