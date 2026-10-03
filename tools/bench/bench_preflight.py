@@ -236,6 +236,10 @@ def case_preflight():
                    lab["state"] == "ok" and lab["detail"].startswith("HAS · 11 sats"), lab["detail"]))
     gap = [c for c in preflight_core.checks(dict(good_inputs(), gps=has(fix_type=1), gnss=rx))
            if c["key"] == "gps"][0]
+    half = [c for c in preflight_core.checks(dict(
+        good_inputs(), gps=has(h_acc_m=0.40), gnss=dict(rx, h_acc_m=0.80))) if c["key"] == "gps"][0]
+    r.append(check("receiver's 0.80 m (95%) wins over the autopilot's halved 0.40",
+                   half["state"] == "warn" and "±0.80 m" in half["detail"], half["detail"]))
     r.append(check("autopilot no fix + receiver HAS -> bad, names the gap",
                    gap["state"] == "bad" and "itself is in HAS on 11" in gap["detail"]
                    and gap["detail"].startswith("no fix (receiver: HAS)"), gap["detail"]))

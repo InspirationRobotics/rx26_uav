@@ -592,6 +592,13 @@ var QUALITY={ok:'Good',warn:'Degraded',bad:'Poor',unknown:'No data'};
 /* The GPS label: the receiver's own mode when the radio carries it ("HAS" --
    the autopilot has no fix type for that), else the autopilot's fix name. */
 function gpsName(G){return G.mode||G.fix_name}
+/* GPS accuracy, metres: the receiver's own 95% figures (2DRMS) when the radio
+   carries them; else the autopilot's h_acc -- which for the Septentrio is HALF
+   that (ArduPilot scales HAccuracy by 0.005), so it reads optimistic. */
+function gpsAcc(){
+  var X=S.gnss,G=S.gps;
+  if(X&&X.h_acc_m!=null)return {h:X.h_acc_m,v:X.v_acc_m,rx:true};
+  return {h:G?G.h_acc_m:null,v:null,rx:false}}
 function renderTel(){
   var t=S.tel||{},out=[];
   var stale=function(ok){return ok?'':'bad'};
@@ -621,13 +628,14 @@ function renderTel(){
      thresholds live in one place (preflight_core) and a card can never be
      green while the checklist above it is red. */
   var G=S.gps,B=S.batt,gs=G?(chipState('gps')||'unknown'):'unknown',
-      bs=B?chipState('batt'):'bad';
+      bs=B?chipState('batt'):'bad',A=gpsAcc(),pct=A.rx?', 95%':'';
   out.push(section('GPS',[
     card('GPS quality',QUALITY[gs],gs==='unknown'?'':gs,gs==='unknown'?'':gs),
     card('Fix',G?esc(gpsName(G)):'\u2014',''),
     card('Satellites',G&&G.satellites!==255?G.satellites:'\u2014',''),
     card('HDOP',G?fmt(G.hdop,2):'\u2014',''),
-    card('Accuracy (m)',G?fmt(G.h_acc_m,2):'\u2014','')]));
+    card('Accuracy H (m'+pct+')',fmt(A.h,2),''),
+    card('Accuracy V (m'+pct+')',fmt(A.v,2),'')]));
   out.push(section('Battery',[
     card('Voltage',B?fmt(B.voltage,2)+' V':'\u2014',bs,bs),
     card('Per cell',B&&B.per_cell!=null?fmt(B.per_cell,2)+' V ('+B.cells+'S)':'\u2014',''),
@@ -1244,10 +1252,11 @@ function renderVitals(){
   else{tile('flighttime',A.armed?'armed':'','Armed this power-on',hms(A.seconds),
     (A.armed?'<b>ARMED now</b>':'disarmed')+' \u00b7 '+A.flights+' flight'+(A.flights===1?'':'s'),
     '',A.resumed?'resumed after a ground station restart':'')}
-  var gs=G?(chipState('gps')||'unknown'):'unknown';
+  var gs=G?(chipState('gps')||'unknown'):'unknown',GA=gpsAcc();
   tile('gpstile',gs==='unknown'?'':gs,'GPS','<span class="dot '+gs+'"></span>'+QUALITY[gs],
     G?esc(gpsName(G))+(G.satellites!==255?' \u00b7 '+G.satellites+' sats':'')
-      +(G.hdop!=null?' \u00b7 HDOP '+fmt(G.hdop,2):''):'no GPS data');
+      +(G.hdop!=null?' \u00b7 HDOP '+fmt(G.hdop,2):'')
+      +(GA.h!=null?' \u00b7 \u00b1'+fmt(GA.h,2)+' m':''):'no GPS data');
   var altOk=t.pose_ok&&t.alt_rel!=null;
   tile('alttile',altOk?'':'bad','Altitude',altOk?fmt(t.alt_rel,1)+' m':'\u2014',
     altOk?esc(t.mode||'')+(t.landed?' \u00b7 '+esc(t.landed.replace('_',' ').toLowerCase()):''):'position stale')

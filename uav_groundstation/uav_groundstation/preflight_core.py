@@ -81,12 +81,19 @@ def gps(inp):
     if not g:
         return _chip("gps", "GPS", "unknown", "no GPS data yet")
     fix, sats, hdop = g.get("fix_type", 0), g.get("satellites", 255), g.get("hdop")
-    acc = g.get("h_acc_m")
-    acc = acc if _num(acc) and acc > 0 else None
     # The receiver's own report, when the radio carries it (boat_link GNSS
     # packet): the only source that can say "HAS". The autopilot's fix type
     # still decides "no fix", because that is what the autopilot flies on.
     rx = inp.get("gnss") or None
+    # Accuracy: the receiver's own 95% figure (2DRMS) when we have it. The
+    # autopilot's h_acc for an SBF receiver is HALF that (ArduPilot scales
+    # HAccuracy by 0.005), so judged against the same thresholds it would read
+    # twice as good as it is -- seen 2 Oct: 0.074 m from the autopilot, 0.15 m
+    # from the receiver, the same instant.
+    acc = rx.get("h_acc_m") if rx else None
+    if not (_num(acc) and acc > 0):
+        acc = g.get("h_acc_m")
+    acc = acc if _num(acc) and acc > 0 else None
     name = FIX_NAMES.get(fix, "fix %d" % fix)
     if rx:
         name = rx["mode_name"] if fix >= 3 else "%s (receiver: %s)" % (name, rx["mode_name"])
