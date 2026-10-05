@@ -115,9 +115,10 @@ REGISTRY = (
     NodeSpec("detector_node", "detector_node", "uav_perception",
              "detector_node", "perception",
              port=8092, stream_path="/stream.mjpg",
-             note="runs the colour-buoy model on camera_node's stream, serves "
-                  "an annotated view on :8092, publishes each frame's boxes "
-                  "with its pose; writes nothing"),
+             note="runs the model picked on the Camera tab (the buoy model "
+                  "unless changed) on camera_node's stream, serves an "
+                  "annotated view on :8092, publishes each frame's boxes with "
+                  "its pose; writes nothing"),
     # Consumes detector_node's topic, so it needs that node running to map
     # anything, but holds no device and co-runs with everything. port is its
     # GET-only download server, not a video stream, so stream_path stays empty.

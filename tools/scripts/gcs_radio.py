@@ -551,6 +551,9 @@ class Radio:
                                          "when the aircraft is reachable"
                                          % self.jetson)}),
                 "cam": self._cam(wifi),
+                # The Camera tab's Model choice, as the aircraft states it.
+                # Switching is a button like any other: it posts to the Jetson.
+                "detector": (wifi or {}).get("detector"),
                 "link": self._link(now, hb is not None, wifi is not None),
             }
             return snap

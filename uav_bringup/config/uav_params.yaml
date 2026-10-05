@@ -270,6 +270,21 @@ ground_station:
                                            #      Inside a container this is the
                                            #      CONTAINER's view, so the tab
                                            #      prints the path it measured.
+    detector_models:                       # [RO] the Camera tab's Model choice,
+                                           #      "Label = path" each. Picking
+                                           #      one restarts detector_node
+                                           #      with that model; nothing is
+                                           #      written, so a restart comes
+                                           #      back to detector_node.model_path
+                                           #      -- THE BUOY MODEL, and the only
+                                           #      one buoy_mapper and the search
+                                           #      may run with (the page refuses
+                                           #      the rest). check_config.py
+                                           #      requires it to be listed here.
+                                           #      Adding a model: copy the .pt to
+                                           #      ~/robotx_ws/models, add a line.
+      - "Buoys (Task 1) = /root/robotx_ws/models/ekko_colour_yolo26n_v2.pt"
+      - "Tins and circles (Task 2/3) = /root/robotx_ws/models/ekko_task23_yolo26n_v1.pt"
     workspace_path: "/root/robotx_ws"      # [RO] checked at startup for being a
                                            #      BIND MOUNT. If it is not, a
                                            #      `git pull` on the host is

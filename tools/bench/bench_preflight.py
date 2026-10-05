@@ -250,6 +250,9 @@ def case_preflight():
         "batt", "bad", "armed, 0.2 V above failsafe -> bad")
     one(lambda i: i.update(mapping={"detector": False, "mapper": False}), "map",
         "off", "mapping nodes not started -> off, not bad")
+    one(lambda i: i.update(mapping={"detector": True, "mapper": False,
+                                    "other_model": "Tins and circles (Task 2/3)"}),
+        "map", "off", "detector on the tins model -> off, no 'start both' nag")
     return r
 
 

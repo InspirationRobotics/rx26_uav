@@ -63,6 +63,23 @@ def near(a, b, tol=1e-6):
 
 # ================================================================ geolocate
 
+def case_class_style():
+    """Boxes on the operator's view. A buoy light looks as it always did (grey
+    when clipped, since a clipped buoy is never mapped). Any other model's class
+    takes the colour its NAME carries -- tin_red is red -- clipped or not, and a
+    delivery circle is drawn thick so a tin on it stays visible."""
+    red, green, blue = dc.class_bgr("red"), dc.class_bgr("green"), dc.class_bgr("blue")
+    got = {n: dc.class_style(n, full) for n, full in (
+        ("red", True), ("dark", False), ("tin_red", True), ("circle_blue", True),
+        ("tin_green", False), ("CIRCLE_GREEN", True), ("tin_purple", True))}
+    ok = (got["red"] == (red, 2) and got["dark"] == (dc.PARTIAL_BGR, 1)
+          and got["tin_red"] == (red, 2) and got["circle_blue"] == (blue, 4)
+          and got["tin_green"] == (green, 2) and got["CIRCLE_GREEN"] == (green, 4)
+          and got["tin_purple"][0] == (255, 255, 255))
+    return check("class_style: buoys unchanged, tins/circles by name", ok,
+                 "" if ok else str(got))
+
+
 def case_focal():
     # 960 / tan(40.5 deg) = 1124.0. The 3 Sep measurement said ~1130 at 1080p;
     # 81 deg is that measurement rounded, and the 0.5% between them is ~2 cm at
@@ -610,7 +627,7 @@ def main():
         case_meta_split_across_reads, case_meta_absent_or_bad, case_full_view,
         case_meta_end_to_end, case_meta_newline_refused,
         case_synthetic_flight_maps_truth, case_solve_recovers_offset,
-        case_replay_filenames,
+        case_replay_filenames, case_class_style,
     ]
     results = []
     for c in cases:

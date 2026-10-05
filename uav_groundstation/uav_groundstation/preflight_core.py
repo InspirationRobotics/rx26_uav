@@ -289,6 +289,11 @@ def recording(inp):
 def mapping(inp):
     m = inp.get("mapping") or {}
     det, mapper = m.get("detector"), m.get("mapper")
+    if m.get("other_model"):
+        # The Camera tab chose a model that is not the buoy one; the page then
+        # refuses buoy_mapper, so "start both" would be advice it cannot take.
+        return _chip("map", "mapping", "off", "detector set to %s: no buoy "
+                     "mapping this flight" % m["other_model"])
     if det and mapper:
         return _chip("map", "mapping", "ok", "detector_node and buoy_mapper running")
     if det or mapper:

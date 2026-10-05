@@ -288,6 +288,34 @@ def check_ports(cfg):
              "between us and MAVProxy.")
 
 
+def check_detector_models(cfg):
+    """The Camera tab's Model list (ground_station.detector_models).
+
+    The buoy model is written twice: as detector_node.model_path, and as an
+    entry here with its label. If the two drift apart, the page offers the old
+    buoy file under the "Buoys" label as if it were some other model -- and
+    refuses to map with it, because only detector_node.model_path counts as the
+    buoy model (uav_groundstation/detector_models.py).
+    """
+    entries = get(cfg, "ground_station", "detector_models")
+    buoy = get(cfg, "detector_node", "model_path")
+    if entries is None or buoy is None:
+        return
+    paths = []
+    for e in entries:
+        label, sep, path = str(e).partition("=")
+        if not (sep and label.strip() and path.strip().startswith("/")):
+            fail("ground_station.detector_models entry %r: expected "
+                 "'Label = /absolute/path/to/model.pt'" % e)
+            continue
+        paths.append(path.strip())
+    if buoy not in paths:
+        fail("detector_node.model_path (%s) is not in ground_station."
+             "detector_models. That file IS the buoy model; list it there with "
+             "its label, so the page's Model choice and the detector agree on "
+             "which one buoy_mapper may run with." % buoy)
+
+
 def check_host(cfg):
     host = get(cfg, "ocs_client", "ocs_host")
     if host in ("127.0.0.1", "localhost"):
@@ -327,6 +355,7 @@ def main():
     check_ocs_identity(cfg, args.bridge_toml)
     check_ports(cfg)
     check_host(cfg)
+    check_detector_models(cfg)
 
     print("checked %s" % args.params)
     for n in notes:

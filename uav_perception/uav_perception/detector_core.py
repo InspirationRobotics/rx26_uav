@@ -112,14 +112,33 @@ def full_view(box, width, height, margin_px) -> bool:
             and x1 <= width - margin_px and y1 <= height - margin_px)
 
 
-# BGR, for cv2 drawing. Unknown class names draw white.
+# BGR, for cv2 drawing: the buoy lights' own classes.
 _CLASS_BGR = {"red": (60, 60, 255), "green": (80, 230, 80),
               "blue": (255, 140, 30), "dark": (170, 170, 170)}
 PARTIAL_BGR = (90, 90, 90)
+_COLOUR_WORDS = ("red", "green", "blue")
+
+
+def class_style(class_name, full=True):
+    """(bgr, line width) for one box on the operator's view.
+
+    A buoy light keeps its old look: its colour, and grey when clipped by the
+    frame edge, because a clipped buoy is never mapped and grey says so. Any
+    other model's class -- the Task 2/3 tins and delivery circles -- is drawn in
+    the colour its NAME carries ('tin_red' is red), clipped or not, since nothing
+    maps those; circles thick, so a tin sitting on one stays visible. A name
+    with no single colour word in it draws white.
+    """
+    name = (class_name or "").lower()
+    if name in _CLASS_BGR:
+        return (_CLASS_BGR[name], 2) if full else (PARTIAL_BGR, 1)
+    words = [w for w in name.split("_") if w in _COLOUR_WORDS]
+    bgr = _CLASS_BGR[words[0]] if len(words) == 1 else (255, 255, 255)
+    return bgr, (4 if name.startswith("circle") else 2)
 
 
 def class_bgr(class_name):
-    return _CLASS_BGR.get((class_name or "").lower(), (255, 255, 255))
+    return class_style(class_name)[0]
 
 
 def buffer_overflowed(buf: bytes) -> bool:

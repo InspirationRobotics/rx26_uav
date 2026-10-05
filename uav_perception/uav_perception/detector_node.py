@@ -297,9 +297,9 @@ class DetectorNode(Node):
     def _draw(self, img, boxes):
         cv2 = self._cv2
         for (x0, y0, x1, y1), conf, _cid, name, full in boxes:
-            colour = core.class_bgr(name) if full else core.PARTIAL_BGR
+            colour, width = core.class_style(name, full)
             p0, p1 = (int(x0), int(y0)), (int(x1), int(y1))
-            cv2.rectangle(img, p0, p1, colour, 2 if full else 1)
+            cv2.rectangle(img, p0, p1, colour, width)
             text = core.box_label(conf, name) + ("" if full else " (edge)")
             cv2.putText(img, text, (p0[0], max(14, p0[1] - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2, cv2.LINE_AA)

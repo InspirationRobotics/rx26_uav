@@ -23,6 +23,7 @@ REPO = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, os.path.join(REPO, "uav_groundstation"))
 sys.path.insert(0, os.path.join(REPO, "uav_common"))
 
+from uav_groundstation import detector_models               # noqa: E402
 from uav_groundstation import map_origin                    # noqa: E402
 from uav_groundstation import node_registry as reg          # noqa: E402
 from uav_groundstation.gcs_page import render               # noqa: E402
@@ -42,6 +43,15 @@ ATTITUDE = {"ok": True, "roll": 2.5, "pitch": -4.0, "heading": 87.0, "age_s": 0.
 RESTARTED = {}
 NOW = [1000.0]
 
+# The Camera tab's Model choice, as gcs_node holds it: the buoy model (the
+# YAML's detector_node.model_path), the list offered, what is chosen, and which
+# nodes are running -- the rules are detector_models' own.
+BUOY = "/m/ekko_colour_yolo26n_v2.pt"
+MODELS, _ = detector_models.parse(
+    ["Buoys (Task 1) = " + BUOY, "Tins and circles (Task 2/3) = /m/task23.pt"], BUOY)
+CHOSEN = [BUOY]
+RUNNING = set()
+
 
 def action(path, payload):
     """Mirrors gcs_node._action, minus the ROS parts.
@@ -58,8 +68,15 @@ def action(path, payload):
             RESTARTED[name] = NOW[0]
         return {"ok": allowed, "message": reason or "would %s" % verb}
     if path == "/node/start":
-        why = reg.start_refusal(name, set(), RESTARTED.get(name), NOW[0])
+        why = (reg.start_refusal(name, set(), RESTARTED.get(name), NOW[0])
+               or detector_models.mapping_refusal(name, CHOSEN[0], BUOY, MODELS))
         return {"ok": not why, "message": why or "would start %s" % name}
+    if path == "/detector/model":
+        why = detector_models.switch_refusal(payload.get("path", ""), BUOY,
+                                             MODELS, RUNNING)
+        if not why:
+            CHOSEN[0] = payload["path"]
+        return {"ok": not why, "message": why or "would load it"}
     if path == "/power":
         if STATE["tel"]["armed"]:
             return {"ok": False, "message": "vehicle is ARMED. Disarm before "
@@ -241,10 +258,80 @@ def main():
     r.append(check("garbage body -> refused, not a crash", j["ok"] is False,
                    j["message"]))
 
+    r += model_choice(base)
     srv.stop()
     r += map_centre()
     print("\n%d/%d" % (sum(r), len(r)))
     return 0 if all(r) else 1
+
+
+def model_choice(base):
+    """The Camera tab's Model choice: the rules, the launch override, and the
+    one guard that matters -- nothing but the buoy model may feed the mapper."""
+    import subprocess
+    import tempfile
+    from uav_groundstation.process_manager import ProcessManager
+    r = []
+    print("\nthe detector's model choice")
+    r.append(check("buoy model offered first", MODELS[0]["path"] == BUOY
+                   and MODELS[0]["buoy"] and not MODELS[1]["buoy"]))
+    got, probs = detector_models.parse(["Tins = /m/t.pt", "no equals sign",
+                                        "Tins again = /m/t.pt"], BUOY)
+    r.append(check("buoy model added when the list forgets it",
+                   got[0]["path"] == BUOY and got[0]["buoy"] and len(got) == 2))
+    r.append(check("bad and duplicate entries reported, not raised",
+                   len(probs) == 2, "; ".join(probs)))
+    spec = reg.BY_NAME["detector_node"]
+    pm = ProcessManager(tools_dir="/tmp", logger=None)
+    cmd = pm.command_for(spec, detector_models.launch_args("/m/task23.pt"))
+    r.append(check("detector launched with the chosen model",
+                   cmd == ["ros2", "run", "uav_perception", "detector_node",
+                           "--ros-args", "-p", "model_path:=/m/task23.pt"],
+                   " ".join(cmd)))
+    r.append(check("other nodes launch exactly as before",
+                   pm.command_for(reg.BY_NAME["buoy_mapper"])
+                   == ["ros2", "run", "uav_perception", "buoy_mapper"]))
+
+    j = post(base, "/detector/model", {"path": "/etc/passwd"})
+    r.append(check("a path not on the list -> refused", j["ok"] is False, j["message"]))
+    RUNNING.add("buoy_mapper")
+    j = post(base, "/detector/model", {"path": "/m/task23.pt"})
+    r.append(check("tins model while buoy_mapper runs -> refused",
+                   j["ok"] is False and "buoy_mapper" in j["message"], j["message"]))
+    j = post(base, "/detector/model", {"path": BUOY})
+    r.append(check("buoy model while buoy_mapper runs -> ok", j["ok"] is True))
+    RUNNING.clear()
+    j = post(base, "/detector/model", {"path": "/m/task23.pt"})
+    r.append(check("tins model with nothing mapping -> ok",
+                   j["ok"] is True and CHOSEN[0] == "/m/task23.pt"))
+    for name in ("buoy_mapper", "search_node"):
+        j = post(base, "/node/start", {"name": name})
+        r.append(check("start %s with the tins model -> refused" % name,
+                       j["ok"] is False and "buoy" in j["message"], j["message"]))
+    j = post(base, "/node/start", {"name": "camera_node"})
+    r.append(check("camera_node unaffected by the model", j["ok"] is True, j["message"]))
+    CHOSEN[0] = BUOY
+    j = post(base, "/node/start", {"name": "buoy_mapper"})
+    r.append(check("buoy_mapper with the buoy model -> ok", j["ok"] is True))
+
+    # check_config: the buoy model written twice must agree.
+    params = os.path.join(REPO, "uav_bringup", "config", "uav_params.yaml")
+    raw = io_read(params)
+    # A new buoy model set as detector_node.model_path, the list not updated.
+    drifted = raw.replace('model_path: "/root/robotx_ws/models/ekko_colour_yolo26n_v2.pt"',
+                          'model_path: "/root/robotx_ws/models/ekko_colour_yolo26n_v3.pt"', 1)
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False,
+                                     encoding="utf-8") as f:
+        f.write(drifted)
+    out = subprocess.run([sys.executable, os.path.join(REPO, "tools", "scripts",
+                                                       "check_config.py"),
+                          "--params", f.name], capture_output=True, text=True)
+    os.unlink(f.name)
+    r.append(check("check_config: model_path off the list -> FAIL",
+                   drifted != raw and out.returncode == 1
+                   and "detector_models" in out.stdout,
+                   "returncode %d" % out.returncode))
+    return r
 
 
 def map_centre():

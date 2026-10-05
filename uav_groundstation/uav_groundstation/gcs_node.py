@@ -48,9 +48,11 @@ sees processes whatever started them. A dashboard that reported the telemetry
 bridge down because it did not personally start it would be worse than no
 dashboard.
 """
+import json
 import math
 import socket
 import time
+import urllib.request
 from collections import deque
 
 from rclpy.node import Node
@@ -76,8 +78,8 @@ from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config, make_set_callback
 from uav_common.stream_cache import StreamCache
 
-from uav_groundstation import (armed_clock, battery_core, map_origin,
-                              preflight_core, radio_core)
+from uav_groundstation import (armed_clock, battery_core, detector_models,
+                              map_origin, preflight_core, radio_core)
 from uav_groundstation import node_registry as reg
 from uav_groundstation import power_client, proc_scan, system_info
 from uav_groundstation.gcs_page import render as render_page
@@ -120,7 +122,14 @@ PARAM_SPEC = {
     "armed_time_file": dict(read_only=True,
                             description="where time armed this power-on is "
                                         "kept; see armed_clock"),
+    "detector_models": dict(read_only=True,
+                            description="'Label = /path' per model the Camera "
+                                        "tab offers; see detector_models"),
 }
+
+# How long the detector's own report of the model it loaded is reused. The
+# browser polls five times a second; the answer changes only on a switch.
+DET_STATE_CACHE_S = 2.0
 
 _LANDED_NAME = {0: "UNDEFINED", 1: "ON_GROUND", 2: "IN_AIR", 3: "TAKEOFF",
                 4: "LANDING"}
@@ -213,6 +222,17 @@ class GroundStation(Node):
         self.procs = ProcessManager(
             tools_dir=p["tools_dir"],
             logger=lambda m: self.get_logger().info(m))
+
+        # The Camera tab's Model choice. Held here and nowhere else, so a
+        # restart of this page -- or of the aircraft -- comes back to the
+        # YAML's model, which is the buoy model (see detector_models).
+        self._det_buoy = str(uav_config.node_params("detector_node")["model_path"])
+        self._det_models, problems = detector_models.parse(
+            p["detector_models"], self._det_buoy)
+        for msg in problems:
+            self.get_logger().error(msg)
+        self._det_chosen = self._det_buoy
+        self._det_report = (0.0, None)      # (checked_at, the detector's /state)
 
         # /rosout rather than journalctl: we are inside a container and the host
         # journal is on the other side of that boundary, while /rosout crosses
@@ -580,7 +600,36 @@ class GroundStation(Node):
             "sys": self._sys_state(),
             "power": self._power_state(known, armed),
             "cam": cam,
+            "detector": self._det_choice(running),
         }
+
+    def _det_choice(self, running):
+        """The Camera tab's Model choice: what is offered, what is chosen, and
+        what the detector itself says it loaded.
+
+        `loaded` comes FROM THE NODE (its viewer's /state names the weights it
+        read), never from this page's memory, so a detector started some other
+        way shows as what it actually is.
+        """
+        spec = reg.BY_NAME["detector_node"]
+        loaded = None
+        if "detector_node" in running and self._port_open(spec.port):
+            now = time.monotonic()
+            checked, report = self._det_report
+            if now - checked > DET_STATE_CACHE_S:
+                try:
+                    report = json.load(urllib.request.urlopen(
+                        "http://127.0.0.1:%d/state" % spec.port, timeout=0.3))
+                except (OSError, ValueError):
+                    report = None
+                self._det_report = (now, report)
+            loaded = (report or {}).get("model")
+        return {"models": [dict(m) for m in self._det_models],
+                "chosen": self._det_chosen,
+                "loaded": loaded,
+                "running": "detector_node" in running,
+                "mapping": [n for n in detector_models.MAPPING_NODES
+                            if n in running]}
 
     # ---------- battery, GPS, pre-flight, footprint ----------
 
@@ -708,7 +757,11 @@ class GroundStation(Node):
             "camera": camera,
             "record_gate": None if c is None else c["record_gate"],
             "mapping": {"detector": "detector_node" in running,
-                        "mapper": "buoy_mapper" in running},
+                        "mapper": "buoy_mapper" in running,
+                        # Set only while a NON-buoy model is chosen: the
+                        # mapper is then refused, so its absence is not a fault.
+                        "other_model": detector_models.other_model(
+                            self._det_chosen, self._det_buoy, self._det_models)},
             "search": search,
         }
 
@@ -962,6 +1015,8 @@ class GroundStation(Node):
                                       "buoy_mapper", "clear_buoy_map")
         if path == "/camera/capture":
             return self._act_capture(payload)
+        if path == "/detector/model":
+            return self._act_det_model(payload)
         if path == "/search/config":
             return self._act_search(payload)
         if path == "/power":
@@ -1107,12 +1162,53 @@ class GroundStation(Node):
 
     def _act_start(self, name):
         _items, running = self._node_items()
-        why = reg.start_refusal(name, running, self._restart_t.get(name),
-                                time.monotonic())
+        why = (reg.start_refusal(name, running, self._restart_t.get(name),
+                                 time.monotonic())
+               or detector_models.mapping_refusal(name, self._det_chosen,
+                                                  self._det_buoy, self._det_models))
         if why:
             return {"ok": False, "message": why}
-        ok, msg = self.procs.start(reg.BY_NAME[name])
+        ok, msg = self._start(reg.BY_NAME[name])
         return {"ok": ok, "message": msg}
+
+    def _start(self, spec):
+        """Every start from this page. The detector always gets the model the
+        Camera tab has chosen, spelled out, so a restart can never quietly fall
+        back to a different one."""
+        extra = (detector_models.launch_args(self._det_chosen)
+                 if spec.name == "detector_node" else ())
+        return self.procs.start(spec, extra)
+
+    def _act_det_model(self, payload):
+        """Load a different model: stop the detector, start it with that one.
+
+        The only path a switch takes. Refused when the model is not on the
+        YAML's list, and when a mapping node is running and the choice is not
+        the buoy model -- see detector_models for why.
+        """
+        path = payload.get("path", "")
+        _items, running = self._node_items()
+        why = detector_models.switch_refusal(path, self._det_buoy,
+                                             self._det_models, running)
+        if why:
+            return {"ok": False, "message": why}
+        label = detector_models.label_of(path, self._det_models)
+        self._det_chosen = path
+        self._det_report = (0.0, None)
+        spec = reg.BY_NAME["detector_node"]
+        if "detector_node" in running:
+            if self.procs.status(spec.name)[0] == "running":
+                ok, msg = self.procs.stop(spec.name)
+            else:
+                ok, msg = self.procs.stop_external(
+                    spec.name, self._proc.get(spec.executable))
+            if not ok:
+                return {"ok": False,
+                        "message": "could not stop the detector to switch: %s" % msg}
+        ok, msg = self._start(spec)
+        self.get_logger().info("detector model -> %s (%s)" % (label, path))
+        return {"ok": ok, "message": ("loading %s -- a few seconds, then Show "
+                                      "detections" % label) if ok else msg}
 
     def _act_stop(self, name, verb):
         """Stop an unsupervised node, or restart a supervised one.
@@ -1134,7 +1230,7 @@ class GroundStation(Node):
         if state == "running":
             ok, msg = self.procs.stop(name)
             if ok and verb == "restart":
-                ok, msg = self.procs.start(spec)
+                ok, msg = self._start(spec)
                 msg = "restarted %s (started from this page, so not by %s): %s" \
                       % (name, spec.unit, msg)
             return {"ok": ok, "message": msg}

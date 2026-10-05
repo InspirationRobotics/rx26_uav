@@ -263,6 +263,7 @@ main.split details.about,main.split #mapexp,main.split .wide-only{display:none}
 .dir{font-weight:700;font-size:11px;letter-spacing:.5px}
 .dir.TX{color:var(--accent)} .dir.RX{color:var(--ok)}
 .bar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.inl{display:contents}
 select,input{font:inherit;font-size:14px;background:var(--btn);color:var(--fg);
              border:1px solid var(--line);border-radius:6px;padding:5px 8px}
 .hint{color:var(--dim);font-size:13px;margin:8px 0 0}
@@ -444,7 +445,8 @@ details.about p{margin:6px 0 0;max-width:920px}
     boat, that neither vehicle acts on. Watch for it in QGC's MAVLink Inspector, or
     with <code>check_mesh.py</code> on a laptop radio.</p></details>
   </section>
-  <section id="s-cam"><div id="camrec"></div><div id="cam"></div>
+  <section id="s-cam"><div class="bar"><span id="cammodel" class="inl"></span><span
+    id="cammodelnote" class="inl"></span><span id="camrec" class="inl"></span></div><div id="cam"></div>
     <details class="about"><summary>About this tab</summary>
     <p>The video is served by <code>camera_node</code> on its own port, not
     proxied through this one — megabytes of MJPEG through the ground station's
@@ -1567,9 +1569,39 @@ function renderCamRec(){
      heading for the bin must never be a silent surprise. */
   if(g)parts.push('<span class="note" style="font-weight:700;color:'
     +(keep?'var(--ok)':'var(--bad)')+'">'+esc(g)+'</span>');
-  paint('camrec','<div class="bar">'+parts.join('')+'</div>');
+  paint('camrec',parts.join(''));
+}
+/* The detector's Model choice. The <select> has its OWN element, painted only
+   when the list or the choice changes: the poll runs five times a second, and
+   rebuilding a <select> closes it under the operator's cursor mid-pick. The
+   status beside it is a separate element for the same reason. */
+function setModel(p){
+  post('/detector/model',{path:p}).then(function(){
+    /* A refused switch leaves the server's choice unchanged, so the select's
+       HTML would compare equal and never repaint -- still showing the pick
+       that was refused. Forget what was painted and draw it again. */
+    var e=el('cammodel');if(e)e.__html=null;poll()})}
+function renderCamModel(){
+  var d=S.detector;
+  if(!d||!d.models||d.models.length<2){paint('cammodel','');paint('cammodelnote','');return}
+  var chosen=null;
+  paint('cammodel','<label class="note">Model <select onchange="setModel(this.value)">'
+    +d.models.map(function(m){
+      if(m.path===d.chosen)chosen=m;
+      return '<option value="'+esc(m.path)+'"'+(m.path===d.chosen?' selected':'')+'>'
+        +esc(m.label)+'</option>'}).join('')+'</select></label>');
+  var name=String(d.chosen||'').split('/').pop(),s;
+  /* "loaded" is what the DETECTOR says it read, not what this page asked for. */
+  if(!d.running)s='detector off — picking a model starts it';
+  else if(!d.loaded)s='loading…';
+  else if(d.loaded===name)s='<b style="color:var(--ok)">loaded</b>';
+  else s='<b style="color:var(--bad)">detector is running '+esc(d.loaded)+', not this one</b>';
+  var tip=(chosen&&!chosen.buoy)?' title="buoy_mapper and the search are refused while this model is loaded: they would map what it finds as buoys"':'';
+  if(tip)s+=' · no mapping';
+  paint('cammodelnote','<span class="note"'+tip+'>'+s+'</span>');
 }
 function renderCam(){
+  renderCamModel();
   renderCamRec();
   /* host: the camera and the map downloads are served by the AIRCRAFT. On its
      own page that is this page's host; on a copy running on a laptop off the

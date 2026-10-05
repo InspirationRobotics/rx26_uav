@@ -107,13 +107,14 @@ class ProcessManager:
 
     # ---- control ----
 
-    def command_for(self, spec):
-        """The argv for one NodeSpec. Separated so it is checkable off-board."""
+    def command_for(self, spec, extra=()):
+        """The argv for one NodeSpec. Separated so it is checkable off-board.
+        `extra` goes on the end: the detector's --ros-args model override."""
         if spec.kind == "script":
-            return ["python3", os.path.join(self.tools_dir, spec.executable)]
-        return ["ros2", "run", spec.package, spec.executable]
+            return ["python3", os.path.join(self.tools_dir, spec.executable)] + list(extra)
+        return ["ros2", "run", spec.package, spec.executable] + list(extra)
 
-    def start(self, spec):
+    def start(self, spec, extra=()):
         """Spawn a node. Returns (ok, message).
 
         start_new_session puts the child in its own process group. Without it a
@@ -126,7 +127,7 @@ class ProcessManager:
             if existing is not None and existing.alive:
                 return False, f"{spec.name} is already running"
 
-        cmd = self.command_for(spec)
+        cmd = self.command_for(spec, extra)
         try:
             popen = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
