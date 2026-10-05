@@ -294,6 +294,7 @@ details.about p{margin:6px 0 0;max-width:920px}
     <button id="themeb" class="iconbtn" onclick="toggleTheme()">theme</button>
   </div>
   <div id="vitals">
+    <div id="modetile" class="tile"></div>
     <div id="battery" class="tile"></div>
     <div id="flighttime" class="tile"></div>
     <div id="gpstile" class="tile"></div>
@@ -1238,6 +1239,12 @@ function tile(id,cls,k,big,sub,extra,title){
   var e=el(id);e.className='tile '+(cls||'');e.title=title||''}
 function renderVitals(){
   var B=S.batt,t=S.tel||{},A=S.armed_time,G=S.gps;
+  /* Flight mode and armed state, first on every tab: what a pilot glances for
+     before anything else. Blank when the autopilot's status is stale -- never
+     the last mode it reported, which would look current. */
+  if(!t.fcu_ok||!t.mode){tile('modetile','bad','Flight mode','—','no autopilot status')}
+  else{tile('modetile',t.armed?'armed':'','Flight mode',esc(t.mode),
+    t.armed?'<b>ARMED</b>':'disarmed')}
   if(!B){tile('battery','bad','Battery','\u2014','no battery reading')}
   else{
     var sub=B.margin_v!=null?fmt(B.margin_v,2)+' V above failsafe':'failsafe level not read yet';
@@ -1261,7 +1268,7 @@ function renderVitals(){
       +(GA.h!=null?' \u00b7 \u00b1'+fmt(GA.h,2)+' m':''):'no GPS data');
   var altOk=t.pose_ok&&t.alt_rel!=null;
   tile('alttile',altOk?'':'bad','Altitude',altOk?fmt(t.alt_rel,1)+' m':'\u2014',
-    altOk?esc(t.mode||'')+(t.landed?' \u00b7 '+esc(t.landed.replace('_',' ').toLowerCase()):''):'position stale')
+    altOk?(t.landed?esc(t.landed.replace('_',' ').toLowerCase()):''):'position stale')
   /* The RADIO LINK, on every tab: what it is actually carrying, and how far
      BEHIND it is. Hidden unless the snapshot carries a link block, so the
      aircraft's own page -- which is not on the far end of a radio -- is
