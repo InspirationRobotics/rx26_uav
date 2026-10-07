@@ -284,7 +284,10 @@ ground_station:
                                            #      Adding a model: copy the .pt to
                                            #      ~/robotx_ws/models, add a line.
       - "Buoys (Task 1) = /root/robotx_ws/models/ekko_colour_yolo26n_v2.pt"
-      - "Tins and circles (Task 2/3) = /root/robotx_ws/models/ekko_task23_yolo26n_v1.pt"
+      - "Tins and circles (Task 2/3) = /root/robotx_ws/models/ekko_task23_yolo26n_v2.pt"
+      # Round 1, kept to compare in the air: its score on round 2's validation
+      # set is flattered by dusk frames it trained on. Drop it once v2 has flown.
+      - "Tins and circles, round 1 = /root/robotx_ws/models/ekko_task23_yolo26n_v1.pt"
     workspace_path: "/root/robotx_ws"      # [RO] checked at startup for being a
                                            #      BIND MOUNT. If it is not, a
                                            #      `git pull` on the host is
