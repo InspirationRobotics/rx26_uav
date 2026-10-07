@@ -217,6 +217,16 @@ def case_preflight():
         "HAS on 8 sats -> warn even at 0.10 m")
     one(lambda i: i.update(gps=has(satellites=5)), "gps", "bad",
         "HAS on 5 sats -> bad even at 0.10 m")
+    # RTK FIXED is judged on accuracy: GPS+Galileo-only corrections ride on
+    # 8-11 satellites (6 Oct 2026), so only the poor count vetoes it.
+    rtk = lambda **k: has(fix_type=6, satellites=8, hdop=1.26, h_acc_m=0.03, **k)
+    one(lambda i: i.update(gps=rtk()), "gps", "ok", "RTK fixed on 8 sats, 0.03 m -> ok")
+    one(lambda i: i.update(gps=dict(rtk(), satellites=5)), "gps", "bad",
+        "RTK fixed on 5 sats -> bad")
+    one(lambda i: i.update(gps=dict(rtk(), h_acc_m=0.8)), "gps", "warn",
+        "RTK fixed but 0.8 m -> warn (accuracy still decides)")
+    one(lambda i: i.update(gps=has(fix_type=5, satellites=8, h_acc_m=0.3)), "gps", "warn",
+        "RTK FLOAT on 8 sats -> warn (only FIXED is exempt)")
     one(lambda i: i.update(gps=has(hdop=2.4)), "gps", "warn", "HAS at HDOP 2.4 -> warn")
     one(lambda i: i.update(gps=has(hdop=3.5)), "gps", "bad", "HAS at HDOP 3.5 -> bad")
     one(lambda i: i.update(gps=has(h_acc_m=0.0)), "gps", "warn",

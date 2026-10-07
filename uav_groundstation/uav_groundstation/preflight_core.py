@@ -42,7 +42,12 @@ GPS_GOOD_ACC_M = 0.5
 GPS_POOR_ACC_M = 1.5
 #: ...but satellites and HDOP still veto when they are bad even for HAS: a fix
 #: on this few satellites is a lost satellite or two from dropping out of HAS.
+#: RTK FIXED is exempt from the warning count (only the poor one applies): the
+#: CRTN corrections are filtered to GPS + Galileo to fit the radio, so a
+#: +/-0.03 m fix rides on 8-11 satellites, and on 6 Oct 2026 the dip to 8 put
+#: "Degraded" over a fix 30x better than the buoy budget needs.
 GPS_WARN_SATS, GPS_POOR_SATS = 9, 6
+RTK_FIXED = 6
 GPS_WARN_HDOP, GPS_POOR_HDOP = 2.0, 3.0
 #: Resting volts per cell before takeoff. 3.80 V/cell is roughly half charge,
 #: which is where the 13 Sep pack started and nearly met the failsafe.
@@ -131,8 +136,9 @@ def gps(inp):
     if acc > GPS_POOR_ACC_M or low_sats(GPS_POOR_SATS) or high_hdop(GPS_POOR_HDOP):
         return _chip("gps", "GPS", "bad", detail + ". Too weak to map on: buoy positions"
                      " would be off by more than half a gate." + settling)
+    warn_sats = GPS_POOR_SATS if fix == RTK_FIXED else GPS_WARN_SATS
     why = [w for w, bad in (("accuracy %.1f m" % acc, acc > GPS_GOOD_ACC_M),
-                            ("only %d satellites" % sats, low_sats(GPS_WARN_SATS)),
+                            ("only %d satellites" % sats, low_sats(warn_sats)),
                             ("HDOP %.1f" % (hdop or 0), high_hdop(GPS_WARN_HDOP))) if bad]
     if why:
         return _chip("gps", "GPS", "warn", detail + ". Flyable, but buoy positions will"
