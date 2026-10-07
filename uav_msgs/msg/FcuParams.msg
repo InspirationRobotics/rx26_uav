@@ -24,3 +24,8 @@ float64 fence_alt_max       # FENCE_ALT_MAX, metres above home
 float64 fence_type          # FENCE_TYPE bitmask: 1 alt max, 2 circle, 4 polygon, 8 alt min
 float64 fence_margin        # FENCE_MARGIN, m: avoidance stops this far short of a limit
 float64 fence_action        # FENCE_ACTION (1 = RTL)
+
+# Read for the ground station's map and pre-flight check: with FENCE_TYPE bit 2
+# the autopilot also holds a circle of this radius around HOME (Fence.msg says
+# where home is). Flown as the only sideways limit when no polygon is drawn.
+float64 fence_radius        # FENCE_RADIUS, m

@@ -200,16 +200,29 @@ def fence(inp):
                          "climbs stop at %.0f m (FENCE_ALT_MAX %.0f - FENCE_MARGIN "
                          "%.0f), under the %.0f m working altitude. The search "
                          "will refuse to start." % (stop, ceiling, margin or 0, work))
-    if bits is not None and not bits & FENCE_TYPE_POLYGON:
+    # Sideways: the circle (FENCE_RADIUS around home) and the polygon both
+    # count, each only when it exists. A circle is flown deliberately when no
+    # polygon is drawn (6 Oct 2026: FENCE_TYPE 7, 35 m, no polygon); the buoy
+    # search, which needs a polygon, says so on its own chip.
+    ceiling_txt = "ceiling %.0f m, climbs stop at %.0f m" % (ceiling, stop)
+    if bits is None:
+        return _chip("fence", "fence", "ok", "enabled, " + ceiling_txt)
+    radius, has_poly = inp.get("fence_radius"), inp.get("fence_polygon")
+    if bits & FENCE_TYPE_CIRCLE and not _num(radius):
+        return _chip("fence", "fence", "unknown",
+                     "FENCE_RADIUS not read from the autopilot yet")
+    circle = bool(bits & FENCE_TYPE_CIRCLE) and radius > 0
+    poly = bool(bits & FENCE_TYPE_POLYGON) and has_poly is True
+    if not circle and not poly:
+        if bits & FENCE_TYPE_POLYGON and has_poly is None:
+            return _chip("fence", "fence", "unknown",
+                         "the polygon has not been read back from the autopilot yet")
         return _chip("fence", "fence", "warn",
-                     "FENCE_TYPE %d has no polygon: nothing stops it sideways, and "
-                     "the search needs one" % bits)
-    if bits is not None and bits & FENCE_TYPE_CIRCLE:
-        return _chip("fence", "fence", "warn",
-                     "FENCE_TYPE %d includes the circle: FENCE_RADIUS around home "
-                     "triggers too, not just the polygon" % bits)
-    return _chip("fence", "fence", "ok",
-                 "enabled, ceiling %.0f m, climbs stop at %.0f m" % (ceiling, stop))
+                     "nothing stops it sideways: no polygon on the autopilot and no "
+                     "circle (FENCE_TYPE %d)" % bits)
+    sideways = " + ".join((["polygon"] if poly else [])
+                          + (["circle %.0f m around home" % radius] if circle else []))
+    return _chip("fence", "fence", "ok", "%s, %s" % (sideways, ceiling_txt))
 
 
 def altitude_ceiling(inp):

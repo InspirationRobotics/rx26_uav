@@ -379,6 +379,13 @@ class TelemetryBridge(Node):
         # The fence as last READ from the autopilot: [(lat, lon)] when it held
         # one usable polygon, else None. Guided targets are checked against it.
         self._held_fence = None
+        # HOME as (lat, lon), from HOME_POSITION: the centre of the FENCE_RADIUS
+        # circle. Asked for on every fence read. The fence last read is kept as
+        # (polygon, problem, item_count) so that a home that moves -- it does,
+        # on arming -- is republished at once rather than at the next read.
+        self._home = None
+        self._home_published = None
+        self._fence_read = None
         # Bumped on every change INTO GUIDED: the autopilot resets its target on
         # entry, so the next target must be sent even if it has not changed.
         self._guided_epoch = 0
@@ -536,6 +543,8 @@ class TelemetryBridge(Node):
                         m.activity = boat["activity"]
                         m.target_buoy = self._radio.id_of(boat["target_slot"]) or 0
                         self.boat_pub.publish(m)
+                elif mtype == "HOME_POSITION":
+                    self._home = (msg.latitude / 1e7, msg.longitude / 1e7)
                 elif mtype == "PARAM_VALUE":
                     field = fcu_decode.FCU_PARAMS.get(
                         fcu_decode.param_name(msg.param_id))
@@ -931,6 +940,18 @@ class TelemetryBridge(Node):
             self.get_logger().warn(
                 "could not request EXTENDED_SYS_STATE: %s" % e)
 
+    def _request_home(self):
+        """Ask the autopilot for HOME_POSITION once. Read-only; never fatal."""
+        try:
+            self.conn.mav.command_long_send(
+                self.conn.target_system, self.conn.target_component,
+                self._mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE, 0,
+                float(self._mavutil.mavlink.MAVLINK_MSG_ID_HOME_POSITION),
+                0, 0, 0, 0, 0, 0)
+        except Exception as e:
+            self.get_logger().warn("could not request the home position: %s" % e,
+                                   throttle_duration_sec=60.0)
+
     def _request_params(self, names):
         """PARAM_REQUEST_READ for each name. Read-only; never fatal."""
         self._params_req_t = time.monotonic()
@@ -1059,6 +1080,13 @@ class TelemetryBridge(Node):
                     period if last_ok else FENCE_RETRY_S)
             was_armed = armed
             if not need:
+                # Home answers a moment after it is asked, and moves on arming:
+                # pass it on as soon as it differs from what was published.
+                with self._lock:
+                    moved = (self._fence_read is not None
+                             and self._home != self._home_published)
+                if moved:
+                    self._publish_fence()
                 continue
             last_try = t
             last_ok = self._read_fence()
@@ -1067,6 +1095,7 @@ class TelemetryBridge(Node):
         """One download; publish what it found. -> True if the dialog completed."""
         if not self._fence_lock.acquire(blocking=False):
             return False              # an upload is running; read again after
+        self._request_home()
         try:
             proto = FenceProtocol(
                 MavFenceTransport(self.conn, self._mission_q, self._mavutil.mavlink),
@@ -1084,6 +1113,8 @@ class TelemetryBridge(Node):
         with self._lock:
             changed = (polygon or None) != self._held_fence
             self._held_fence = polygon or None
+            self._fence_read = (polygon, problem, len(items),
+                                self.get_clock().now().to_msg())
         if changed:
             if polygon:
                 self.get_logger().info(
@@ -1091,15 +1122,26 @@ class TelemetryBridge(Node):
             else:
                 self.get_logger().warn("fence on the autopilot is not usable: %s"
                                        % problem)
+        self._publish_fence()
+        return True
+
+    def _publish_fence(self):
+        """/uav/fence: the fence last read, with home as it stands now.
+
+        The stamp stays the time of the READ: the search compares it against
+        the arm time, and a republish for a moved home is not a fresh read."""
+        with self._lock:
+            (polygon, problem, count, read_stamp), home = self._fence_read, self._home
+            self._home_published = home
         m = Fence()
-        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.stamp = read_stamp
         m.valid = bool(polygon)
         m.problem = problem
         m.latitude = [a for a, _ in polygon]
         m.longitude = [b for _, b in polygon]
-        m.item_count = len(items)
+        m.item_count = count
+        m.home_latitude, m.home_longitude = home or (float("nan"), float("nan"))
         self.fence_pub.publish(m)
-        return True
 
     # ---------- guided targets and RTL (job 6) ----------
 

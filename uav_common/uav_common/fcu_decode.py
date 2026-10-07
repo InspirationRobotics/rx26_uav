@@ -20,6 +20,7 @@ FCU_PARAMS = {
     "FENCE_TYPE": "fence_type",
     "FENCE_MARGIN": "fence_margin",
     "FENCE_ACTION": "fence_action",
+    "FENCE_RADIUS": "fence_radius",
 }
 
 #: FENCE_TYPE bits.

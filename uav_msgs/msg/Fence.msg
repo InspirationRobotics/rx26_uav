@@ -23,3 +23,10 @@ float64[] latitude
 float64[] longitude
 
 uint16 item_count     # every fence item the autopilot returned, of any kind
+
+# HOME, read with HOME_POSITION alongside the fence: the centre of the
+# FENCE_RADIUS circle (FENCE_TYPE bit 2). It moves to wherever the aircraft is
+# when it arms, so it is re-read then and republished the moment it changes.
+# NaN until the autopilot has answered.
+float64 home_latitude
+float64 home_longitude

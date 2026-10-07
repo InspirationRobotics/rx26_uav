@@ -33,7 +33,8 @@ for pkg in ("uav_common", "uav_groundstation", "uav_camera"):
 
 from uav_camera.siyi_client import decode_encoding  # noqa: E402
 from uav_common import camera_frame, fcu_decode  # noqa: E402
-from uav_groundstation import armed_clock, battery_core, preflight_core  # noqa: E402
+from uav_groundstation import (armed_clock, battery_core, fence_view,  # noqa: E402
+                              preflight_core)
 
 
 def check(name, passed, detail=""):
@@ -144,7 +145,8 @@ def good_inputs():
         "gps": {"fix_type": 4, "satellites": 25, "hdop": 0.57},
         "battery": {"voltage": 24.3, "low_volt": 21.6, "cells": 6},
         "fence_enable": 1.0, "fence_alt_max": 12.0, "fence_margin": 2.0,
-        "fence_type": 5.0, "working_alt_m": 10.0,
+        "fence_type": 5.0, "fence_radius": 35.0, "fence_polygon": True,
+        "working_alt_m": 10.0,
         "camera": {"running": True, "gimbal_ok": True, "gimbal_pitch": -90.1,
                    "nadir_pitch": -90.0, "codec": "H264", "width": 1920,
                    "height": 1080, "kbps": 1570, "encoding_age_s": 12.0,
@@ -175,10 +177,24 @@ def case_preflight():
         "13 Sep fence: 10 m ceiling, 2 m margin, 10 m pass -> bad")
     one(lambda i: i.update(fence_alt_max=9.0, fence_margin=0.0), "fence", "bad",
         "ceiling under the pass altitude -> bad")
-    one(lambda i: i.update(fence_type=7.0), "fence", "warn",
-        "FENCE_TYPE 7 (circle as well) -> warn")
+    # Sideways: the circle and the polygon each count when they exist.
+    one(lambda i: i.update(fence_type=7.0), "fence", "ok",
+        "FENCE_TYPE 7, polygon held -> ok, polygon + circle")
+    one(lambda i: i.update(fence_type=7.0, fence_polygon=False), "fence", "ok",
+        "6 Oct: FENCE_TYPE 7, no polygon, 35 m circle -> ok")
+    one(lambda i: i.update(fence_type=7.0, fence_radius=None), "fence", "unknown",
+        "circle bit, FENCE_RADIUS unread -> unknown")
+    one(lambda i: i.update(fence_type=5.0, fence_polygon=False), "fence", "warn",
+        "polygon bit, no polygon, no circle -> warn")
+    one(lambda i: i.update(fence_type=5.0, fence_polygon=None), "fence", "unknown",
+        "polygon not read back yet -> unknown")
     one(lambda i: i.update(fence_type=1.0), "fence", "warn",
-        "FENCE_TYPE 1 (no polygon) -> warn")
+        "FENCE_TYPE 1 (ceiling only) -> warn")
+    six = [c for c in preflight_core.checks(dict(good_inputs(), fence_type=7.0,
+                                                  fence_polygon=False))
+           if c["key"] == "fence"][0]
+    r.append(check("the circle is named, with its radius",
+                   six["detail"].startswith("circle 35 m around home"), six["detail"]))
     one(lambda i: i.update(fence_type=4.0, fence_alt_max=5.0), "fence", "ok",
         "polygon only: ceiling not enforced, not judged -> ok")
     one(lambda i: i.update(search={"running": True, "phase": "not_ready",
@@ -268,6 +284,40 @@ def case_preflight():
 
 # ---------------------------------------------------------------- camera_frame
 
+def case_fence_view():
+    """fence_view: what binds sideways, and inside/outside against it."""
+    r = []
+    home = (32.9239385, -117.0385936)              # Ekko's home, 6 Oct 2026
+    on = {"fence_enable": 1.0, "fence_type": 7.0, "fence_radius": 35.0}
+    v = fence_view.view(on, None, home)
+    r.append(check("6 Oct: circle only, described", v is not None and v["polygon"] is None
+                   and v["desc"] == "circle 35 m around home", v))
+    r.append(check("parked 5.9 m from home -> inside",
+                   fence_view.inside(v, 32.9239896, -117.0385759) is True))
+    r.append(check("40 m north of home -> outside",
+                   fence_view.inside(v, home[0] + 40 / 111320.0, home[1]) is False))
+    r.append(check("no position -> not judged", fence_view.inside(v, None, None) is None))
+    sq = [(home[0] - 1e-4, home[1] - 1e-4), (home[0] - 1e-4, home[1] + 1e-4),
+          (home[0] + 1e-4, home[1] + 1e-4), (home[0] + 1e-4, home[1] - 1e-4)]
+    both = fence_view.view(on, sq, home)
+    r.append(check("polygon + circle, described", both["desc"] ==
+                   "polygon + circle 35 m around home", both["desc"]))
+    r.append(check("inside the circle but outside the polygon -> outside",
+                   fence_view.inside(both, home[0] + 20 / 111320.0, home[1]) is False))
+    r.append(check("home not read yet -> no view",
+                   fence_view.view(on, None, None) is None))
+    r.append(check("radius not read yet -> no view",
+                   fence_view.view(dict(on, fence_radius=float("nan")), None, home) is None))
+    r.append(check("fence off -> no view",
+                   fence_view.view(dict(on, fence_enable=0.0), sq, home) is None))
+    r.append(check("polygon bit but nothing uploaded, no circle -> no view",
+                   fence_view.view(dict(on, fence_type=5.0), None, home) is None))
+    xy = fence_view.circle_xy(v, home)
+    r.append(check("circle on a map centred at home", xy is not None and
+                   abs(xy["x"]) < 1e-6 and abs(xy["y"]) < 1e-6 and xy["r"] == 35.0, xy))
+    return r
+
+
 def case_footprint():
     r = []
     c = camera_frame.nadir_footprint(10.0, 0.0, 81.0)
@@ -348,6 +398,7 @@ def main():
     results = []
     for title, fn in (("fcu_decode", case_decode), ("battery_core", case_battery),
                       ("preflight_core", case_preflight),
+                      ("fence_view", case_fence_view),
                       ("camera_frame", case_footprint),
                       ("siyi encoding", case_encoding),
                       ("armed_clock", case_armed_clock)):

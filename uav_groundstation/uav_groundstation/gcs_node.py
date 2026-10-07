@@ -72,6 +72,7 @@ except ImportError as e:          # see stale_msgs_message
 
 from uav_common import camera_frame
 from uav_common import config as uav_config
+from uav_common import fcu_decode
 from uav_common import geo
 from uav_common.fence_core import polygon_from_flat
 from uav_common.node_main import run_node
@@ -79,7 +80,7 @@ from uav_common.param_utils import declare_from_config, make_set_callback
 from uav_common.stream_cache import StreamCache
 
 from uav_groundstation import (armed_clock, battery_core, detector_models,
-                              map_origin, preflight_core, radio_core)
+                              fence_view, map_origin, preflight_core, radio_core)
 from uav_groundstation import node_registry as reg
 from uav_groundstation import power_client, proc_scan, system_info
 from uav_groundstation.gcs_page import render as render_page
@@ -166,9 +167,8 @@ TIER_MAPPER = {"advanced": {"lock_state": True, "decide_window_s": 0.0},
 _LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                       durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-_FCU_PARAM_FIELDS = ("batt_low_volt", "batt_crt_volt", "batt_capacity_mah",
-                 "fence_enable", "fence_alt_max", "fence_type", "fence_margin",
-                 "fence_action")
+# Every field telemetry_bridge reads back, from the one list that defines them.
+_FCU_PARAM_FIELDS = tuple(fcu_decode.FCU_PARAMS.values())
 
 
 def _finite(x):
@@ -208,6 +208,14 @@ class GroundStation(Node):
         self._fence = polygon_from_flat(p["geofence"])
         self._fence_src = map_origin.PARAMS
         self._fence_problem = ""
+        # What the autopilot holds NOW, for judging inside/outside (fence_view):
+        # its polygon (None when it holds none) and home, the centre of the
+        # FENCE_RADIUS circle. _fence above keeps drawing the last polygon
+        # known; these do not, because a fence that was removed binds nothing.
+        # _fence_heard is False until the first /uav/fence arrives.
+        self._fence_now = None
+        self._home = None
+        self._fence_heard = False
         self._origin_id = 0
         self._set_origin(map_origin.centroid(self._fence))
         self._cpu = system_info.CpuMeter()
@@ -381,6 +389,10 @@ class GroundStation(Node):
 
     def _on_fence(self, msg: Fence):
         self._fence_problem = "" if msg.valid else msg.problem
+        self._fence_heard = True
+        lat, lon = msg.home_latitude, msg.home_longitude
+        self._home = None if math.isnan(lat) or math.isnan(lon) else (lat, lon)
+        self._fence_now = list(zip(msg.latitude, msg.longitude)) if msg.valid else None
         if not msg.valid:
             return                  # keep drawing the last fence known
         poly = list(zip(msg.latitude, msg.longitude))
@@ -528,6 +540,9 @@ class GroundStation(Node):
         pose = pose_e[0] if pose_e else None
         # Where the aircraft is on the map; None before its first GPS fix.
         placed = pose_e if pose_e and pose_e[1] is not None else None
+        # The horizontal fence the autopilot enforces: circle, polygon or both.
+        params = self._fcu_params or {}
+        fence = fence_view.view(params, self._fence_now, self._home)
 
         tel = {
             "pose_ok": pose is not None,
@@ -546,8 +561,7 @@ class GroundStation(Node):
                 # check the venue geoid constant against a known field
                 # elevation, which is the only way it ever gets caught.
                 "alt_hae": pose.altitude_amsl + self._geoid(),
-                "inside": geo.point_in_polygon(pose.latitude, pose.longitude,
-                                               self._fence),
+                "inside": fence_view.inside(fence, pose.latitude, pose.longitude),
             })
         if att is not None:
             tel.update({"roll": math.degrees(att.roll),
@@ -560,7 +574,6 @@ class GroundStation(Node):
 
         known, armed = self._armed()
         cam = self._cam_state(running)
-        params = self._fcu_params or {}
         batt = self._battery.snapshot(now, params.get("batt_low_volt"),
                                       float(self.p["status_timeout_s"]))
         gps = self._gps.get(now)
@@ -580,6 +593,20 @@ class GroundStation(Node):
                 # stand-in, and the page says so.
                 "fence_src": self._fence_src,
                 "fence_problem": self._fence_problem,
+                # The fence actually enforced sideways, in words, and its
+                # circle in map metres when it has one. The raw numbers are
+                # for gcs_radio.py, which places them on its own map.
+                "fence_desc": fence["desc"] if fence else None,
+                "fence_circle": fence_view.circle_xy(fence, self._origin),
+                "fence_raw": {"enable": params.get("fence_enable"),
+                              "type": params.get("fence_type"),
+                              "radius": params.get("fence_radius"),
+                              "alt_max": params.get("fence_alt_max"),
+                              "margin": params.get("fence_margin"),
+                              "home": list(self._home) if self._home else None,
+                              "polygon": ([list(p) for p in self._fence_now]
+                                          if self._fence_now else None),
+                              "heard": self._fence_heard},
                 "origin_id": self._origin_id,
                 "search": search,
                 "veh": (None if placed is None else
@@ -753,6 +780,9 @@ class GroundStation(Node):
             "fence_alt_max": params.get("fence_alt_max"),
             "fence_margin": params.get("fence_margin"),
             "fence_type": params.get("fence_type"),
+            "fence_radius": params.get("fence_radius"),
+            # Does the autopilot hold a polygon: None until the fence is read.
+            "fence_polygon": bool(self._fence_now) if self._fence_heard else None,
             "working_alt_m": cfg.get("working_alt_m"),
             "camera": camera,
             "record_gate": None if c is None else c["record_gate"],

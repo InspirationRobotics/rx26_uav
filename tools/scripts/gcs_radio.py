@@ -52,7 +52,7 @@ from uav_common import camera_frame                                 # noqa: E402
 from uav_common import geo                                          # noqa: E402
 from uav_common.stream_cache import StreamCache                     # noqa: E402
 from uav_groundstation import battery_core                          # noqa: E402
-from uav_groundstation import map_origin, preflight_core            # noqa: E402
+from uav_groundstation import fence_view, map_origin, preflight_core  # noqa: E402
 from uav_groundstation.gcs_page import render                       # noqa: E402
 from uav_groundstation.gcs_server import GcsServer                  # noqa: E402
 
@@ -486,18 +486,26 @@ class Radio:
                                self.consumed, st.battery_remaining, armed)
                 batt = self.batt.snapshot(now, self._low_volt(wifi), 3.0)
 
-            fence, fence_src = self.fence, self.fence_src
-            if not fence and wifi:
-                wmap = wifi.get("map") or {}
-                if wmap.get("fence"):
-                    fence = wmap["fence"]
-                    fence_src = wmap.get("fence_src") or map_origin.AUTOPILOT
-                    if self.origin is None:
-                        self.origin = map_origin.centroid(fence)
-                        placed = self._xy(lat, lon) if pose else None
+            # The fence the autopilot enforces: its settings, home and polygon
+            # as the Jetson read them back over USB while WiFi reaches it, else
+            # the polygon this program read over the radio (fence_loop). Both
+            # arrive as lat/lon and are placed on THIS map's origin -- the
+            # Jetson's map metres are about a different origin.
+            raw = ((wifi or {}).get("map") or {}).get("fence_raw") or {}
+            fparams = self._fence_params(raw, wifi)
+            poly_ll = raw.get("polygon") or self.fence or None
+            home = tuple(raw["home"]) if raw.get("home") else None
+            fview = fence_view.view(fparams, poly_ll, home)
+            if poly_ll and self.origin is None:
+                self.origin = map_origin.centroid(poly_ll)
+                placed = self._xy(lat, lon) if pose else None
+            fence = ([list(self._xy(a, b)) for a, b in poly_ll]
+                     if poly_ll and self.origin else [])
+            fence_src = map_origin.AUTOPILOT if poly_ll else self.fence_src
+            inside = fence_view.inside(fview, lat, lon) if pose else None
             buoys = self._buoys(now)
             search = (wifi or {}).get("map", {}).get("search") if wifi else None
-            ceiling = preflight_core.altitude_ceiling(self._fence_params(wifi))
+            ceiling = preflight_core.altitude_ceiling(fparams)
             alt_rel = (pose.relative_alt / 1000.0) if pose else None
 
             footprint = None
@@ -513,7 +521,10 @@ class Radio:
                 "camera": (wifi or {}).get("preflight_camera"),
                 "record_gate": ((wifi or {}).get("cam") or {}).get("record_gate"),
                 "mapping": self._mapping(wifi),
-                **self._fence_params(wifi),
+                # Does the autopilot hold a polygon: None until someone has read.
+                "fence_polygon": (bool(poly_ll) if raw.get("heard") or self.fence
+                                  else None),
+                **fparams,
             })
 
             # The chips about the CAMERA and the NODES cannot be judged from the
@@ -541,7 +552,7 @@ class Radio:
                     "alt_amsl": (pose.alt / 1000.0) if pose else None,
                     "alt_rel": alt_rel,
                     "alt_hae": None,
-                    "inside": None,
+                    "inside": inside,
                     "roll": math.degrees(att.roll) if att else None,
                     "pitch": math.degrees(att.pitch) if att else None,
                     "yaw": (math.degrees(att.yaw) % 360.0) if att else None,
@@ -556,15 +567,17 @@ class Radio:
                     # Jetson already read over USB -- it is the same fence, read
                     # the same way, and a drawn fence beats an empty map.
                     "fence": fence, "fence_src": fence_src,
-                    "fence_problem": ("" if fence else
+                    "fence_problem": ("" if fence or fview else
                                       "no fence yet: the autopilot has not "
                                       "answered over the radio and the Jetson "
                                       "is not reachable"),
+                    "fence_desc": fview["desc"] if fview else None,
+                    "fence_circle": fence_view.circle_xy(fview, self.origin),
                     "origin_id": 1, "search": search,
                     "veh": ({"x": placed[0], "y": placed[1],
                              "heading": (pose.hdg / 100.0) if pose else 0.0}
                             if placed else None),
-                    "inside": None, "trail_gate": 0.5, "trail_max": 600,
+                    "inside": inside, "trail_gate": 0.5, "trail_max": 600,
                     "buoys": buoys, "mapper": None,
                     "footprint": footprint, "ceiling": ceiling,
                 },
@@ -631,14 +644,22 @@ class Radio:
         b = (wifi or {}).get("batt") or {}
         return b.get("low_volt") or 21.6
 
-    def _fence_params(self, wifi):
-        """The fence numbers the checklist needs. From the Jetson when it is
-        reachable (it reads them back from the autopilot); otherwise Chris's
-        setup, which is what the aircraft has been flown with."""
+    def _fence_params(self, raw, wifi):
+        """The fence settings the checks and the map judge by: what the Jetson
+        read back from the autopilot, while WiFi reaches it. Without that, only
+        the ceiling Chris flies (12 m, 2 m margin) stands in, for the altitude
+        readout; which fences bind sideways is left UNKNOWN rather than assumed.
+        It used to assume FENCE_TYPE 5, which on 6 Oct 2026 hid a 35 m circle."""
+        if raw.get("type") is not None:
+            return {"fence_enable": raw.get("enable"),
+                    "fence_alt_max": raw.get("alt_max"),
+                    "fence_margin": raw.get("margin"),
+                    "fence_type": raw.get("type"),
+                    "fence_radius": raw.get("radius")}
         ceil = ((wifi or {}).get("map") or {}).get("ceiling") or {}
         return {"fence_enable": 1.0,
                 "fence_alt_max": ceil.get("alt_max") or 12.0,
-                "fence_margin": 2.0, "fence_type": 5}
+                "fence_margin": 2.0, "fence_type": None, "fence_radius": None}
 
     def _mapping(self, wifi):
         names = {n["name"] for g in (wifi or {}).get("groups", [])
