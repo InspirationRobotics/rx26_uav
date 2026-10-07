@@ -33,10 +33,16 @@ _ZONE_PREFERENCE = ("cpu", "soc", "thermal", "tj")
 
 
 def _read(path):
+    """The file's text, or None for ANY failure to read it.
+
+    Not just OSError: on the Orin Nano (JetPack 6) the vision-accelerator
+    zones cv0-cv2-thermal raise TypeError from read() while those engines are
+    powered down, and one such zone used to blank the whole temperature
+    reading (6 Oct 2026: '—' on the System tab at 48 C)."""
     try:
         with open(path, encoding="utf-8") as f:
             return f.read()
-    except OSError:
+    except Exception:
         return None
 
 
