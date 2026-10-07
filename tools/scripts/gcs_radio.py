@@ -76,6 +76,11 @@ WANTED = [(30, "ATTITUDE", 8.0),
           (65, "RC_CHANNELS", 1.0),
           (245, "EXTENDED_SYS_STATE", 1.0)]
 
+#: A WANTED message unheard for this long is asked for again. Longer than the
+#: slowest wanted interval (1 s), short enough that a battery swap is repaired
+#: within one pass of the request loop.
+WANTED_STALE_S = 10.0
+
 #: Pre-flight chips the radio cannot answer: they are about the camera and the
 #: nodes, which live on the Jetson. Taken from the aircraft's own page while
 #: WiFi reaches it.
@@ -198,6 +203,9 @@ class Radio:
         self.clock_floor = None
         self.lag_s = None
         self.radio_status = None
+        #: When each WANTED message last arrived from the autopilot, by id;
+        #: request_loop asks only for the ones that have gone quiet.
+        self.wanted_seen = {msgid: None for msgid, _name, _hz in WANTED}
         #: MISSION_* frames, routed OUT of the read loop. Two threads
         #: calling recv_match on one connection race, and the reader wins:
         #: the fence dialog would wait for a MISSION_COUNT that had already
@@ -263,6 +271,8 @@ class Radio:
                 # while QGC, which filters properly, sat steady on LOITER.
                 if msg.get_srcComponent() != 1:
                     continue
+                if msg.get_msgId() in self.wanted_seen:
+                    self.wanted_seen[msg.get_msgId()] = t
                 if typ == "GLOBAL_POSITION_INT":
                     self.pose.set(msg, t)
                 elif typ == "ATTITUDE":
@@ -281,15 +291,24 @@ class Radio:
                     self.consumed = float(msg.current_consumed or 0)
 
     def request_loop(self):
-        """Ask for the message set above, and keep asking.
+        """Ask for any message in the set above that is NOT arriving.
 
-        Re-sent every 30 s because a request is state in the AUTOPILOT: it is
-        lost when it reboots, and a page that silently stops updating after a
-        battery swap is worse than one that never worked.
+        A request is state in the AUTOPILOT: it is lost when it reboots, and a
+        page that silently stops updating after a battery swap is worse than
+        one that never worked -- so a message that goes quiet is asked for
+        again. But never re-ask for what is arriving: re-sending the whole set
+        every 30 s froze the aircraft's telemetry for 5-10 s after every batch
+        (6 Oct 2026, QGC 5.1.5 forwarding: lag to 10 s every ~31 s, and zero
+        stalls in 2.5 min with the re-sends switched off).
         """
         while True:
-            if self.hb.get(time.monotonic()) is not None:
-                for msgid, _name, hz in WANTED:
+            now = time.monotonic()
+            if self.hb.get(now) is not None:
+                with self.lock:
+                    missing = [(msgid, hz) for msgid, _name, hz in WANTED
+                               if self.wanted_seen[msgid] is None
+                               or now - self.wanted_seen[msgid] > WANTED_STALE_S]
+                for msgid, hz in missing:
                     try:
                         self.conn.mav.command_long_send(
                             self.sysid, 1,
