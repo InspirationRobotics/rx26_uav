@@ -40,9 +40,9 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 /* Dark is the original palette. Light is built for a laptop in direct sun:
    near-black text on white, darker "dim" text and heavier lines than a typical
    light theme, because washed-out grey is exactly what disappears in glare. */
-:root{--bg:#11151a;--panel:#1a1f27;--line:#2b3240;--fg:#dfe6ef;--dim:#8b97a8;
+:root{--bg:#0f1318;--panel:#181d25;--panel2:#1e242e;--line:#2b3240;--fg:#e1e7ef;--dim:#8d99aa;
       --ok:#4ec27b;--warn:#e0a33e;--bad:#e2564a;--accent:#57a6ff;
-      --on-accent:#08121f;--btn:#232a34;--sunk:#0c1015;--dot-off:#454e5c;
+      --on-accent:#08121f;--btn:#232a35;--btn-hover:#2b3341;--sunk:#0b0e12;--dot-off:#4a5361;
       --grid:rgba(223,230,239,.07);--grid-major:rgba(223,230,239,.17);
       --ring:rgba(223,230,239,.35);--fence-fill:rgba(87,166,255,.07);
       --trail:rgba(78,194,123,.55);--veh-ring:rgba(255,255,255,.18);
@@ -51,11 +51,11 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
       --b-red:#e2564a;--b-green:#4ec27b;--b-blue:#57a6ff;
       --ok-bg:rgba(78,194,123,.13);--warn-bg:rgba(224,163,62,.14);
       --bad-bg:rgba(226,86,74,.16);--accent-bg:rgba(87,166,255,.13);
-      --logo-bg:#fff;
+      --logo-bg:#fff;--video-bg:#000;--shadow:0 1px 2px rgba(0,0,0,.35),0 4px 14px rgba(0,0,0,.22);
       color-scheme:dark}
-:root[data-theme=light]{--bg:#fff;--panel:#eef1f5;--line:#a3adbb;--fg:#0a0e13;
+:root[data-theme=light]{--bg:#f4f6f9;--panel:#fff;--panel2:#f7f9fb;--line:#b4bdc9;--fg:#0a0e13;
       --dim:#3b4655;--ok:#17743a;--warn:#8a5700;--bad:#b3241a;--accent:#0a56bd;
-      --on-accent:#fff;--btn:#dde2e9;--sunk:#f7f9fb;--dot-off:#98a2b0;
+      --on-accent:#fff;--btn:#e8ecf1;--btn-hover:#dde3ea;--sunk:#fbfcfd;--dot-off:#98a2b0;
       --grid:rgba(10,14,19,.10);--grid-major:rgba(10,14,19,.28);
       --ring:rgba(10,14,19,.45);--fence-fill:rgba(10,86,189,.08);
       --trail:rgba(23,116,58,.8);--veh-ring:rgba(10,14,19,.3);
@@ -64,218 +64,287 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
       --b-red:#c42a1d;--b-green:#157d38;--b-blue:#0a5ccf;
       --ok-bg:rgba(23,116,58,.10);--warn-bg:rgba(138,87,0,.11);
       --bad-bg:rgba(179,36,26,.10);--accent-bg:rgba(10,86,189,.09);
-      --logo-bg:#fff;
+      --logo-bg:#fff;--video-bg:#000;--shadow:0 1px 2px rgba(10,14,19,.10),0 4px 14px rgba(10,14,19,.08);
       color-scheme:light}
 *{box-sizing:border-box}
 /* A normal reading face for words, monospace only where columns must line up
    (logs, coordinates, code). Numbers everywhere use tabular figures so a value
    ticking at the poll rate does not jitter sideways. */
 body{margin:0;background:var(--bg);color:var(--fg);
-     font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+     font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
      font-variant-numeric:tabular-nums}
 code,.mono,#logs,#radiolog{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+a{color:var(--accent)}
+
+/* ---- header: one bar of tabs, one row of tiles, on every tab ---- */
 header{position:sticky;top:0;z-index:5;background:var(--panel);
-       border-bottom:1px solid var(--line);box-shadow:0 2px 8px rgba(0,0,0,.12)}
-.topbar{display:flex;align-items:center;gap:18px;padding:6px 16px;flex-wrap:wrap}
+       border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
+.topbar{display:flex;align-items:center;gap:14px;padding:0 12px;min-height:46px;flex-wrap:wrap}
 /* The team's logos, on every tab. Dark line art, so they sit on a white badge
    in both themes; embedded, because at the flight line there is nothing to
    fetch them from (team_logos.py, made by tools/scripts/make_team_logos.py). */
-.logos{display:flex;align-items:center;gap:8px;background:var(--logo-bg);
-       border-radius:7px;padding:3px 8px;border:1px solid var(--line)}
-.logos img{height:32px;width:auto;display:block}
-.brand{display:flex;align-items:baseline;gap:8px;margin-right:6px}
-.brand b{font-size:19px;letter-spacing:.2px}
-.brand span{font-size:12px;color:var(--dim)}
-#tabs{display:flex;gap:2px;flex-wrap:wrap}
-.tab{padding:9px 14px 7px;border:0;border-bottom:3px solid transparent;
-     border-radius:0;cursor:pointer;background:transparent;color:var(--dim);
-     font:inherit;font-weight:600}
-.tab:hover{color:var(--fg);border-bottom-color:var(--line)}
+.logos{display:flex;align-items:center;gap:6px;background:var(--logo-bg);
+       border-radius:6px;padding:2px 6px;border:1px solid var(--line)}
+.logos img{height:26px;width:auto;display:block}
+.brand{font-size:17px;font-weight:700;letter-spacing:.2px}
+#tabs{display:flex;flex-wrap:wrap;align-self:stretch}
+.tab{padding:0 12px;border:0;border-bottom:3px solid transparent;border-radius:0;
+     cursor:pointer;background:transparent;color:var(--dim);font:inherit;font-weight:600;
+     font-size:14px;min-height:46px}
+.tab:hover{color:var(--fg);border-bottom-color:var(--line);background:transparent}
 .tab.on{color:var(--accent);border-bottom-color:var(--accent);background:transparent}
 .spacer{flex:1}
-#banner{font-size:13px;font-weight:700;padding:3px 12px;border-radius:14px;
-        color:var(--ok);background:var(--ok-bg)}
+#banner{font-size:12.5px;font-weight:700;padding:3px 11px;border-radius:12px;
+        color:var(--ok);background:var(--ok-bg);white-space:nowrap}
 #banner.bad{color:var(--bad);background:var(--bad-bg)}
-.iconbtn{background:transparent;border:1px solid var(--line);border-radius:16px;
-         padding:4px 12px;color:var(--dim);font-size:13px;font-weight:600}
+.iconbtn{background:transparent;border:1px solid var(--line);border-radius:14px;
+         padding:3px 11px;color:var(--dim);font-size:12.5px;font-weight:600}
 
-/* The four numbers wanted at a glance, on every tab. The coloured edge is the
-   verdict; the big number is the reading. */
-#vitals{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));
-        gap:10px;padding:2px 16px 10px}
-.tile{background:var(--bg);border:1px solid var(--line);border-left:6px solid var(--line);
-      border-radius:8px;padding:4px 12px 6px}
-.tile .k{font-size:11px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;
-         color:var(--dim)}
-.tile .big{font-size:24px;font-weight:700;line-height:1.15;display:flex;
-           align-items:center;gap:9px}
-.tile .sub{font-size:13px;color:var(--dim)}
-/* The radio tile's numbers change width constantly -- lag crossing from
-   two digits to three re-wrapped the line and grew the whole vitals row,
-   which jumps under the eye. ONE line, always: clipped rather than
-   wrapped, with the full text in the tile's tooltip. */
-#linktile .sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* It carries four numbers where the others carry one, so give it two
-   columns of the vitals grid. One line that FITS beats one line that is
-   clipped, and both beat a line that rewraps as a value changes width. */
-#linktile{grid-column:span 2}
-@media(max-width:700px){#linktile{grid-column:span 1}}
+/* The numbers wanted at a glance, on every tab, in ONE row. The coloured edge
+   is the verdict; the big number is the reading; the line under it is shown in
+   full on up to two lines, and every tile keeps room for both, so a value
+   changing length never changes the height of the row. */
+#vitals{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+        gap:8px;padding:8px 12px 10px}
+.tile{background:var(--panel2);border:1px solid var(--line);border-left:4px solid var(--line);
+      border-radius:8px;padding:5px 10px 6px;min-width:0}
+.tile .k{font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;
+         color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .big{font-size:20px;font-weight:700;line-height:1.25;display:flex;align-items:center;
+           gap:7px;white-space:nowrap;overflow:hidden}
+.tile .sub{font-size:12px;line-height:1.3;color:var(--dim);min-height:2.6em}
 .tile.ok{border-left-color:var(--ok)}
 .tile.warn{border-left-color:var(--warn);background:var(--warn-bg)}
 .tile.bad{border-left-color:var(--bad);background:var(--bad-bg)}
 .tile.armed{border-left-color:var(--accent);background:var(--accent-bg)}
 .tile.ok .big{color:var(--ok)} .tile.warn .big{color:var(--warn)}
 .tile.bad .big{color:var(--bad)} .tile.armed .big{color:var(--accent)}
-.gauge{height:6px;border-radius:3px;background:var(--line);margin-top:5px;overflow:hidden}
+.tile.hidden{display:none}
+.gauge{height:4px;border-radius:2px;background:var(--line);margin-top:3px;overflow:hidden}
 .gauge i{display:block;height:100%;background:var(--dim)}
 .tile.ok .gauge i{background:var(--ok)} .tile.warn .gauge i{background:var(--warn)}
 .tile.bad .gauge i{background:var(--bad)}
-
-/* The pre-flight checklist: a dot per check, words only for what is wrong. */
-#preflight{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:0 16px 10px}
-#preflight:empty{display:none}
-.pfl{font-size:11px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;
-     color:var(--dim);margin-right:4px}
-.chip{display:inline-flex;align-items:center;gap:7px;font-size:13px;padding:3px 11px;
-      border-radius:14px;border:1px solid var(--line);background:var(--bg);
-      max-width:640px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help}
+/* The pre-flight checklist is a tile too: a dot per check, the words in each
+   dot's tooltip and one click away. Every check while disarmed; once armed,
+   only what needs attention, and the tile goes when nothing does. */
+#pftile{grid-column:span 2}
+@media (min-width:1500px){#pftile{grid-column:span 3}}
+#preflight{display:flex;flex-wrap:wrap;gap:3px 5px;margin-top:3px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;line-height:1.55;
+      padding:0 7px;border-radius:10px;border:1px solid var(--line);background:var(--panel);
+      white-space:nowrap;cursor:pointer;color:var(--fg)}
 .chip.warn{border-color:var(--warn);background:var(--warn-bg);font-weight:600}
 .chip.bad{border-color:var(--bad);background:var(--bad-bg);font-weight:700}
-.dot{width:10px;height:10px;border-radius:50%;flex:none;display:inline-block;
-     background:var(--dot-off)}
-.big .dot{width:16px;height:16px}
+.dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block;background:var(--dot-off)}
+.big .dot{width:13px;height:13px}
 .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+.dot.armed{background:var(--accent)}
 
-main{padding:16px;max-width:1240px;margin:0 auto}
+/* ---- the page body ---- */
+main{padding:12px;max-width:2200px;margin:0 auto}
 section{display:none} section.on{display:block}
-h3.sec{font-size:12px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;
-       color:var(--dim);margin:20px 0 8px}
-h3.sec:first-child{margin-top:2px}
-.cards{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 12px}
-.card.ok{border-left:5px solid var(--ok)} .card.warn{border-left:5px solid var(--warn)}
-.card.bad{border-left:5px solid var(--bad)}
+/* Tabs that are one big view FILL the window under the header: --hdr is the
+   header's measured height (layoutVars), so nothing needs scrolling to be
+   seen. */
+#s-map.on{display:flex;gap:12px;height:calc(100vh - var(--hdr,120px) - 24px);min-height:460px}
+#s-cam.on,#s-logs.on,#s-radio.on{display:flex;flex-direction:column;gap:10px;
+  height:calc(100vh - var(--hdr,120px) - 24px);min-height:420px}
+h3.sec{font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;
+       color:var(--dim);margin:0 0 8px}
+.pane{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+.ph{font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);
+    margin:0 0 6px;display:flex;align-items:center;gap:8px}
+.ph .spacer{flex:1}
+.cards{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+.card.ok{border-left:4px solid var(--ok)} .card.warn{border-left:4px solid var(--warn)}
+.card.bad{border-left:4px solid var(--bad)}
 .k{color:var(--dim);font-size:12px;font-weight:600}
-.v{font-size:21px;font-weight:600;margin-top:1px;display:flex;align-items:center;gap:8px}
+.v{font-size:19px;font-weight:600;margin-top:1px;display:flex;align-items:center;gap:8px}
 .v.bad{color:var(--bad)} .v.ok{color:var(--ok)} .v.warn{color:var(--warn)}
-.grp{margin:0 0 22px}
-.grp h2{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.9px;
-        margin:0 0 2px;font-weight:700}
-.grp p.why{margin:0 0 8px;color:var(--dim);font-size:13px}
-.node{display:flex;align-items:center;gap:14px;background:var(--panel);
-      border:1px solid var(--line);border-radius:8px;padding:10px 14px;
-      margin-bottom:8px;flex-wrap:wrap}
-.nmwrap{flex:1;min-width:240px}
-.nm{font-weight:700;font-size:16px}
-.nmwrap .note{display:block}
-.pill{font-size:12px;font-weight:700;padding:2px 10px;border-radius:10px;min-width:82px;
-      text-align:center;background:var(--line);color:var(--dim)}
-.pill.up{background:var(--ok-bg);color:var(--ok)}
-.pill.restarting{background:var(--warn-bg);color:var(--warn)}
-.note{color:var(--dim);font-size:13px}
-button{font:inherit;font-size:14px;font-weight:600;padding:6px 14px;border-radius:6px;
+/* label : value rows, the Telemetry tab's panels */
+.kvgrid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));align-items:start}
+.kv{display:flex;align-items:baseline;gap:12px;padding:5px 0;border-top:1px solid var(--line)}
+.kv:first-of-type{border-top:0}
+.kv .kk{color:var(--dim);font-size:13px;flex:1;min-width:0}
+.kv .vv{font-size:16px;font-weight:600;display:flex;align-items:center;gap:7px;text-align:right}
+.kv .vv.bad{color:var(--bad)} .kv .vv.ok{color:var(--ok)} .kv .vv.warn{color:var(--warn)}
+.note{color:var(--dim);font-size:12.5px}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:none}
+.inl{display:contents}
+.callout{margin:0 0 12px;padding:8px 12px;border-radius:8px;border-left:4px solid var(--warn);
+         background:var(--warn-bg);font-size:13.5px}
+.callout:empty{display:none}
+.hint{color:var(--dim);font-size:13px;margin:8px 0}
+
+/* ---- controls ---- */
+button{font:inherit;font-size:13.5px;font-weight:600;padding:5px 12px;border-radius:6px;
        cursor:pointer;border:1px solid var(--line);background:var(--btn);color:var(--fg)}
-button:hover{border-color:var(--accent)}
+button:hover{border-color:var(--accent);background:var(--btn-hover)}
 button[disabled]{opacity:.4;cursor:not-allowed}
 button.danger{border-color:var(--bad);color:var(--bad)}
 button.go{border-color:var(--ok);color:var(--ok)}
 button.warnb{border-color:var(--warn);color:var(--warn)}
 button.toggle.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
-.locked{color:var(--dim);font-size:13px;font-style:italic;max-width:560px}
-.badge{font-size:12px;font-weight:700;padding:3px 10px;border-radius:10px;
-       border:1px solid var(--line);color:var(--dim);cursor:help}
+select,input{font:inherit;font-size:13.5px;background:var(--btn);color:var(--fg);
+             border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+.locked{color:var(--dim);font-size:12.5px;font-style:italic}
+.badge{font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:10px;
+       border:1px solid var(--line);color:var(--dim);cursor:help;white-space:nowrap}
+.spill{font-size:12px;font-weight:600;padding:2px 9px;border-radius:10px;white-space:nowrap;
+       background:var(--panel2);border:1px solid var(--line);color:var(--dim)}
+.spill.ok{color:var(--ok);background:var(--ok-bg);border-color:transparent}
+.spill.bad{color:var(--bad);background:var(--bad-bg);border-color:transparent}
+.spill.warn{color:var(--warn);background:var(--warn-bg);border-color:transparent}
 #toast{position:fixed;right:16px;bottom:16px;background:var(--panel);
        border:1px solid var(--ok);border-left:6px solid var(--ok);color:var(--fg);
        padding:10px 14px;border-radius:8px;max-width:min(560px,86vw);display:none;
-       z-index:9;white-space:pre-wrap;box-shadow:0 4px 14px rgba(0,0,0,.25)}
+       z-index:9;white-space:pre-wrap;box-shadow:var(--shadow)}
 #toast.bad{border-color:var(--bad)}
-#mapwrap{position:relative;background:var(--panel);border:1px solid var(--line);
-         border-radius:8px;overflow:hidden}
-/* Views FILL the screen under the header instead of a fixed size, so nothing
-   needs scrolling to be seen. --hdr, --mapbar and --camrec are measured by
-   layoutVars() every poll, because the header grows when the checklist has
-   something to say and the map bar wraps on a narrow window. */
-#map{width:100%;height:max(300px,calc(100vh - var(--hdr,150px) - var(--mapbar,48px) - 66px));
-     display:block;cursor:grab}
-/* The map, and beside it the aircraft's attitude. The map was wider than any
-   buoy field needs; the column it gave up is where the 3D view lives. */
-#maprow{display:flex;align-items:stretch}
-#maprow #map{flex:1;min-width:0}
-#attpanel{flex:none;width:280px;border-left:1px solid var(--line);padding:10px 12px;
-          display:flex;flex-direction:column;gap:8px}
-#att3d{width:100%;height:240px;display:block}
-#attspark{width:100%;height:78px;display:block}
-.attnums{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;text-align:center}
-.attnums .v{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
-.attnums .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
-#atttilt{font-size:13px;font-weight:600;text-align:center;border-radius:6px;padding:4px 6px}
-main.split #attpanel{display:none}
-@media (max-width:900px){#attpanel{display:none}}
-#camimg{display:block;margin:0 auto;max-width:100%;border:1px solid var(--line);
-        border-radius:6px;max-height:max(220px,calc(100vh - var(--hdr,150px) - var(--camrec,48px) - 44px))}
-/* Camera + Map: both sections at once, side by side, each fitted to the height. */
-main.split{max-width:none;display:grid;gap:14px;align-items:start;
-           grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
-main.split #s-cam{grid-column:1;grid-row:1}
-main.split #s-map{grid-column:2;grid-row:1}
-/* Housekeeping controls stay on the full Map tab; in flight the split view
-   keeps one toolbar row and the height it would have cost. */
-main.split details.about,main.split #mapexp,main.split .wide-only{display:none}
-@media (max-width:900px){main.split{grid-template-columns:1fr}
-  main.split #s-map{grid-column:1;grid-row:2}}
-#mapbar{display:flex;gap:6px;align-items:center;padding:8px 10px;
-        border-bottom:1px solid var(--line);flex-wrap:wrap}
-#mapbar .sep{width:1px;height:26px;background:var(--line);margin:0 4px}
+/* A tab's description lives behind its "?" and drops down over the page,
+   instead of standing in paragraphs under everything. */
+details.help{position:relative;flex:none}
+details.help>summary{list-style:none;cursor:pointer;width:24px;height:24px;border-radius:50%;
+  border:1px solid var(--line);display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:700;color:var(--dim);background:var(--btn);user-select:none}
+details.help>summary::-webkit-details-marker{display:none}
+details.help[open]>summary{color:var(--on-accent);background:var(--accent);border-color:var(--accent)}
+.helpbody{position:absolute;right:0;top:30px;z-index:20;width:min(460px,86vw);max-height:65vh;
+  overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:10px 14px;font-size:13px;line-height:1.5;box-shadow:var(--shadow);color:var(--fg)}
+.helpbody p{margin:0 0 8px} .helpbody p:last-child{margin:0}
+.helpbody b{color:var(--fg)}
+
+/* A tab whose panels start at the top keeps its "?" in the corner, over the
+   empty end of the first panel's title row, instead of on a row of its own. */
+#s-tel{position:relative}
+.cornerhelp{position:absolute;right:10px;top:7px;z-index:3}
+
+/* ---- Nodes ---- */
+#nodes{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));align-items:start}
+.grp{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px 4px}
+.gh{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.gh h2{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.8px;
+       margin:0;font-weight:700;flex:1}
+.node{display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid var(--line)}
+.gh+.node{border-top:0}
+.nmwrap{flex:1;min-width:0;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.nm{font-weight:700;font-size:14.5px}
+.nstate{font-size:12px;color:var(--dim)}
+.node.up .nstate{color:var(--ok)} .node.restarting .nstate{color:var(--warn)}
+.ndet{font-size:11.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px}
+
+/* ---- Map ---- */
+#mapwrap{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--panel);
+         border:1px solid var(--line);border-radius:10px;overflow:hidden}
+#mapbar,#searchbar{display:flex;gap:6px;align-items:center;padding:6px 8px;
+        border-bottom:1px solid var(--line);flex-wrap:wrap;flex:none}
+#mapbar .sep{width:1px;height:22px;background:var(--line);margin:0 3px}
+#mapbar button{padding:4px 10px}
 /* The buoy search's controls sit on the map, in the split view too: it is the
    tab open while it flies. */
-#searchbar{display:flex;gap:10px;align-items:center;padding:7px 10px;
-           border-bottom:1px solid var(--line);flex-wrap:wrap;background:var(--bg)}
-#searchbar .sk{font-size:11px;font-weight:700;letter-spacing:.9px;
+#searchbar{gap:10px;background:var(--panel2)}
+#searchbar .sk{font-size:10.5px;font-weight:700;letter-spacing:.8px;
                text-transform:uppercase;color:var(--dim)}
-#searchbar label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dim)}
-#searchn{width:66px}
+#searchbar label{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim)}
+#searchn{width:60px}
 /* A two-position switch, not a button labelled with its own state: the lit half
    is where the switch IS. A single button reading "Search OFF" was read as a
    switch already in the ON position, and a search nobody had switched on looked
    like a search that would not start. */
 .seg{display:inline-flex}
-.seg button{border-radius:0;margin-left:-1px;min-width:52px}
+.seg button{border-radius:0;margin-left:-1px;min-width:46px;padding:4px 10px}
 .seg button:first-child{border-radius:6px 0 0 6px;margin-left:0}
 .seg button:last-child{border-radius:0 6px 6px 0}
 .seg button.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
-#searchstat{display:flex;align-items:center;gap:8px;font-weight:600;min-width:0}
-.tile.hidden{display:none}
-#mapinfo{padding:6px 12px;font-size:13px;color:var(--dim);border-top:1px solid var(--line)}
-#mapant{padding:0 12px 6px;font-size:13px;color:var(--dim)}
+#searchstat{display:flex;align-items:center;gap:8px;font-weight:600;min-width:0;font-size:13px}
+/* The canvas is absolutely placed in a box that the layout sizes, so the map
+   fills exactly what is left -- the canvas's own pixel size never pushes back. */
+#mapbox{position:relative;flex:1;min-height:0}
+#map{position:absolute;left:0;top:0;width:100%;height:100%;display:block;cursor:grab}
 #map.measuring{cursor:crosshair}
-#logs{background:var(--sunk);border:1px solid var(--line);border-radius:8px;
-      padding:8px;height:min(60vh,560px);overflow:auto;font-size:12.5px}
+#mapinfo{position:absolute;right:8px;bottom:8px;font-size:12px;color:var(--dim);
+         background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:2px 8px;
+         pointer-events:none;white-space:nowrap}
+#mapinfo.warn{color:var(--warn);border-color:var(--warn)}
+#mapinfo.bad{color:var(--bad);border-color:var(--bad);font-weight:700}
+#mapexp{font-size:12px;color:var(--dim);white-space:nowrap}
+#mapexp a{color:var(--accent)}
+/* Beside the map: the aircraft's attitude, its GPS antenna and the buoys. The
+   buoy list scrolls inside its own pane, so the page never has to. */
+#mapside{flex:none;width:300px;display:flex;flex-direction:column;gap:12px;min-height:0;
+        overflow-y:auto;scrollbar-width:thin}
+#mapside>.pane{flex:none}
+#att3d{width:100%;height:150px;display:block}
+#attspark{width:100%;height:46px;display:block;margin-top:6px}
+.attnums{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;text-align:center}
+.attnums .v{font-size:20px;font-weight:700;justify-content:center}
+.attnums .k{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+#atttilt{font-size:12.5px;font-weight:600;text-align:center;border-radius:6px;padding:3px 6px;margin-top:6px}
+/* A pane that folds: its title is the handle, and the fold is remembered. */
+details.pane>summary{list-style:none;cursor:pointer;margin:0}
+details.pane>summary::-webkit-details-marker{display:none}
+details.pane>summary::after{content:'▾';margin-left:auto;font-size:12px}
+details.pane:not([open])>summary::after{content:'▸'}
+details.pane[open]>summary{margin-bottom:6px}
+#antpane{flex:none}
+#antpane .kv{padding:2px 0;align-items:flex-start}
+#antpane .kv .kk{font-size:12px}
+#antpane .kv .vv{font-size:12.5px;font-weight:500;flex-direction:column;align-items:flex-end;gap:0}
+#buoypane{flex:1 0 170px!important;min-height:170px;display:flex;flex-direction:column}
+#buoylist{flex:1;min-height:0;overflow:auto;margin:0 -4px;padding:0 4px}
+.brow{display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid var(--line);cursor:default}
+.brow:first-child{border-top:0}
+.bdot{width:12px;height:12px;border-radius:50%;flex:none;border:1px solid var(--dim)}
+.bstate{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#buoystats{font-size:11.5px;color:var(--dim);margin-top:6px;flex:none}
+/* A short window: the attitude view gives up height before the buoy list does. */
+@media (max-height:820px){#att3d{height:118px}#attspark{height:34px}
+  .attnums .v{font-size:17px}#atttilt{margin-top:4px;padding:2px 6px}}
+@media (max-width:1000px){
+  /* On a narrow window the tiles wrap to two rows: the header scrolls away
+     rather than holding a third of the screen. */
+  header{position:static}
+  #s-map.on{flex-direction:column;height:auto}
+  #mapwrap{flex:none;height:70vh}
+  #mapside{width:auto}}
+
+/* ---- Camera, and Camera + Map side by side ---- */
+#cam{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
+     background:var(--video-bg);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+#camimg{display:block;max-width:100%;max-height:100%;object-fit:contain}
+#cam .hint{margin:0;color:#c9d1db}
+main.split{max-width:none;display:grid;gap:12px;align-items:start;
+           grid-template-columns:minmax(0,1.25fr) minmax(0,1fr)}
+main.split #s-cam{grid-column:1;grid-row:1}
+main.split #s-map{grid-column:2;grid-row:1}
+/* Housekeeping stays on the full Map tab; in flight the split view keeps the
+   map's height for the map. */
+main.split #mapside,main.split #mapexp,main.split .wide-only,main.split #s-map details.help{display:none}
+@media (max-width:900px){main.split{grid-template-columns:1fr}
+  main.split #s-map{grid-column:1;grid-row:2}}
+
+/* ---- Logs and Radio ---- */
+#logs,#radiolog{flex:1;min-height:200px;background:var(--sunk);border:1px solid var(--line);
+      border-radius:10px;overflow:auto;font-size:12.5px}
+#logs{padding:8px 10px}
 .lg{display:flex;gap:8px;padding:1px 0;white-space:pre-wrap;word-break:break-word}
 .lg .t{color:var(--dim);flex:none} .lg .n{color:var(--accent);flex:none}
 .lg.WARN .m{color:var(--warn)} .lg.ERROR .m,.lg.FATAL .m{color:var(--bad)}
 .lg.DEBUG{opacity:.62}
-#radiolog{background:var(--sunk);border:1px solid var(--line);border-radius:8px;
-          padding:2px 8px 8px;height:min(52vh,520px);overflow:auto;font-size:12.5px}
+#radiolog{padding:0 10px 8px}
 #radiolog table{border-collapse:collapse;width:100%}
 #radiolog th{position:sticky;top:0;background:var(--sunk);text-align:left;
-             color:var(--dim);font-weight:600;padding:6px 12px 4px 0}
+             color:var(--dim);font-weight:600;padding:7px 12px 4px 0}
 #radiolog td{padding:2px 12px 2px 0;vertical-align:top;white-space:nowrap}
 #radiolog td.sum{white-space:normal;word-break:break-word;width:100%}
 .dir{font-weight:700;font-size:11px;letter-spacing:.5px}
 .dir.TX{color:var(--accent)} .dir.RX{color:var(--ok)}
-.bar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
-.inl{display:contents}
-select,input{font:inherit;font-size:14px;background:var(--btn);color:var(--fg);
-             border:1px solid var(--line);border-radius:6px;padding:5px 8px}
-.hint{color:var(--dim);font-size:13px;margin:8px 0 0}
-.callout{margin:12px 0 0;padding:8px 12px;border-radius:8px;border-left:5px solid var(--warn);
-         background:var(--warn-bg);font-size:14px}
-.callout:empty{display:none}
-details.about{margin-top:16px;color:var(--dim);font-size:13px}
-details.about summary{cursor:pointer;font-weight:600}
-details.about p{margin:6px 0 0;max-width:920px}
-#buoylist table{margin-top:10px;border-collapse:collapse;font-size:14px}
-#buoylist td{padding:4px 18px 4px 0;white-space:nowrap}
+.rgrid{display:grid;gap:12px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);flex:none}
+@media (max-width:900px){.rgrid{grid-template-columns:1fr}}
+
+/* ---- System ---- */
+#power{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));margin-top:12px}
 </style>
 <script>
 /* Applied before the body paints, so a reload in sunlight does not flash dark.
@@ -288,8 +357,8 @@ details.about p{margin:6px 0 0;max-width:920px}
 <header>
   <div class="topbar">
     <div class="logos">__LOGOS__</div>
-    <div class="brand"><b>Ekko</b><span>ground station</span></div>
-    <div id="tabs"></div>
+    <div class="brand" title="rx26_uav ground station">Ekko</div>
+    <nav id="tabs"></nav>
     <div class="spacer"></div>
     <div id="banner">connecting…</div>
     <button id="themeb" class="iconbtn" onclick="toggleTheme()">theme</button>
@@ -302,18 +371,31 @@ details.about p{margin:6px 0 0;max-width:920px}
     <div id="alttile" class="tile"></div>
     <div id="linktile" class="tile hidden"></div>
     <div id="searchtile" class="tile hidden"></div>
+    <div id="pftile" class="tile hidden"><div class="k" id="pfk">Pre-flight</div><div id="preflight"></div></div>
   </div>
-  <div id="preflight"></div>
 </header>
 <main>
-  <section id="s-nodes"><div id="nodes"></div>
-    <details class="about"><summary>About this tab</summary>
-    <p>Presence comes from the ROS graph <b>and</b> /proc, so a node started by
-    systemd or by hand in another terminal shows here too. Nodes with a systemd
-    unit (camera_node, ocs_client) come straight back when killed, so they get
-    <b>restart</b> rather than stop.</p></details></section>
-  <section id="s-tel"><div id="tel"></div>
-    <div class="callout" id="telhint"></div></section>
+  <section id="s-nodes">
+    <div class="bar" style="margin-bottom:10px"><span id="nodesum" class="note"></span><span class="spacer"></span>
+      <details class="help"><summary title="About this tab">?</summary><div class="helpbody">
+      <p>A node shows as running whether it was started here, by systemd, or by hand
+      in a terminal: presence comes from the ROS graph <b>and</b> /proc.</p>
+      <p>Nodes with a systemd unit (camera_node, ocs_client) come straight back when
+      killed, so they get <b>Restart</b>, never Stop. Each group's <b>?</b> says
+      what its nodes do.</p></div></details></div>
+    <div id="nodes"></div>
+  </section>
+  <section id="s-tel">
+    <div class="cornerhelp">
+      <details class="help"><summary title="About this tab">?</summary><div class="helpbody">
+      <p><b>Battery current and mAh</b> come from a sensor that is not calibrated
+      yet: trust the volts. Time to failsafe is worked out from the voltage trend
+      and needs a minute of armed flight.</p>
+      <p>A value in red is stale or missing, never the last reading held over.</p>
+      </div></details></div>
+    <div class="callout" id="telhint"></div>
+    <div id="tel" class="kvgrid"></div>
+  </section>
   <section id="s-map">
     <div id="mapwrap">
       <div id="mapbar">
@@ -332,6 +414,28 @@ details.about p{margin:6px 0 0;max-width:920px}
         <button class="wide-only" onclick="clearBuoys()">Clear buoys</button>
         <span class="spacer"></span>
         <span id="mapexp"></span>
+        <details class="help"><summary title="About this tab">?</summary><div class="helpbody">
+        <p>The polygon is the <b>fence read back from the autopilot</b>, the one it
+        enforces. Until one has been read the <code>geofence</code> parameter stands
+        in, and the corner of the map says so. Drag to pan; scroll or +/− to zoom.
+        The grid is fixed to the ground and re-spaces itself as you zoom.</p>
+        <p><b>Buoy search</b>: set the count and switch it ON. That alone moves
+        nothing: <b>flip SC into GUIDED</b> to start. It climbs to 10 m, sweeps the
+        fence 2 m inside it (the blue path; faded legs are flown), hovers over each
+        UNKNOWN buoy until it locks, gives up on one after 10 s, and asks for RTL
+        once the count is confirmed. SB takes over at any time; SC off and on
+        resumes; OFF here makes Ekko hold. Confirmed buoys count, so clear the
+        buoys before a fresh run.</p>
+        <p><b>Measure</b>: click two points. A click on a buoy snaps to its centre.
+        <b>The dashed amber box</b> is what the camera sees (thick edge = top of the
+        image), drawn only at nadir. <b>Lock beep</b> sounds on this laptop when a
+        buoy's state is decided; after a reload, click the page once to allow
+        sound.</p>
+        <p>A buoy reads <b>UNKNOWN</b> until watched in full view for 4 s. Its dashed
+        ring is the <b>spread</b> of its sightings: small means they agree. Hover a
+        buoy in the list for its position and counts. Downloads are the map as it
+        is now; the Jetson also writes them on every disarm.</p>
+        </div></details>
       </div>
       <div id="searchbar">
         <span class="sk">Buoy search</span>
@@ -351,53 +455,27 @@ details.about p{margin:6px 0 0;max-width:920px}
             onchange="setCount()" disabled></label>
         <span id="searchstat"></span>
       </div>
-      <div id="maprow">
-        <canvas id="map"></canvas>
-        <div id="attpanel">
-          <canvas id="att3d" title="Ekko seen from the south, north away from you, turned, rolled and pitched as the autopilot reports it"></canvas>
-          <div class="attnums">
-            <div><div class="v" id="att-r">&mdash;</div><div class="k">roll</div></div>
-            <div><div class="v" id="att-p">&mdash;</div><div class="k">pitch</div></div>
-            <div><div class="v" id="att-h">&mdash;</div><div class="k">heading</div></div>
-          </div>
-          <div id="atttilt">no attitude yet</div>
-          <canvas id="attspark" title="roll and pitch over the last 10 seconds: wobble shows as ripple"></canvas>
-        </div>
-      </div>
-      <div id="mapinfo"></div>
-      <div id="mapant" title="Ekko's GPS antenna as the receiver reports it, to compare with another receiver. Latitude/longitude to 1e-7 deg (~1 cm); height above the ELLIPSOID; ECEF computed from those. In the datum of the corrections in use (CRTN = NAD83)."></div>
+      <div id="mapbox"><canvas id="map"></canvas><div id="mapinfo"></div></div>
     </div>
-    <div id="buoylist"></div>
-    <details class="about"><summary>About this tab</summary>
-    <p>The polygon is the <b>fence read back from the autopilot</b> — the one it
-    enforces, drawn in QGC or uploaded. Until one has been read, the
-    <code>geofence</code> parameter stands in, and the line under the map says
-    so. Drag to pan; scroll or +/− to zoom.</p>
-    <p><b>Buoy search</b>: set how many buoys to find and switch it ON. That
-    alone moves nothing — <b>flip SC into GUIDED</b> to start it. It climbs to
-    10 m, sweeps the fence 2 m inside it (the blue path; faded legs are flown),
-    flies over each buoy the map still calls UNKNOWN until it locks, gives up on
-    one after 10 s overhead, and asks for RTL once the count is confirmed. Flip
-    SB (Loiter, Brake) to take over at any time; SC off and on again resumes.
-    Switching it OFF here makes Ekko hold position. Buoys already confirmed on
-    the map count, so clear the buoys before a fresh run.</p>
-    <p> The grid is fixed to the ground and
-    re-spaces itself as you zoom — the corner says the spacing. The autopilot
-    enforces the fence; this is a readout.</p>
-    <p><b>Measure</b>: click two points for the distance between
-    them. A click on a buoy snaps to its mapped centre, so buoy-to-buoy spacing
-    reads straight off the map. <b>The dashed amber rectangle</b> is what the
-    camera sees right now (its thick edge is the top of the image), drawn only
-    while the gimbal is at nadir. <b>Lock beep</b> plays a short tone on this
-    laptop each time a buoy's state is decided; browsers only allow sound after
-    a click on the page, so after a reload click anywhere once.</p>
-    <p>Buoys come from <code>buoy_mapper</code>. A buoy reads
-    <b>UNKNOWN</b> until it has been watched in full view for 4 s — one frame
-    cannot tell flashing from solid or off. The dashed ring is its
-    <b>spread</b>: a small ring means its sightings agree; a large one means the
-    position is not to be trusted. Downloads are the map as it is right now;
-    the same files are also written on the Jetson on every disarm.</p>
-    </details>
+    <aside id="mapside">
+      <div class="pane" id="attpanel">
+        <div class="ph">Attitude</div>
+        <canvas id="att3d" title="Ekko seen from the south, north away from you, turned, rolled and pitched as the autopilot reports it"></canvas>
+        <div class="attnums">
+          <div><div class="v" id="att-r">&mdash;</div><div class="k">roll</div></div>
+          <div><div class="v" id="att-p">&mdash;</div><div class="k">pitch</div></div>
+          <div><div class="v" id="att-h">&mdash;</div><div class="k">heading</div></div>
+        </div>
+        <div id="atttilt">no attitude yet</div>
+        <canvas id="attspark" title="roll and pitch over the last 10 seconds: wobble shows as ripple"></canvas>
+      </div>
+      <div class="pane" id="buoypane">
+        <div class="ph">Buoys<span class="spacer"></span><span id="buoycount"></span></div>
+        <div id="buoylist"></div><div id="buoystats"></div></div>
+      <details class="pane" id="antpane" style="display:none" open ontoggle="paneToggle(this)"
+        title="Ekko's GPS antenna as the receiver reports it, to compare with another receiver: lat/lon to 1e-7 deg (~1 cm), height above the ELLIPSOID, ECEF computed from those, in the datum of the corrections in use (CRTN = NAD83)">
+        <summary class="ph">GPS antenna</summary><div id="mapant"></div></details>
+    </aside>
   </section>
   <section id="s-logs">
     <div class="bar">
@@ -406,57 +484,65 @@ details.about p{margin:6px 0 0;max-width:920px}
         <option value="30">WARN+</option><option value="40">ERROR+</option>
       </select>
       <select id="lnode" onchange="repaintLogs()"><option value="">all nodes</option></select>
-      <button onclick="clearLogs()">clear</button>
+      <button onclick="clearLogs()">Clear</button>
       <span class="note" id="loginfo"></span>
+      <span class="spacer"></span>
+      <details class="help"><summary title="About this tab">?</summary><div class="helpbody">
+      <p>From <code>/rosout</code>, not journalctl: the host journal is on the other
+      side of the container boundary. It misses output written straight to stdout,
+      and anything printed before a node finished starting, which is exactly when a
+      bad parameter kills one. For those, <code>journalctl -u uav-&lt;unit&gt;</code>
+      on the Jetson.</p></div></details>
     </div>
     <div id="logs"></div>
-    <details class="about"><summary>About this tab</summary>
-    <p>From <code>/rosout</code>, not journalctl — we are inside a container and
-    the host journal is on the other side of that boundary. It misses output
-    written straight to stdout, and anything printed before a node finished
-    constructing, which is exactly when a bad parameter kills one.</p></details>
   </section>
   <section id="s-radio">
-    <h3 class="sec">On the radio</h3>
-    <div class="cards" id="radiosys"></div>
-    <h3 class="sec">Boat link (estimate)</h3>
-    <div class="cards" id="radioboat"></div>
-    <h3 class="sec">Frames</h3>
+    <div class="rgrid">
+      <div><h3 class="sec">On the radio</h3><div class="cards" id="radiosys"><p class="note">waiting for the radio log…</p></div></div>
+      <div><h3 class="sec">Boat link <span style="text-transform:none;letter-spacing:0;font-weight:600">(estimate)</span></h3><div class="cards" id="radioboat"></div></div>
+    </div>
     <div class="bar">
       <select id="rdir" onchange="repaintRadio()"><option value="">sent and heard</option>
         <option value="TX">sent</option><option value="RX">heard</option></select>
       <select id="rwho" onchange="repaintRadio()"><option value="">all systems</option></select>
       <select id="rname" onchange="repaintRadio()"><option value="">all messages</option></select>
-      <label class="note"><input type="checkbox" id="rhb" onchange="repaintRadio()"> show heartbeats</label>
+      <label class="note"><input type="checkbox" id="rhb" onchange="repaintRadio()"> heartbeats</label>
       <button onclick="post('/radio/send_test')">Send test message</button>
-      <button onclick="clearRadio()">clear</button>
+      <button onclick="clearRadio()">Clear</button>
       <span class="note" id="radioinfo"></span>
+      <span class="spacer"></span>
+      <details class="help"><summary title="About this tab">?</summary><div class="helpbody">
+      <p>Every frame <code>telemetry_bridge</code> sends to another system, and every
+      frame another system puts on the radio. Ekko's own autopilot telemetry is not
+      listed. Not visible here: frames the Cube does not pass to the Jetson (only
+      TUNNEL and standard messages arrive), and signal strength.</p>
+      <p><b>The boat numbers are an estimate.</b> Boat packets carry no sequence
+      number, so the tab compares how many arrive per second with the 1 Hz the boat
+      should send.</p>
+      <p><b>Send test message</b> puts one inert text TUNNEL (type
+      <code>0x80FE</code>) on the air, addressed to the boat. Watch for it in QGC's
+      MAVLink Inspector, or with <code>check_mesh.py</code> on a laptop radio.</p>
+      </div></details>
     </div>
     <div id="radiolog"></div>
-    <details class="about"><summary>About this tab</summary>
-    <p>Every frame <code>telemetry_bridge</code> sends to another system, and every
-    frame another system puts on the radio. Ekko's own autopilot telemetry is not
-    shown: a frame from any other system id can only have reached the autopilot
-    through its telemetry port, which is where the RFD900 is.</p>
-    <p>What this tab cannot see: frames the Cube does not pass to the Jetson (a
-    MAVLink message whose id the autopilot does not know is dropped there, so only
-    TUNNEL and standard messages arrive), and the radio's signal strength.</p>
-    <p><b>The boat link numbers are an estimate.</b> Boat packets carry no sequence
-    number, so a lost one cannot be counted; the tab compares how many arrived per
-    second with the 1 Hz the boat is expected to send. <b>Send test message</b>
-    puts one text TUNNEL (type <code>0x80FE</code>) on the air, addressed to the
-    boat, that neither vehicle acts on. Watch for it in QGC's MAVLink Inspector, or
-    with <code>check_mesh.py</code> on a laptop radio.</p></details>
   </section>
-  <section id="s-cam"><div class="bar"><span id="cammodel" class="inl"></span><span
-    id="cammodelnote" class="inl"></span><span id="camrec" class="inl"></span></div><div id="cam"></div>
-    <details class="about"><summary>About this tab</summary>
-    <p>The video is served by <code>camera_node</code> on its own port, not
-    proxied through this one — megabytes of MJPEG through the ground station's
-    snapshot path would make a stalled camera look like a stalled ground
-    station. The tab waits for that port to actually accept a connection before
-    pointing at it, because a process appears in the table seconds before its
-    server binds.</p></details></section>
+  <section id="s-cam">
+    <div class="bar" id="cambar"><span id="cammodel" class="inl"></span><span
+      id="cammodelnote" class="inl"></span><span id="camrec" class="inl"></span>
+      <span class="spacer"></span>
+      <details class="help"><summary title="About this tab">?</summary><div class="helpbody">
+      <p><b>Stills</b> follow the ARM switch. <b>Keep session</b> keeps a session
+      that never armed (bench capture) and also runs the camera's 4K SD recording.
+      The coloured pill says whether this session's video will be kept.</p>
+      <p><b>Show detections</b> draws boxes on this view only; the recorded stills
+      stay clean. <b>Restart camera</b> after unplugging or power-cycling the camera,
+      or if the video freezes.</p>
+      <p>The video comes straight from <code>camera_node</code>'s own port, not
+      through this page, so a stalled camera never looks like a stalled ground
+      station.</p></div></details>
+    </div>
+    <div id="cam"></div>
+  </section>
   <section id="s-sys"><div class="cards" id="sys"></div><div id="power"></div></section>
 </main>
 <div id="toast"></div>
@@ -495,21 +581,16 @@ function show(t){tab=t;
   layoutVars();
   if(mapVisible()){resize();draw();drawAttitude();drawAttSpark()}
   if(t==='logs')repaintLogs(); if(t==='radio')pollRadio(); render()}
-/* Heights the fitted views subtract. Measured, not guessed: the header changes
-   height with the checklist, and toolbars wrap on narrow windows. A change
-   re-sizes the map canvas, whose pixel size is set from its CSS box. */
+/* The header's height, which the views that fill the window subtract. Measured,
+   not guessed: it changes when the checklist tile comes and goes and when the
+   tiles wrap on a narrow window. Everything below the header is laid out by
+   flexbox, and the map canvas follows its box through a ResizeObserver. */
 var lastLayout='';
 function layoutVars(){
-  var h=document.querySelector('header').offsetHeight,
-      mb=((el('mapbar')||{}).offsetHeight||0)+((el('searchbar')||{}).offsetHeight||0),
-      cr=(el('camrec')||{}).offsetHeight||0,
-      key=h+'/'+mb+'/'+cr;
-  if(key===lastLayout)return;
-  lastLayout=key;
-  var st=document.documentElement.style;
-  st.setProperty('--hdr',h+'px');
-  if(mb)st.setProperty('--mapbar',mb+'px');
-  if(cr)st.setProperty('--camrec',cr+'px');
+  var h=document.querySelector('header').offsetHeight;
+  if(String(h)===lastLayout)return;
+  lastLayout=String(h);
+  document.documentElement.style.setProperty('--hdr',h+'px');
   if(mapVisible()){resize();draw()}}
 (function(){el('tabs').innerHTML=TABS.map(function(p){
   return '<button class="tab" id="tb-'+p[0]+'" onclick="show(\''+p[0]+'\')">'+p[1]+'</button>'
@@ -550,29 +631,46 @@ function paint(id,html){
   if(e.__html===html)return;
   e.__html=html; e.innerHTML=html;
 }
+/* An open "?" closes on a click anywhere else, like any dropdown. */
+document.addEventListener('click',function(e){
+  Array.prototype.forEach.call(document.querySelectorAll('details.help[open]'),function(d){
+    if(!d.contains(e.target))d.open=false})});
+/* A "?" that drops down its words over the page, instead of paragraphs that
+   stand under everything all the time. */
+function help(html){
+  return '<details class="help"><summary title="What these do">?</summary>'
+    +'<div class="helpbody">'+html+'</div></details>'}
+/* One card per group, one line per node: a dot, the name, its state, and the
+   one button that applies. What a group and its nodes are FOR is behind the
+   group's "?". */
 function renderNodes(){
-  var g=S.groups||[],out=[];
+  var g=S.groups||[],out=[],up=0,all=0;
   g.forEach(function(grp){
-    out.push('<div class="grp"><h2>'+esc(grp.label)+'</h2><p class="why">'+esc(grp.why)+'</p>');
+    var notes=[],rows=[];
     (grp.nodes||[]).forEach(function(n){
+      all++;if(n.running)up++;
       /* A node its systemd unit brings back gets RESTART, never stop, and no
          start button while it is on its way back -- a start in that gap runs a
          second copy. The server holds both rules; see node_registry. */
       var b='',st=n.running?'up':(n.restarting?'restarting':'down');
-      if(!n.running&&n.restarting) b='<span class="locked">'+esc(n.unit)+' is bringing it back\u2026</span>';
+      if(!n.running&&n.restarting) b='<span class="locked" title="'+esc(n.unit)+' is bringing it back">coming back\u2026</span>';
       else if(!n.running) b='<button class="go" onclick="nodeAct(\'start\',\''+n.name+'\')">Start</button>';
       else if(n.may_stop&&n.verb==='restart') b=restartButton(n.name,'Restart');
       else if(n.may_stop) b='<button class="danger" onclick="nodeAct(\'stop\',\''+n.name+'\')">Stop</button>';
-      else b='<span class="badge" title="'+esc(n.stop_reason)+'">protected \u2014 stop from a terminal</span>';
-      out.push('<div class="node"><span class="pill '+st+'">'+
-        {up:'running',restarting:'restarting',down:'stopped'}[st]+'</span>'+
-        '<div class="nmwrap"><span class="nm">'+esc(n.label)+'</span>'+
-        '<span class="note">'+esc(n.note||'')+'</span></div>'+
-        '<span class="note mono">'+esc(n.running?(n.detail||''):'')+'</span>'+b+'</div>');
+      else b='<span class="badge" title="'+esc(n.stop_reason)+'">protected</span>';
+      if(n.note)notes.push('<p><b>'+esc(n.label)+'</b>: '+esc(n.note)+'</p>');
+      rows.push('<div class="node '+st+'"><span class="dot '
+        +{up:'ok',restarting:'warn',down:''}[st]+'"></span>'
+        +'<div class="nmwrap"><span class="nm">'+esc(n.label)+'</span>'
+        +'<span class="nstate">'+{up:'running',restarting:'restarting',down:'stopped'}[st]+'</span>'
+        +(n.running&&n.detail?'<span class="ndet mono" title="'+esc(n.detail)+'">'+esc(n.detail)+'</span>':'')
+        +'</div>'+b+'</div>');
     });
-    out.push('</div>');
+    out.push('<div class="grp"><div class="gh"><h2>'+esc(grp.label)+'</h2>'
+      +help((grp.why?'<p>'+esc(grp.why)+'</p>':'')+notes.join(''))+'</div>'+rows.join('')+'</div>');
   });
   paint('nodes',out.join('')||'<p class="hint">no registry</p>');
+  el('nodesum').textContent=all?up+' of '+all+' nodes running':'';
 }
 /* Restart or stop while ARMED asks first. Restarting camera_node mid-sortie can
    be exactly right (a frozen feed), but a slipped click costs a gap in the
@@ -591,8 +689,6 @@ function nodeItem(name){var r=null;(S.groups||[]).forEach(function(g){
 function card(k,v,cls,dot){return '<div class="card '+(dot||'')+'"><div class="k">'+esc(k)+
   '</div><div class="v '+(cls||'')+'">'+(dot?'<span class="dot '+dot+'"></span>':'')
   +v+'</div></div>'}
-function section(title,cards){
-  return '<h3 class="sec">'+esc(title)+'</h3><div class="cards">'+cards.join('')+'</div>'}
 var QUALITY={ok:'Good',warn:'Degraded',bad:'Poor',unknown:'No data'};
 /* The GPS label: the receiver's own mode when the radio carries it ("HAS" --
    the autopilot has no fix type for that), else the autopilot's fix name. */
@@ -604,63 +700,74 @@ function gpsAcc(){
   var X=S.gnss,G=S.gps;
   if(X&&X.h_acc_m!=null)return {h:X.h_acc_m,v:X.v_acc_m,rx:true};
   return {h:G?G.h_acc_m:null,v:null,rx:false}}
+/* Telemetry: one panel per subject, a row per reading. */
+/* A reading with its unit, or a dash alone when there is none. */
+function fu(v,n,u){var s=fmt(v,n);return s==='—'?s:s+u}
+function kv(k,v,cls,dot,title){
+  return '<div class="kv"'+(title?' title="'+esc(title)+'"':'')+'><span class="kk">'+esc(k)
+    +'</span><span class="vv '+(cls||'')+'">'+(dot?'<span class="dot '+dot+'"></span>':'')+v+'</span></div>'}
+function panel(title,rows){return '<div class="pane"><div class="ph">'+esc(title)+'</div>'+rows.join('')+'</div>'}
 function renderTel(){
   var t=S.tel||{},out=[];
   var stale=function(ok){return ok?'':'bad'};
   var hdgBad=!t.pose_ok||t.heading===null||t.heading===undefined;
-  out.push(section('Flight',[
-    card('Mode',esc(t.mode||'\u2014'),stale(t.fcu_ok)),
-    card('Armed',t.fcu_ok?(t.armed?'ARMED':'disarmed'):'\u2014',
-         t.fcu_ok?(t.armed?'bad':'ok'):'bad'),
-    card('Flight phase',esc((t.landed||'\u2014').replace('_',' ').toLowerCase()),
-         t.flight_ok?(t.landed==='IN_AIR'||t.landed==='TAKEOFF'?'warn':'ok'):'bad'),
-    card('Altitude (m)',fmt(t.alt_rel,1),stale(t.pose_ok)),
-    card('Climb (m/s)',fmt(t.climb,1),stale(t.pose_ok)),
-    card('Ground speed (m/s)',fmt(t.speed,1),stale(t.pose_ok)),
-    card('Heading (\u00b0)',hdgBad?'unresolved':fmt(t.heading,1),hdgBad?'bad':'')]));
-  out.push(section('Position',[
-    card('Latitude','<span class="mono">'+fmt(t.lat,7)+'</span>',stale(t.pose_ok)),
-    card('Longitude','<span class="mono">'+fmt(t.lon,7)+'</span>',stale(t.pose_ok)),
-    card('Altitude AMSL (m)',fmt(t.alt_amsl,1),stale(t.pose_ok)),
-    card('Altitude HAE (m)',fmt(t.alt_hae,1),stale(t.pose_ok)),
-    card('Inside fence',t.pose_ok?(t.inside?'yes':'NO'):'\u2014',
-         t.pose_ok?(t.inside?'ok':'bad'):'bad')]));
-  out.push(section('Attitude',[
-    card('Roll (\u00b0)',fmt(t.roll,1),stale(t.att_ok)),
-    card('Pitch (\u00b0)',fmt(t.pitch,1),stale(t.att_ok)),
-    card('Yaw (\u00b0)',fmt(t.yaw,1),stale(t.att_ok))]));
+  out.push(panel('Flight',[
+    kv('Mode',esc(t.mode||'\u2014'),stale(t.fcu_ok)),
+    kv('Armed',t.fcu_ok?(t.armed?'ARMED':'disarmed'):'\u2014',
+       t.fcu_ok?(t.armed?'bad':'ok'):'bad'),
+    kv('Flight phase',esc((t.landed||'\u2014').replace('_',' ').toLowerCase()),
+       t.flight_ok?(t.landed==='IN_AIR'||t.landed==='TAKEOFF'?'warn':'ok'):'bad'),
+    kv('Altitude',fu(t.alt_rel,1,' m'),stale(t.pose_ok)),
+    kv('Climb',fu(t.climb,1,' m/s'),stale(t.pose_ok)),
+    kv('Ground speed',fu(t.speed,1,' m/s'),stale(t.pose_ok)),
+    kv('Heading',hdgBad?'unresolved':fu(t.heading,1,'\u00b0'),hdgBad?'bad':'')]));
+  out.push(panel('Position',[
+    kv('Latitude','<span class="mono">'+fmt(t.lat,7)+'</span>',stale(t.pose_ok)),
+    kv('Longitude','<span class="mono">'+fmt(t.lon,7)+'</span>',stale(t.pose_ok)),
+    kv('Altitude AMSL',fu(t.alt_amsl,1,' m'),stale(t.pose_ok)),
+    kv('Altitude HAE',fu(t.alt_hae,1,' m'),stale(t.pose_ok),'','height above the ellipsoid'),
+    (S.map||{}).fence_desc&&(t.inside===true||t.inside===false)
+      ?kv('Inside fence',t.pose_ok?(t.inside?'yes':'NO'):'\u2014',t.pose_ok?(t.inside?'ok':'bad'):'bad',
+          '',S.map.fence_desc)
+      :kv('Inside fence','unknown','','','no fence on the autopilot to judge by')]));
+  out.push(panel('Attitude',[
+    kv('Roll',fu(t.roll,1,'\u00b0'),stale(t.att_ok)),
+    kv('Pitch',fu(t.pitch,1,'\u00b0'),stale(t.att_ok)),
+    kv('Yaw',fu(t.yaw,1,'\u00b0'),stale(t.att_ok))]));
   /* GPS and battery take their colour from the pre-flight checks, so the
-     thresholds live in one place (preflight_core) and a card can never be
+     thresholds live in one place (preflight_core) and a reading can never be
      green while the checklist above it is red. */
   var G=S.gps,B=S.batt,gs=G?(chipState('gps')||'unknown'):'unknown',
-      bs=B?chipState('batt'):'bad',A=gpsAcc(),pct=A.rx?', 95%':'';
-  out.push(section('GPS',[
-    card('GPS quality',QUALITY[gs],gs==='unknown'?'':gs,gs==='unknown'?'':gs),
-    card('Fix',G?esc(gpsName(G)):'\u2014',''),
-    card('Satellites',G&&G.satellites!==255?G.satellites:'\u2014',''),
-    card('HDOP',G?fmt(G.hdop,2):'\u2014',''),
-    card('Accuracy H (m'+pct+')',fmt(A.h,2),''),
-    card('Accuracy V (m'+pct+')',fmt(A.v,2),'')]));
-  out.push(section('Battery',[
-    card('Voltage',B?fmt(B.voltage,2)+' V':'\u2014',bs,bs),
-    card('Per cell',B&&B.per_cell!=null?fmt(B.per_cell,2)+' V ('+B.cells+'S)':'\u2014',''),
-    card('Above failsafe',B&&B.margin_v!=null?fmt(B.margin_v,2)+' V':'\u2014',bs),
-    card('Time to failsafe',B&&B.minutes!=null?'~'+fmt(B.minutes,0)+' min':'\u2014',''),
-    card('Current',B?fmt(B.current,1)+' A':'\u2014',''),
-    card('Used',B?fmt(B.consumed_mah,0)+' mAh':'\u2014','')]));
+      bs=B?chipState('batt'):'bad',A=gpsAcc(),pct=A.rx?' (95%)':'';
+  out.push(panel('GPS',[
+    kv('Quality',QUALITY[gs],gs==='unknown'?'':gs,gs==='unknown'?'':gs),
+    kv('Fix',G?esc(gpsName(G)):'\u2014',''),
+    kv('Satellites',G&&G.satellites!==255?G.satellites:'\u2014',''),
+    kv('HDOP',G?fmt(G.hdop,2):'\u2014',''),
+    kv('Accuracy H'+pct,fu(A.h,2,' m'),''),
+    kv('Accuracy V'+pct,fu(A.v,2,' m'),'')]));
+  out.push(panel('Battery',[
+    kv('Voltage',B?fmt(B.voltage,2)+' V':'\u2014',bs,bs),
+    kv('Per cell',B&&B.per_cell!=null?fmt(B.per_cell,2)+' V ('+B.cells+'S)':'\u2014',''),
+    kv('Above failsafe',B&&B.margin_v!=null?fmt(B.margin_v,2)+' V':'\u2014',bs),
+    kv('Time to failsafe',B&&B.minutes!=null?'~'+fmt(B.minutes,0)+' min':'\u2014','','',B&&B.basis||''),
+    kv('Current',B?fmt(B.current,1)+' A':'\u2014','','','sensor not calibrated: trust the volts'),
+    kv('Used',B?fmt(B.consumed_mah,0)+' mAh':'\u2014','','','sensor not calibrated: trust the volts')]));
   var L=S.ocs||{};
-  out.push(section('Operator Control Station link',[
-    card('Link',L.present?(L.connected?'up':'down'):'not running',
-         L.present?(L.connected?'ok':'bad'):''),
-    card('Sent',L.present?L.sent:'\u2014',''),
-    card('Skipped',L.present?L.skipped:'\u2014',L.skipped?'warn':'')]));
-  el('tel').innerHTML=out.join('');
+  out.push(panel('Operator control station',[
+    kv('Link',L.present?(L.connected?'connected':'not connected'):'ocs_client not running',
+       L.present?(L.connected?'ok':'warn'):'','',
+       'ocs_client sends Ekko\'s status at 2 Hz to the team\'s OCS laptop, the only thing that talks to '
+       +'RoboNation\'s RoboCommand. Not connected is normal whenever the OCS program is not running.'),
+    kv('Sent',L.present?L.sent:'\u2014',''),
+    kv('Skipped',L.present?L.skipped:'\u2014',L.skipped?'warn':'')]));
+  paint('tel',out.join(''));
+  /* Only what needs attention gets words above the panels. */
   var h=[];
   if(hdgBad&&t.pose_ok) h.push('Heading is unresolved: GPS yaw is not available yet. The OCS refuses a heartbeat without it, deliberately.');
   if(L.present&&L.quiet_reason) h.push('The OCS is being sent nothing: '+L.quiet_reason);
   if(L.present&&L.phase_source==='fallback') h.push('Flight phase is coming from armed + altitude, NOT the autopilot. telemetry_bridge requests EXTENDED_SYS_STATE itself; check its log for "no EXTENDED_SYS_STATE yet".');
-  if(B) h.push('Battery: current and mAh come from a sensor that is not yet calibrated \u2014 trust the volts.'+(B.basis?' Time to failsafe: '+B.basis+'.':''));
-  el('telhint').innerHTML=h.map(function(x){return '<div>'+esc(x)+'</div>'}).join('');
+  paint('telhint',h.map(function(x){return '<div>'+esc(x)+'</div>'}).join(''));
 }
 
 /* ---- map ---- */
@@ -689,7 +796,8 @@ function keepInView(v){
    button, and once each time the map re-anchors on a fence. */
 var needFit=true;
 function fitView(){
-  var m=S.map||{},pts=(m.fence||[]).slice(),bm=m.buoys;
+  var m=S.map||{},pts=(m.fence||[]).slice(),bm=m.buoys,fc=m.fence_circle;
+  if(fc)pts.push([fc.x-fc.r,fc.y-fc.r],[fc.x+fc.r,fc.y+fc.r]);
   if(bm&&bm.buoys)bm.buoys.forEach(function(b){pts.push([b.x,b.y])});
   if(m.boat)pts.push([m.boat.x,m.boat.y]);
   /* Nothing from another venue: the params stand-in fence can be half a world
@@ -807,23 +915,39 @@ function drawMeasure(g){
   c.addEventListener('wheel',function(e){e.preventDefault();
     zoom(e.deltaY<0?1.12:0.89)},{passive:false});
   addEventListener('resize',function(){lastLayout='';layoutVars();
-    if(mapVisible()){resize();draw()}})})();
+    if(mapVisible()){resize();draw()}});
+  /* The map's box is sized by the layout -- toolbars wrapping, the header
+     changing height, the window -- and the canvas follows it. */
+  if(window.ResizeObserver)new ResizeObserver(function(){
+    if(mapVisible()){resize();draw()}}).observe(el('mapbox'))})();
 function draw(){
   var c=el('map');if(!W)resize();var g=c.getContext('2d');
   g.clearRect(0,0,W,H);
   var m=S.map||{},f=m.fence||[],v=m.veh;
   if(follow&&v)keepInView(v);
   var st=drawGrid(g);
-  /* fence */
+  /* fence: the autopilot's polygon in blue; the params stand-in, which the
+     autopilot does NOT enforce, only as a faint outline */
   if(f.length>1){
+    var held=m.fence_src==='autopilot';
     g.beginPath();
     f.forEach(function(p,i){i?g.lineTo(sx(p[0]),sy(p[1])):g.moveTo(sx(p[0]),sy(p[1]))});
     g.closePath();
+    if(held){g.fillStyle=PAL.fenceFill;g.fill()}
+    g.strokeStyle=held?PAL.accent:PAL.dim;g.lineWidth=held?1.6:1;g.setLineDash(held?[7,5]:[2,5]);
+    g.stroke();g.setLineDash([]);
+    if(held){g.fillStyle=PAL.accent;
+      f.forEach(function(p){g.fillRect(sx(p[0])-2.5,sy(p[1])-2.5,5,5)})}
+  }
+  /* the FENCE_RADIUS circle around home, when the autopilot enforces one */
+  var fc=m.fence_circle;
+  if(fc){
+    var CX=sx(fc.x),CY=sy(fc.y);
+    g.beginPath();g.arc(CX,CY,fc.r*scale,0,6.284);
     g.fillStyle=PAL.fenceFill;g.fill();
-    g.strokeStyle=PAL.accent;g.lineWidth=1.6;g.setLineDash([7,5]);g.stroke();
-    g.setLineDash([]);
-    g.fillStyle=PAL.accent;
-    f.forEach(function(p){g.fillRect(sx(p[0])-2.5,sy(p[1])-2.5,5,5)});
+    g.strokeStyle=PAL.accent;g.lineWidth=1.6;g.setLineDash([7,5]);g.stroke();g.setLineDash([]);
+    g.fillStyle=PAL.accent;g.beginPath();g.arc(CX,CY,3.5,0,6.284);g.fill();
+    g.font=MAPFONT;g.fillText('home',CX+7,CY-6);
   }
   drawSearch(g,m.search);
   /* trail */
@@ -1174,17 +1298,23 @@ function ecef(lat,lon,h){
       s=Math.sin(p),N=a/Math.sqrt(1-e2*s*s);
   return [(N+h)*Math.cos(p)*Math.cos(l),(N+h)*Math.cos(p)*Math.sin(l),(N*(1-e2)+h)*s]}
 function renderAntenna(){
-  var G=S.gps||{},A=gpsAcc(),box=el('mapant');
+  var G=S.gps||{},A=gpsAcc(),pane=el('antpane');
   /* Only the radio page (gcs_radio.py) carries the antenna position; where the
-     field is absent the line is hidden rather than claiming there is no fix. */
-  box.style.display=('lat' in G)?'':'none';
+     field is absent the pane is hidden rather than claiming there is no fix. */
+  pane.style.display=('lat' in G)?'':'none';
   if(!('lat' in G))return;
-  if(G.lat==null||G.lon==null){box.textContent='antenna: no position (no 3D fix)';return}
-  var h=G.alt_ellipsoid_m,x=h!=null?ecef(G.lat,G.lon,h):null;
-  box.textContent='antenna '+G.lat.toFixed(7)+', '+G.lon.toFixed(7)
-    +'  ·  h '+(h!=null?h.toFixed(2)+' m (ellipsoid)':'—')
-    +'  ·  ECEF '+(x?'X '+x[0].toFixed(2)+'  Y '+x[1].toFixed(2)+'  Z '+x[2].toFixed(2):'—')
-    +'  ·  '+gpsName(G)+(A.h!=null?' ±'+fmt(A.h,2)+' m':'')}
+  if(G.lat==null||G.lon==null){paint('mapant','<p class="note" style="margin:0">no position (no 3D fix)</p>');return}
+  var h=G.alt_ellipsoid_m,x=h!=null?ecef(G.lat,G.lon,h):null,m=function(v){
+    return '<span class="mono">'+v+'</span>'};
+  paint('mapant',[
+    kv('Lat, lon',m(G.lat.toFixed(7)+', '+G.lon.toFixed(7))),
+    kv('Height (ellipsoid)',h!=null?m(h.toFixed(2)+' m'):'—'),
+    kv('ECEF',x?m('X '+x[0].toFixed(2))+m('Y '+x[1].toFixed(2))+m('Z '+x[2].toFixed(2)):'—'),
+    kv('Fix',esc(gpsName(G))+(A.h!=null?' ±'+fmt(A.h,2)+' m':''))].join(''))}
+/* Folding panes keep their state in this browser across reloads. */
+function paneToggle(d){try{localStorage.setItem('rx26-fold-'+d.id,d.open?'open':'shut')}catch(e){}}
+(function(){try{['antpane'].forEach(function(id){
+  if(localStorage.getItem('rx26-fold-'+id)==='shut')el(id).open=false})}catch(e){}})();
 
 var originSeen=null;
 function renderMap(){
@@ -1199,16 +1329,16 @@ function renderMap(){
         p[1]-trail[trail.length-1][1])>=(m.trail_gate||0.5))trail.push(p);
     if(trail.length>(m.trail_max||600))trail.splice(0,trail.length-(m.trail_max||600));
   }
-  var G=S.gps;
-  el('mapinfo').textContent=(m.veh
-    ?((m.inside===false?'OUTSIDE FENCE  ':'inside fence  ')+
-      'alt '+fmt((S.tel||{}).alt_rel,1)+' m  ·  '+trail.length+' trail pts')
-    :'no pose')+'  ·  '+(G?'GPS '+gpsName(G)
-      +(G.satellites!==255?' '+G.satellites+' sats':'')
-      +(G.hdop!=null?' HDOP '+fmt(G.hdop,2):''):'no GPS')
-    +'  ·  fence: '+(m.fence_src==='autopilot'?'read from the autopilot'
-      :'uav_params stand-in, none read from the autopilot yet')
-    +(m.fence_problem?' ('+m.fence_problem+')':'');
+  /* The map's own status, in its corner: where Ekko is against the fence, and
+     whose fence it is. GPS and altitude are in the header already. */
+  /* Judged against what the autopilot ENFORCES sideways (fence_desc): its
+     circle, its polygon, or both. */
+  var mi=el('mapinfo'),fd=m.fence_desc;
+  mi.textContent=fd
+    ?(m.veh?(m.inside===false?'OUTSIDE THE FENCE':(m.inside===true?'inside the fence':'not judged'))
+      :'no position')+' · '+fd
+    :'no fence on the autopilot to judge by'+(m.fence_problem?' · '+m.fence_problem:'');
+  mi.className=m.inside===false?'bad':(fd?'':'warn');
   renderAntenna();
   checkLocks();
   if(mapVisible()){renderBuoys();draw();}
@@ -1271,9 +1401,9 @@ function renderVitals(){
     t.armed?'<b>ARMED</b>':'disarmed')}
   if(!B){tile('battery','bad','Battery','\u2014','no battery reading')}
   else{
-    var sub=B.margin_v!=null?fmt(B.margin_v,2)+' V above failsafe':'failsafe level not read yet';
-    if(t.armed&&B.minutes!=null)sub+=' \u00b7 ~'+(B.minutes>=60?'60+':fmt(B.minutes,0))+' min';
-    else if(B.per_cell!=null)sub+=' \u00b7 '+fmt(B.per_cell,2)+' V/cell';
+    var sub=B.margin_v!=null?'+'+fmt(B.margin_v,2)+' V over failsafe':'failsafe not read yet';
+    if(t.armed&&B.minutes!=null)sub=(B.minutes>=60?'60+':'~'+fmt(B.minutes,0))+' min \u00b7 '+sub;
+    else if(B.per_cell!=null)sub=fmt(B.per_cell,2)+' V/cell \u00b7 '+sub;
     /* The bar spans failsafe (empty) to a full pack at 4.2 V/cell. Under load it
        reads low -- it is the loaded voltage the failsafe watches, too. */
     var frac=(B.low_volt!=null&&B.cells)?Math.max(0,Math.min(1,
@@ -1281,15 +1411,19 @@ function renderVitals(){
     tile('battery',chipState('batt'),'Battery',fmt(B.voltage,2)+' V',sub,
       frac==null?'':'<div class="gauge"><i style="width:'+Math.round(frac*100)+'%"></i></div>',
       (B.basis||'')+(B.current!=null?' \u00b7 '+fmt(B.current,1)+' A (sensor uncalibrated)':''))}
-  if(!A){tile('flighttime','','Armed this power-on','\u2014','')}
-  else{tile('flighttime',A.armed?'armed':'','Armed this power-on',hms(A.seconds),
-    (A.armed?'<b>ARMED now</b>':'disarmed')+' \u00b7 '+A.flights+' flight'+(A.flights===1?'':'s'),
-    '',A.resumed?'resumed after a ground station restart':'')}
+  /* Armed time this power-on: Chris's flight-log number, so it survives a
+     ground station restart and resets only when the aircraft is powered off. */
+  if(!A){tile('flighttime','','Armed time','\u2014','',"",'armed time this power-on')}
+  else{tile('flighttime',A.armed?'armed':'','Armed time',hms(A.seconds),
+    A.flights+' flight'+(A.flights===1?'':'s')+' this power-on',
+    '','armed time this power-on'+(A.resumed?' \u00b7 resumed after a ground station restart':''))}
   var gs=G?(chipState('gps')||'unknown'):'unknown',GA=gpsAcc();
   tile('gpstile',gs==='unknown'?'':gs,'GPS','<span class="dot '+gs+'"></span>'+QUALITY[gs],
     G?esc(gpsName(G))+(G.satellites!==255?' \u00b7 '+G.satellites+' sats':'')
+      +(GA.h!=null?' \u00b7 \u00b1'+fmt(GA.h,2)+' m':''):'no GPS data','',
+    G?esc(gpsName(G))+(G.satellites!==255?' \u00b7 '+G.satellites+' satellites':'')
       +(G.hdop!=null?' \u00b7 HDOP '+fmt(G.hdop,2):'')
-      +(GA.h!=null?' \u00b7 \u00b1'+fmt(GA.h,2)+' m':''):'no GPS data');
+      +(GA.h!=null?' \u00b7 accuracy \u00b1'+fmt(GA.h,2)+' m':''):'');
   var altOk=t.pose_ok&&t.alt_rel!=null;
   tile('alttile',altOk?'':'bad','Altitude',altOk?fmt(t.alt_rel,1)+' m':'\u2014',
     altOk?(t.landed?esc(t.landed.replace('_',' ').toLowerCase()):''):'position stale')
@@ -1315,17 +1449,17 @@ function renderVitals(){
     /* dBm, not the raw 0-255 byte: 180 means nothing, -32 dBm does.
        Local/remote, then the margin over noise, which is what closes
        first when a link is about to fail. */
-    if(L.dbm!=null)lsub.push(fmt(L.dbm,0)+'/'+fmt(L.rem_dbm,0)+' dBm');
-    else if(L.rssi!=null)lsub.push('rssi '+L.rssi+'/'+L.remrssi);
+    var sig=L.dbm!=null?fmt(L.dbm,0)+' / '+fmt(L.rem_dbm,0)+' dBm (here / Ekko). '
+           :(L.rssi!=null?'rssi '+L.rssi+' / '+L.remrssi+'. ':'');
     if(L.margin_db!=null)lsub.push(fmt(L.margin_db,0)+' dB margin');
     if(L.txbuf!=null&&L.txbuf<90){lsub.push('buf '+L.txbuf+'%');lcls='warn'}
-    /* used / capacity in the big number: "9.4 / 125 kbit/s" answers "used or
-       available" without needing the sub line at all. */
+    /* Used in the big number, the share of the air rate first on the line
+       under it; the ceiling and everything else are in the tooltip. */
     tile('linktile',lcls,'Radio link',
-      (L.kbit_s!=null?fmt(L.kbit_s,1)+' / '+fmt(L.air_kbit_s,0)+' kbit/s'
-                     :'\u2014'),
+      (L.kbit_s!=null?fmt(L.kbit_s,1)+' kbit/s':'\u2014'),
       lsub.join(' \u00b7 '),'',
-      'Used: the bytes actually received over the last few seconds on '
+      (L.kbit_s!=null?fmt(L.kbit_s,1)+' of '+fmt(L.air_kbit_s,0)+' kbit/s air rate. ':'')+sig
+      +'Used: the bytes actually received over the last few seconds on '
       +esc(L.source||'')+'. The percentage is of the RAW air rate; real '
       +'throughput is roughly two thirds of it and is shared between every '
       +'radio on the mesh, so Ekko\'s share falls when Crusader joins. '
@@ -1343,16 +1477,26 @@ function renderVitals(){
     (se.waiting||[]).join('\n'))}
 /* Every chip while disarmed; once armed only what needs attention, so the strip
    stays out of the way in flight and still shouts when something goes wrong. */
+/* The words for each check are in its tooltip, and a click puts them up where
+   they can be read; the tile says how many need a look. */
 function renderPreflight(){
-  var armed=(S.tel||{}).armed,list=(S.preflight||[]).filter(function(c){
-    return !armed||(c.state!=='ok'&&c.state!=='off')});
-  paint('preflight',list.length?'<span class="pfl">'+(armed?'Needs attention':'Pre-flight')
-    +'</span>'+list.map(function(c){
-    var quiet=c.state==='ok'||c.state==='off',
-        label=c.label.charAt(0).toUpperCase()+c.label.slice(1);
-    return '<span class="chip '+esc(c.state)+'" title="'+esc(c.detail)+'">'
-      +'<span class="dot '+esc(c.state)+'"></span>'+esc(label+(quiet?'':': '+c.detail))+'</span>'
-  }).join(''):'')}
+  var armed=(S.tel||{}).armed,all=S.preflight||[],list=all.filter(function(c){
+    return !armed||(c.state!=='ok'&&c.state!=='off')}),
+      worry=all.filter(function(c){return c.state==='warn'||c.state==='bad'}),
+      unknown=all.filter(function(c){return c.state==='unknown'}).length,
+      bad=all.some(function(c){return c.state==='bad'});
+  paint('preflight',list.map(function(c){
+    var label=c.label.charAt(0).toUpperCase()+c.label.slice(1);
+    return '<span class="chip '+esc(c.state)+'" title="'+esc(label+': '+c.detail)+'" onclick="pfInfo(\''
+      +esc(c.key)+'\')"><span class="dot '+esc(c.state)+'"></span>'+esc(label)+'</span>'}).join(''));
+  var t=el('pftile');
+  t.className='tile '+(list.length?(bad?'bad':(worry.length?'warn':'')):'hidden');
+  el('pfk').textContent=(armed?'Needs attention':'Pre-flight')
+    +(worry.length?' · '+worry.length+' to check'
+      :(unknown?' · '+unknown+' unknown':(all.length?' · all clear':'')))}
+function pfInfo(key){
+  var c=(S.preflight||[]).filter(function(x){return x.key===key})[0];
+  if(c)toast(c.label.charAt(0).toUpperCase()+c.label.slice(1)+': '+c.detail,c.state==='bad')}
 /* Export links and the buoy table. paint() rewrites a div only when its markup
    changes, and these hold no buttons, so a poll-rate rewrite costs nothing. */
 function renderBuoys(){
@@ -1360,32 +1504,39 @@ function renderBuoys(){
   if(mp&&mp.serving){
     /* Protocol-relative, like the video: no absolute URL in the page. */
     var base='//'+(mp.host||location.hostname)+':'+mp.port+'/buoys.';
-    x='download: '+['kml','csv','plan','json'].map(function(f){
-      return '<a href="'+base+f+'" download style="color:var(--accent)">'+f+'</a>'
+    x='download '+['kml','csv','plan','json'].map(function(f){
+      return '<a href="'+base+f+'" download>'+f+'</a>'
     }).join(' · ');
   }else if(mp){x='buoy_mapper starting…'}
-  else{x='buoy_mapper not running'}
-  paint('mapexp','<span class="note" style="flex:none">'+x+'</span>');
+  else{x=''}  /* the buoy pane says it is not running */
+  paint('mapexp',x);
   if(!bm){
-    paint('buoylist',mp?'<p class="hint">no buoy map received in the last 3 s</p>':'');
+    paint('buoylist','<p class="hint" style="margin:4px 0">'+(mp?'no buoy map in the last 3 s'
+      :'buoy_mapper is not running')+'</p>');
+    paint('buoycount','');paint('buoystats','');
     return;
   }
-  var rows=bm.buoys.slice().sort(function(a,b){return a.id-b.id}).map(function(b){
-    return '<tr><td>B'+b.id+'</td><td style="color:'+(BVAR[b.colour]||'var(--fg)')
-      +'"><b>'+esc(b.label)+'</b>'+(b.locked?'':' <span class="note">watching</span>')
-      +'</td><td>'+b.lat.toFixed(7)+', '+b.lon.toFixed(7)
-      +'</td><td>±'+fmt(b.spread_m,2)+' m</td><td>'+b.sightings
-      +'</td><td>'+fmt(b.observed_s,1)+' s</td><td>'+Math.round(100*b.lit_fraction)
-      +'%</td></tr>';
-  }).join('');
-  paint('buoylist',
-    '<table style="margin-top:8px;border-collapse:collapse;font-size:12.5px">'
-    +'<tr style="color:var(--dim)"><td>buoy</td><td>state</td><td>lat, lon</td>'
-    +'<td>spread</td><td>sightings</td><td>watched</td><td>lit</td></tr>'
-    +(rows||'<tr><td colspan="7" class="note">no buoys yet</td></tr>')
-    +'</table><p class="note">map '+esc(bm.stem)+' · used '+bm.used
-    +' · edge '+bm.partial+' · low conf '+bm.low_conf+' · frames refused '
-    +bm.rejected+(bm.reject_reason?' (last: '+esc(bm.reject_reason)+')':'')+'</p>');
+  /* One line per buoy: its colour, its id, its state and how tight its position
+     is. Everything else is in the line's tooltip. */
+  var list=bm.buoys.slice().sort(function(a,b){return a.id-b.id}),locked=0;
+  var rows=list.map(function(b){
+    if(b.locked)locked++;
+    var fill=b.state==='UNKNOWN'?'transparent':(b.state==='OFF'?'var(--buoy-off)'
+          :(BVAR[b.colour]||'var(--fg)')),
+        tip='B'+b.id+' '+b.label+'\n'+b.lat.toFixed(7)+', '+b.lon.toFixed(7)
+          +'\nspread ±'+fmt(b.spread_m,2)+' m · '+b.sightings+' sightings · watched '
+          +fmt(b.observed_s,1)+' s · lit '+Math.round(100*b.lit_fraction)+'%';
+    return '<div class="brow" title="'+esc(tip)+'"><span class="bdot" style="background:'+fill
+      +'"></span><b>B'+b.id+'</b><span class="bstate" style="color:'
+      +(b.state==='UNKNOWN'?'var(--dim)':(BVAR[b.colour]||'var(--fg)'))+'">'+esc(b.label.replace(/_/g,' '))
+      +(b.locked?'':' <span class="note">· watching</span>')+'</span>'
+      +'<span class="note">±'+fmt(b.spread_m,2)+' m</span></div>'}).join('');
+  paint('buoylist',rows||'<p class="hint" style="margin:4px 0">no buoys yet</p>');
+  paint('buoycount',list.length?'<span class="note" style="text-transform:none;letter-spacing:0">'
+    +locked+' of '+list.length+' locked</span>':'');
+  paint('buoystats','<span title="frames used · boxes clipped by the edge · low confidence · frames refused'
+    +(bm.reject_reason?' (last: '+esc(bm.reject_reason)+')':'')+'">map '+esc(bm.stem)
+    +' · used '+bm.used+' · refused '+bm.rejected+'</span>');
 }
 
 /* ---- logs ---- */
@@ -1513,23 +1664,25 @@ function renderSys(){
   o.push(card('Disk free',s.disk_free==null?'—':fmt(s.disk_free,1)+' GB',
         s.disk_free!=null&&s.disk_free<2?'bad':''));
   o.push(card('Uptime',esc(s.uptime||'—')));
-  el('sys').innerHTML=o.join('');
+  paint('sys',o.join(''));
   var p=S.power||{},w=s.workspace||{},h=[];
-  h.push('<div class="grp"><h2>workspace</h2><p class="why">'+
-    (w.persists
-      ? 'Bind-mounted from <b>'+esc(w.source||'?')+'</b> at <b>'+esc(w.mount||'?')+
-        '</b> — <code>git pull</code> on the host is visible in here.'
-      : '<span style="color:var(--bad)">NOT a bind mount.</span> A <code>git pull</code> on the host is invisible to this container, and a rebuild will silently change nothing. See the README on recreating the container with <code>-v ~/robotx_ws:/root/robotx_ws</code>.')
-    +'</p></div>');
-  h.push('<div class="grp"><h2>power</h2>');
+  /* The workspace either is a bind mount (fine, one line) or is not (a real
+     problem, said in full). */
+  h.push('<div class="pane"><div class="ph">Workspace<span class="spacer"></span>'
+    +(w.persists?'<span class="spill ok">bind-mounted</span>':'<span class="spill bad">NOT a bind mount</span>')
+    +'</div>'+(w.persists
+      ? '<div class="note"><span class="mono">'+esc(w.source||'?')+'</span> at <span class="mono">'
+        +esc(w.mount||'?')+'</span>: a <code>git pull</code> on the host is visible in here.</div>'
+      : '<div style="color:var(--bad)">A <code>git pull</code> on the host is invisible to this container, and a rebuild will silently change nothing. Recreate the container with <code>-v ~/robotx_ws:/root/robotx_ws</code> (see the README).</div>')
+    +'</div>');
+  h.push('<div class="pane"><div class="ph">Power</div>');
   if(!p.allowed){
-    h.push('<p class="why locked">'+esc(p.reason||'power is disabled')+'</p>');
+    h.push('<div class="locked">'+esc(p.reason||'power is disabled')+'</div>');
   }else{
-    h.push('<p class="why">Type the hostname <b>'+esc(s.hostname)+
-      '</b> to confirm. Refused while armed, and while the armed state is unknown.</p>'+
-      '<div class="bar"><input id="pwconf" placeholder="hostname" size="18">'+
-      '<button class="danger" onclick="power(\'shutdown\')">shut down</button>'+
-      '<button class="danger" onclick="power(\'reboot\')">reboot</button></div>');
+    h.push('<div class="bar"><input id="pwconf" placeholder="type '+esc(s.hostname)+' to confirm" size="22">'+
+      '<button class="danger" onclick="power(\'shutdown\')">Shut down</button>'+
+      '<button class="danger" onclick="power(\'reboot\')">Reboot</button></div>'+
+      '<div class="note" style="margin-top:6px">Refused while armed, and while the armed state is unknown.</div>');
   }
   h.push('</div>');
   paint('power',h.join(''));
@@ -1567,7 +1720,7 @@ function renderCamRec(){
   var armed=(S.tel||{}).armed,stills=armed||r;
   var g=c.record_gate||'',keep=g.indexOf('keeping')===0;
   if(r===null||r===undefined){
-    parts.push('<span class="note">capture state unknown \u2014 /uav/camera/status is stale</span>');
+    parts.push('<span class="spill warn" title="/uav/camera/status is stale">capture state unknown</span>');
   }else{
     parts.push('<button class="toggle'+(r?' on':'')+'" onclick="setCapture('+(r?'false':'true')
       +')" title="keep this session even if the aircraft never arms; also runs the camera\'s 4K SD recording">'
@@ -1582,7 +1735,7 @@ function renderCamRec(){
       +' title="boxes are drawn on this view ONLY \u2014 the recorded stills stay clean, or the next model learns that a buoy is a thing with a rectangle on it">'
       +(showDet?'\u25a0 Hide detections':'\u25c9 Show detections')+'</button>');
   }else if(d&&d.starting){
-    parts.push('<span class="note">detector loading the model\u2026</span>');
+    parts.push('<span class="spill warn">detector loading\u2026</span>');
   }
   /* Restart here as well as on the Nodes tab: this is the tab that is open when
      the camera needs one -- after the camera is unplugged or power-cycled its
@@ -1593,13 +1746,14 @@ function renderCamRec(){
       'after unplugging or power-cycling the camera, or if the video freezes. Recording pauses for a few seconds.'));
   }
   if(r!==null&&r!==undefined){
-    parts.push('<span class="note">stills <b>'+(stills?'ON':'off')+'</b>'
-      +(armed?' (armed)':(r?' (forced)':''))+' \u00b7 4K SD <b>'+(r?'ON':'off')+'</b></span>');
+    parts.push('<span class="spill'+(stills?' ok':'')+'" title="stills follow the ARM switch">stills '
+      +(stills?'on':'off')+(armed?' \u00b7 armed':(r?' \u00b7 forced':''))+'</span>');
+    parts.push('<span class="spill'+(r?' ok':'')+'" title="the camera\'s own 4K recording to its SD card">4K SD '
+      +(r?'on':'off')+'</span>');
   }
   /* The gate is the important half: recording always runs, and a session
      heading for the bin must never be a silent surprise. */
-  if(g)parts.push('<span class="note" style="font-weight:700;color:'
-    +(keep?'var(--ok)':'var(--bad)')+'">'+esc(g)+'</span>');
+  if(g)parts.push('<span class="spill '+(keep?'ok':'bad')+'">'+esc(g)+'</span>');
   paint('camrec',parts.join(''));
 }
 /* The detector's Model choice. The <select> has its OWN element, painted only
@@ -1616,20 +1770,21 @@ function renderCamModel(){
   var d=S.detector;
   if(!d||!d.models||d.models.length<2){paint('cammodel','');paint('cammodelnote','');return}
   var chosen=null;
-  paint('cammodel','<label class="note">Model <select onchange="setModel(this.value)">'
+  paint('cammodel','<label class="note" style="display:flex;align-items:center;gap:6px">Model <select onchange="setModel(this.value)">'
     +d.models.map(function(m){
       if(m.path===d.chosen)chosen=m;
       return '<option value="'+esc(m.path)+'"'+(m.path===d.chosen?' selected':'')+'>'
         +esc(m.label)+'</option>'}).join('')+'</select></label>');
-  var name=String(d.chosen||'').split('/').pop(),s;
+  var name=String(d.chosen||'').split('/').pop(),s,c;
   /* "loaded" is what the DETECTOR says it read, not what this page asked for. */
-  if(!d.running)s='detector off — picking a model starts it';
-  else if(!d.loaded)s='loading…';
-  else if(d.loaded===name)s='<b style="color:var(--ok)">loaded</b>';
-  else s='<b style="color:var(--bad)">detector is running '+esc(d.loaded)+', not this one</b>';
-  var tip=(chosen&&!chosen.buoy)?' title="buoy_mapper and the search are refused while this model is loaded: they would map what it finds as buoys"':'';
-  if(tip)s+=' · no mapping';
-  paint('cammodelnote','<span class="note"'+tip+'>'+s+'</span>');
+  if(!d.running){s='detector off';c='';}
+  else if(!d.loaded){s='loading…';c='warn';}
+  else if(d.loaded===name){s='loaded';c='ok';}
+  else{s='running '+esc(d.loaded)+', not this';c='bad';}
+  var tip=!d.running?'picking a model starts the detector':'';
+  if(chosen&&!chosen.buoy){s+=' · no mapping';
+    tip='buoy_mapper and the search are refused while this model is loaded: they would map what it finds as buoys'}
+  paint('cammodelnote','<span class="spill '+c+'"'+(tip?' title="'+tip+'"':'')+'>'+s+'</span>');
 }
 function renderCam(){
   renderCamModel();
