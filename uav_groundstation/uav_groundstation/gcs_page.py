@@ -246,6 +246,7 @@ main.split details.about,main.split #mapexp,main.split .wide-only{display:none}
 #searchstat{display:flex;align-items:center;gap:8px;font-weight:600;min-width:0}
 .tile.hidden{display:none}
 #mapinfo{padding:6px 12px;font-size:13px;color:var(--dim);border-top:1px solid var(--line)}
+#mapant{padding:0 12px 6px;font-size:13px;color:var(--dim)}
 #map.measuring{cursor:crosshair}
 #logs{background:var(--sunk);border:1px solid var(--line);border-radius:8px;
       padding:8px;height:min(60vh,560px);overflow:auto;font-size:12.5px}
@@ -364,6 +365,7 @@ details.about p{margin:6px 0 0;max-width:920px}
         </div>
       </div>
       <div id="mapinfo"></div>
+      <div id="mapant" title="Ekko's GPS antenna as the receiver reports it, to compare with another receiver. Latitude/longitude to 1e-7 deg (~1 cm); height above the ELLIPSOID; ECEF computed from those. In the datum of the corrections in use (CRTN = NAD83)."></div>
     </div>
     <div id="buoylist"></div>
     <details class="about"><summary>About this tab</summary>
@@ -1163,6 +1165,27 @@ function drawAttSpark(){
   g.fillStyle=PAL.dim;g.textAlign='right';
   g.fillText('\u00b1'+big+'\u00b0 \u00b7 last '+ATT_SPAN_S+' s',w-4,11);g.textAlign='left'}
 
+/* Ekko's GPS ANTENNA, as the receiver reports it: the numbers to hold against
+   another receiver. ECEF is computed from the ELLIPSOID height (GRS80; WGS84
+   differs by well under a millimetre), so it is blank when no ellipsoid height
+   came over -- an MSL height in its place would put Z ~35 m out. */
+function ecef(lat,lon,h){
+  var a=6378137,f=1/298.257222101,e2=f*(2-f),p=lat*Math.PI/180,l=lon*Math.PI/180,
+      s=Math.sin(p),N=a/Math.sqrt(1-e2*s*s);
+  return [(N+h)*Math.cos(p)*Math.cos(l),(N+h)*Math.cos(p)*Math.sin(l),(N*(1-e2)+h)*s]}
+function renderAntenna(){
+  var G=S.gps||{},A=gpsAcc(),box=el('mapant');
+  /* Only the radio page (gcs_radio.py) carries the antenna position; where the
+     field is absent the line is hidden rather than claiming there is no fix. */
+  box.style.display=('lat' in G)?'':'none';
+  if(!('lat' in G))return;
+  if(G.lat==null||G.lon==null){box.textContent='antenna: no position (no 3D fix)';return}
+  var h=G.alt_ellipsoid_m,x=h!=null?ecef(G.lat,G.lon,h):null;
+  box.textContent='antenna '+G.lat.toFixed(7)+', '+G.lon.toFixed(7)
+    +'  ·  h '+(h!=null?h.toFixed(2)+' m (ellipsoid)':'—')
+    +'  ·  ECEF '+(x?'X '+x[0].toFixed(2)+'  Y '+x[1].toFixed(2)+'  Z '+x[2].toFixed(2):'—')
+    +'  ·  '+gpsName(G)+(A.h!=null?' ±'+fmt(A.h,2)+' m':'')}
+
 var originSeen=null;
 function renderMap(){
   var m=S.map||{};
@@ -1186,6 +1209,7 @@ function renderMap(){
     +'  ·  fence: '+(m.fence_src==='autopilot'?'read from the autopilot'
       :'uav_params stand-in, none read from the autopilot yet')
     +(m.fence_problem?' ('+m.fence_problem+')':'');
+  renderAntenna();
   checkLocks();
   if(mapVisible()){renderBuoys();draw();}
 }

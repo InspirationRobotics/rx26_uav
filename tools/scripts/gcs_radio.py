@@ -467,6 +467,16 @@ class Radio:
                        "satellites": gps_m.satellites_visible,
                        "hdop": (gps_m.eph / 100.0) if gps_m.eph not in (0, 65535) else None,
                        "h_acc_m": (getattr(gps_m, "h_acc", 0) or 0) / 1000.0 or None}
+                # The ANTENNA's position as the receiver reports it -- not the
+                # EKF's, which is the vehicle centre GPS1_POS_X behind it. It is
+                # what to hold against another receiver; 1e-7 deg is ~1 cm.
+                # Blank without a 3D fix, and the ellipsoid height blank when
+                # none was sent, never the MSL height in its place.
+                fix3d = gps_m.fix_type >= 3 and bool(gps_m.lat or gps_m.lon)
+                ell = getattr(gps_m, "alt_ellipsoid", 0)
+                gps["lat"] = gps_m.lat / 1e7 if fix3d else None
+                gps["lon"] = gps_m.lon / 1e7 if fix3d else None
+                gps["alt_ellipsoid_m"] = ell / 1000.0 if fix3d and ell else None
                 if gnss is not None:
                     gps["mode"] = gnss["mode_name"]     # what the page shows: "HAS"
             batt = None
