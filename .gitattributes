@@ -12,3 +12,6 @@
 *.rules text eol=lf
 *.yaml  text eol=lf
 Dockerfile text eol=lf
+# Windows launchers: cmd.exe mis-jumps to labels in LF-only batch files.
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
