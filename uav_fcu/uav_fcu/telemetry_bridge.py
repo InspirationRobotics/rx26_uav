@@ -450,6 +450,12 @@ class TelemetryBridge(Node):
         self._ext_state_seen = False
         self._ext_state_req_t = time.monotonic()
 
+        # MAVLink 2 from the first byte. Otherwise pymavlink starts on its v1.0
+        # dialect, which has no message above id 255 -- TUNNEL (385) included
+        # -- and switches only when the first v2 frame arrives. A GNSS send in
+        # that gap killed the node: "'MAVLink' object has no attribute
+        # 'tunnel_encode'" (2026-10-11, one start in three).
+        os.environ.setdefault("MAVLINK20", "1")
         from pymavlink import mavutil
         self._mavutil = mavutil
         # source_system distinct from MAVProxy's default 255. While this node
