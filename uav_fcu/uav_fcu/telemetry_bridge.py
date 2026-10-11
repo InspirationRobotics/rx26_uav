@@ -390,7 +390,7 @@ class TelemetryBridge(Node):
             geoid_separation_m=p["geoid_separation_m"],
             airborne_alt_m=p["airborne_alt_m"],
             build_heartbeat=heartbeat_core.build_heartbeat,
-            log=lambda level, text: getattr(self.get_logger(), level)(text))
+            log=self._rxl_log)
         self.get_logger().info(
             "OCS reports over the radio: RXL heartbeat %s, SAFE_PASSAGE while the "
             "task is TASK_SAFE_PASSAGE (/uav/current_task)"
@@ -744,6 +744,17 @@ class TelemetryBridge(Node):
         self._passage_map.set(
             (self._buoys, stamp.sec * 1000 + stamp.nanosec // 1000000),
             time.monotonic())
+
+    def _rxl_log(self, level, text):
+        """RxlUplink's log: one call site per severity. rclpy keys a log call by
+        its source line and raises "Logger severity cannot be changed between
+        calls" when one line logs at two severities -- a single
+        getattr(logger, level) line did, and every flip dropped that tick's
+        frames to the OCS."""
+        if level == "warning":
+            self.get_logger().warning(text)
+        else:
+            self.get_logger().info(text)
 
     def _rxl_tick(self, t, pose, status, att, flight):
         """Job 8: whatever Ekko owes the OCS over the radio right now.
