@@ -41,6 +41,7 @@ from uav_common import config as uav_config
 from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config
 from uav_common.stream_cache import StreamCache
+from uav_common.task_core import CurrentTask
 
 from uav_groundstation import heartbeat_core
 from uav_groundstation.ocs_link import OcsLink, fake_report, rfc3339
@@ -98,6 +99,12 @@ class OcsClient(Node):
         self._skipped = 0
         self._phase_source = None       # "autopilot" | "fallback" | None
         self._quiet_reason = None
+        # The task Ekko claims, from /uav/current_task: TASK_NONE until something
+        # publishes one. telemetry_bridge reads the same topic through the same
+        # class for the radio heartbeat, so the OCS -- which falls back to this
+        # WiFi heartbeat when the radio's goes quiet -- never sees the task flip.
+        self._task = CurrentTask()
+        self._task.subscribe(self)
 
         # Commands arrive on the link thread; rclpy publishers are not promised
         # to be thread-safe, so they are parked here and published from the
@@ -188,7 +195,8 @@ class OcsClient(Node):
             attitude=self._att.get(now),
             landed=(fs.landed_state if fs is not None and fs.valid else None),
             geoid_separation_m=p["geoid_separation_m"],
-            airborne_alt_m=p["airborne_alt_m"])
+            airborne_alt_m=p["airborne_alt_m"],
+            current_task=self._task.value)
 
         if hb is None:
             self._skipped += 1

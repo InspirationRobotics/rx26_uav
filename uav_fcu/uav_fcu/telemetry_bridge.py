@@ -78,6 +78,18 @@ MAVLink connection and there may only ever be one:
    with timeouts: a missing, silent or garbled receiver stops the GNSS packet
    and nothing else. Display only; nothing acts on it.
 
+8. TX (Ekko's own reports to the OCS, over the same radio): the RXL HEARTBEAT
+   (catalogue 0x10, 2 Hz) and, while the current task is TASK_SAFE_PASSAGE, the
+   SAFE_PASSAGE report (0x11) built from /uav/perception/buoy_map. Each is a
+   broadcast TUNNEL (payload_type 0x8000 | id, target 0) so the OCS laptop hears
+   it without the Cube having to route to its id. The heartbeat is built by
+   heartbeat_core -- the same rules as ocs_client's WiFi heartbeat -- and packed by
+   uav_common.rxl_uplink; what is withheld, and why, is decided THERE. The task
+   comes from /uav/current_task (uav_common.task_core), the same topic ocs_client
+   reads, so the two links cannot disagree. Facts only, like everything this node
+   sends; nothing here is acted on by the aircraft. A fault in this job is caught
+   and logged, and can stop this job and nothing else.
+
 THERE IS NO DISARM PATH IN THIS NODE, AND THAT IS DELIBERATE.
 -------------------------------------------------------------
 The ASV's telemetry_bridge carries a force-disarm TX path — a
@@ -128,6 +140,11 @@ Parameters:
   fence_timeout_s    (float, 5.0)  per-exchange timeout in the mission dialog
   gnss_rx_port       (str)         glob for the GNSS receiver's USB2 port; ""
                                    turns the GNSS packet off
+  ocs_rxl_heartbeat_hz (float, 2.0) RXL HEARTBEAT rate to the OCS; 0 = no RXL
+                                   heartbeat (SAFE_PASSAGE is unaffected)
+  geoid_separation_m (float)       HAE = AMSL + this; = shared (pinned), the same
+                                   figure ocs_client uses for the WiFi heartbeat
+  airborne_alt_m     (float, 1.0)  flight-phase fallback threshold; = ocs_client's
 """
 import glob
 import math
@@ -156,6 +173,8 @@ from uav_common import fcu_decode
 from uav_common import geo
 from uav_common import boat_link
 from uav_common import guided_gate
+from uav_common import rxl
+from uav_common import rxl_uplink
 from uav_common import sbf
 from uav_common.drop_latch import DropLatch
 from uav_common.fence_core import (MISSION_TYPE_FENCE, FenceError, FenceProtocol,
@@ -164,6 +183,11 @@ from uav_common.fence_core import (MISSION_TYPE_FENCE, FenceError, FenceProtocol
 from uav_common.node_main import run_node
 from uav_common.param_utils import declare_from_config
 from uav_common.stream_cache import StreamCache
+from uav_common.task_core import CurrentTask
+# The WiFi heartbeat's rules, shared with the radio heartbeat (job 8). A pure module
+# in the ground station's package: uav_common must not depend on that package, so it
+# is imported HERE and handed to rxl_uplink.
+from uav_groundstation import heartbeat_core
 
 # All bridge params are SAFETY/STRUCTURAL CONFIG -> read_only: `ros2 param set`
 # is rejected; the change path is config/uav_params.yaml + node restart.
@@ -202,6 +226,19 @@ PARAM_SPEC = {
                          description="glob for the GNSS receiver's USB2 port "
                                      "(never its COM1, which the autopilot "
                                      "owns); empty = no GNSS packet"),
+    "ocs_rxl_heartbeat_hz": dict(read_only=True, lo=0.0,
+                                 hi=rxl_uplink.HEARTBEAT_MAX_HZ,
+                                 description="RXL HEARTBEAT to the OCS over the "
+                                             "radio, Hz; 0 = off. 41 B a frame"),
+    "geoid_separation_m": dict(read_only=True, lo=-120.0, hi=120.0,
+                               description="HAE = AMSL + this, for the RXL "
+                                           "heartbeat. = shared.geoid_separation_m "
+                                           "(pinned by check_config.py). "
+                                           "VENUE-SPECIFIC"),
+    "airborne_alt_m": dict(read_only=True, lo=0.2, hi=50.0,
+                           description="flight-phase fallback threshold, only "
+                                       "when EXTENDED_SYS_STATE is absent; "
+                                       "= ocs_client's (pinned)"),
 }
 
 #: The GNSS packet (job 7). One a second; only a reading this fresh is sent, so
@@ -342,6 +379,24 @@ class TelemetryBridge(Node):
                                  self._buoy_map_cb, 10)
         self.create_subscription(SearchStatus, "/uav/search/status",
                                  self._search_cb, 10)
+        # Job 8, Ekko's own reports to the OCS. The SAFE_PASSAGE report needs a map
+        # that is FRESH (the lights path above keeps sending the last map it was
+        # given, however old), so it has a cache of its own.
+        self._passage_map = StreamCache(rxl_uplink.BUOY_MAP_FRESH_S)
+        self._task = CurrentTask()
+        self._task.subscribe(self)
+        self._rxl = rxl_uplink.RxlUplink(
+            heartbeat_hz=float(p["ocs_rxl_heartbeat_hz"]),
+            geoid_separation_m=p["geoid_separation_m"],
+            airborne_alt_m=p["airborne_alt_m"],
+            build_heartbeat=heartbeat_core.build_heartbeat,
+            log=lambda level, text: getattr(self.get_logger(), level)(text))
+        self.get_logger().info(
+            "OCS reports over the radio: RXL heartbeat %s, SAFE_PASSAGE while the "
+            "task is TASK_SAFE_PASSAGE (/uav/current_task)"
+            % ("OFF" if not p["ocs_rxl_heartbeat_hz"]
+               else "%.1f Hz as node %d" % (p["ocs_rxl_heartbeat_hz"],
+                                             rxl.NODE_UAV)))
 
         self.create_subscription(RcChannels, "/uav/rc_override",
                                  self._override_cb, 10)
@@ -568,6 +623,7 @@ class TelemetryBridge(Node):
         t = time.monotonic()
         with self._lock:
             pose = self._pose.get(t)
+            att = self._att.get(t)
             status = self._status.get(t)
             flight = self._flight.get(t)
             rc = self._rc.get(t)
@@ -667,6 +723,7 @@ class TelemetryBridge(Node):
             self.rc_pub.publish(m)
         self._radio_tick(t)
         self._gnss_tick(t)
+        self._rxl_tick(t, pose, status, att, flight)
 
     def _search_cb(self, msg: SearchStatus):
         self._search.set(msg, time.monotonic())
@@ -681,6 +738,35 @@ class TelemetryBridge(Node):
     def _buoy_map_cb(self, msg: BuoyMap):
         self._buoys = [(b.id, b.latitude, b.longitude, b.label) for b in msg.buoys]
         self._map_id = msg.export_stem
+        # For SAFE_PASSAGE: the same buoys with the time the mapper stamped them
+        # (Unix ms, as Mesh/rxl.py sends time_boot_ms), kept only while fresh.
+        stamp = msg.header.stamp
+        self._passage_map.set(
+            (self._buoys, stamp.sec * 1000 + stamp.nanosec // 1000000),
+            time.monotonic())
+
+    def _rxl_tick(self, t, pose, status, att, flight):
+        """Job 8: whatever Ekko owes the OCS over the radio right now.
+
+        Called LAST in the publish tick and shielded: a bug or a bad frame here
+        stops this job and nothing else -- pose, attitude and status above have
+        already gone out, and the next tick tries again.
+        """
+        try:
+            for ptype, payload in self._rxl.tick(
+                    t, pose=pose, status=status, attitude=att, landed=flight,
+                    task=self._task.value, buoy_map=self._passage_map.get(t)):
+                self._send_tunnel(0, ptype, payload)
+            self.get_logger().info(
+                "RXL to the OCS: task %s; heartbeats sent %d, SAFE_PASSAGE sent %d"
+                % (self._task.value, self._rxl.sent[rxl_uplink.PAYLOAD_HEARTBEAT],
+                   self._rxl.sent[rxl_uplink.PAYLOAD_SAFE_PASSAGE]),
+                throttle_duration_sec=60.0)
+        except Exception as e:             # noqa: BLE001 -- see docstring
+            self.get_logger().error(
+                "RXL uplink fault (%s: %s) -- nothing more is sent to the OCS this "
+                "tick; everything else is unaffected" % (type(e).__name__, e),
+                throttle_duration_sec=10.0)
 
     def _radio_tick(self, t):
         """Whatever is due on the mesh: new positions, re-sends the boat has not
@@ -822,7 +908,8 @@ class TelemetryBridge(Node):
         m = self.conn.mav.tunnel_encode(sysid, 0, payload_type, len(payload),
                                         boat_link.pad(payload))
         self.conn.mav.send(m)
-        name, summary = boat_link.describe(payload_type, payload)
+        name, summary = (rxl_uplink.describe(payload_type, payload)
+                         or boat_link.describe(payload_type, payload))
         self.radio_pub.publish(self._radio_frame(
             RadioFrame.DIR_TX, self.conn.source_system,
             self.conn.source_component, sysid, name, payload_type, summary,

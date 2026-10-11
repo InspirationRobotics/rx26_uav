@@ -100,6 +100,15 @@ after the fact; nothing acts on that topic. `/uav/radio/send_test` puts one
 text TUNNEL (`boat_link.PAYLOAD_TEST`, `0x80FE`) on the air, addressed to the
 boat, that neither end acts on.
 
+**Ekko's own reports to the OCS.** The same node puts two RXL catalogue messages on
+the radio as broadcast TUNNELs (`0x8000 | id`, target 0): a 2 Hz HEARTBEAT `0x8010`
+(`ocs_rxl_heartbeat_hz`; built by `uav_groundstation.heartbeat_core`, the WiFi
+heartbeat's rules) and, while `/uav/current_task` is `TASK_SAFE_PASSAGE`, a
+SAFE_PASSAGE `0x8011` from the buoy map. The packers are `uav_common/rxl.py` (a
+copy of `OCS/fleet/rxl_codec.py`); what is sent or withheld is decided in
+`uav_common/rxl_uplink.py`. A fault there is caught and logged and stops only that.
+Setting the task on the bench: `docs/BRINGUP.md` section 1.
+
 ## There is no disarm path, deliberately
 
 The ASV's version carries a force-disarm (`MAV_CMD_COMPONENT_ARM_DISARM` with the

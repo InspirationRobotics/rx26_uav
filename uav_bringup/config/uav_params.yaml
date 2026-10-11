@@ -143,6 +143,22 @@ telemetry_bridge:
                                            #      ArduPilot 4.7). USB2, never COM1
                                            #      (the autopilot's) and never USB1
                                            #      (free for diagnostics). "" = off.
+    ocs_rxl_heartbeat_hz: 2.0              # [RO] Ekko's own RXL HEARTBEAT to the
+                                           #      OCS over the radio (TUNNEL 0x8010,
+                                           #      41 B a frame: 82 B/s at 2 Hz).
+                                           #      The handbook's rate is 2 Hz. Built
+                                           #      by the same rules as ocs_client's
+                                           #      WiFi heartbeat. 0.0 = off. Float,
+                                           #      or rcl rejects the range.
+                                           #      Max 4.0. SAFE_PASSAGE is not
+                                           #      governed by this.
+    geoid_separation_m: -24.6              # [RO] = shared.geoid_separation_m (and
+                                           #      ocs_client's); pinned by
+                                           #      check_config.py. HAE = AMSL + this.
+                                           #      VENUE-SPECIFIC — see above.
+    airborne_alt_m: 1.0                    # [RO] = ocs_client.airborne_alt_m
+                                           #      (pinned). Fallback threshold only
+                                           #      when EXTENDED_SYS_STATE is absent.
     geofence:                              # [RO] = shared.geofence (pinned by
                                            #      check_config.py). CLOSED ring;
                                            #      the closing point is stripped

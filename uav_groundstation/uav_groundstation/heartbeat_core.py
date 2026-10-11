@@ -25,6 +25,8 @@ value, so UNKNOWN is truthful from a boat. From an aircraft it means the
 reporter forgot.
 """
 
+from uav_common.task_core import RX_TASKS, TASK_NONE
+
 # MAV_LANDED_STATE values (mirrors uav_msgs/FlightState.msg, kept as plain ints
 # so this module imports with no ROS present).
 LANDED_UNDEFINED = 0
@@ -92,8 +94,17 @@ def robot_state(mode, armed):
 
 
 def build_heartbeat(*, pose, status, attitude, landed, geoid_separation_m,
-                    airborne_alt_m):
+                    airborne_alt_m, current_task=TASK_NONE):
     """The heartbeat body, or (None, reason) when it must not be sent.
+
+    SHARED BY BOTH LINKS. ocs_client sends this body over WiFi; telemetry_bridge
+    sends the same body over the radio, packed as an RXL HEARTBEAT
+    (uav_common.rxl_uplink.heartbeat_payload). One set of rules, so the two
+    links cannot say different things about the same aircraft.
+
+    `current_task` is the task token from uav_common.task_core.CurrentTask --
+    the SAME source for both links, so the OCS falling back from the radio to
+    WiFi never sees the task change. TASK_NONE until something publishes one.
 
     Returns (dict, source) on success and (None, reason) on suppression, so the
     caller can log WHY it went quiet — "no heartbeat" with no reason is the kind
@@ -104,6 +115,10 @@ def build_heartbeat(*, pose, status, attitude, landed, geoid_separation_m,
     this function cannot detect, which is why the StreamCache API makes the
     stale case return None rather than offering a bare accessor.
     """
+    if current_task not in RX_TASKS:
+        # The nodes coerce what they are given, so this is a bug in a caller. An
+        # unparseable name costs the OCS the WHOLE frame, not just this field.
+        return None, "current_task %r is not an RxTask" % (current_task,)
     if pose is None:
         return None, "pose is stale"
     if status is None:
@@ -132,10 +147,9 @@ def build_heartbeat(*, pose, status, attitude, landed, geoid_separation_m,
         "altitude_hae_m": pose.altitude_amsl + geoid_separation_m,
         "depth_m": 0.0,
         "vehicle_type": "TYPE_UAV",
-        # No task-state source exists on the aircraft yet. TASK_NONE is the
-        # honest value and TASK_UNKNOWN is refused by the OCS, so this is not a
-        # placeholder that can silently rot.
-        "current_task": "TASK_NONE",
+        # /uav/current_task (uav_common.task_core): TASK_NONE until something
+        # publishes one. TASK_UNKNOWN is refused by the OCS and is never sent.
+        "current_task": current_task,
         "flight_phase": phase,
     }
     if attitude is not None:

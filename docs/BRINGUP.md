@@ -20,13 +20,17 @@ python3 tools/bench/bench_heartbeat.py
 python3 tools/bench/bench_gcs.py
 ```
 ```bash
+python3 tools/bench/bench_rxl_uplink.py
+```
+```bash
 python3 tools/scripts/check_config.py
 ```
 
-Expect `7/7`, `24/24`, `15/15`, and `OK`. These cover the geofence upload dialog
+Expect `7/7`, `27/27`, `76/76`, `110/110`, and `OK`. These cover the geofence upload dialog
 including every failure the readback exists to catch, the heartbeat suppression
-rules, and the ground station's rules **driven over HTTP with the page
-bypassed**.
+rules, the ground station's rules **driven over HTTP with the page
+bypassed**, and Ekko's reports to the OCS over the radio (heartbeat, SAFE_PASSAGE,
+the current task).
 
 With `rx26_ocs` cloned beside this repo, `check_config.py` also compares our
 geofence against the one the OCS declares. That is the check worth having.
@@ -55,6 +59,61 @@ python3 -m uav_groundstation.ocs_link --host 192.168.8.107 --type uav --fault mi
 ```
 
 A net you have never seen catch anything is a net you are guessing about.
+
+### Ekko's own reports over the radio (RXL)
+
+`telemetry_bridge` also reports to the OCS over the RFD radio, so RoboCommand can
+see UAV1 even when WiFi is down: a 2 Hz **HEARTBEAT** (position, state, flight
+phase, and the **current task**) and, for Task 1, a **SAFE_PASSAGE** report built
+from the buoy map. Both are broadcast MAVLink TUNNELs (`0x8010`, `0x8011`) that the
+laptop's `fleet_link` decodes; the specs are `OCS/docs/EKKO_RADIO_LINK.md`.
+
+**The current task is a topic you set, `/uav/current_task`** (`std_msgs/String`,
+RELIABLE + TRANSIENT_LOCAL, the same as the boat's `/crsd/current_task`). Until
+something publishes, the task is `TASK_NONE`. Both the radio heartbeat and the WiFi
+heartbeat (`ocs_client`) read it, so the two links always agree. Valid tokens:
+`TASK_NONE`, `TASK_SAFE_PASSAGE`, `TASK_INFRA_SURVEY_REPAIR`,
+`TASK_COORDINATED_LOGISTICS`, `TASK_DYNAMIC_INCIDENT`. Anything else is logged
+(`ignoring task token`) and **ignored** - the task does not change.
+
+On the bench, INSIDE the container (`docker exec -it uav_ekko bash`, workspace
+sourced; flags checked against the Humble `ros2 topic pub` source). Leave this
+running, so a node that restarts still gets the task:
+
+```bash
+ros2 topic pub --qos-durability transient_local --qos-reliability reliable -r 1 /uav/current_task std_msgs/msg/String "{data: TASK_SAFE_PASSAGE}"
+```
+
+Or once (`-w 2` waits until BOTH `telemetry_bridge` and `ocs_client` have matched,
+`--keep-alive` holds the publisher up long enough for the latched sample to reach
+them; the message is not kept after `pub` exits, so a node restarted afterwards
+falls back to `TASK_NONE`):
+
+```bash
+ros2 topic pub --once -w 2 --keep-alive 3 --qos-durability transient_local --qos-reliability reliable /uav/current_task std_msgs/msg/String "{data: TASK_SAFE_PASSAGE}"
+```
+
+Stand down with `{data: TASK_NONE}`. Read it back with `ros2 topic echo
+--qos-durability transient_local --qos-reliability reliable /uav/current_task`.
+`ocs_client` and `telemetry_bridge` each log `current_task -> ...` on a change.
+
+**SAFE_PASSAGE only goes out while the task is `TASK_SAFE_PASSAGE`**, and only
+from a map that is fresh (a `BuoyMap` within 3 s) with at least one buoy whose
+light is decided. Entry = the `FLASHING_BLUE` buoy, exit = the `SOLID_BLUE` buoy
+(unknown if none, or if two claim it); at most 10 buoys, passage buoys, red and
+green first. It is sent at once when a buoy appears or a state changes (never more
+than one a second) and refreshed every 5 s. A quiet log is not proof it works:
+`telemetry_bridge` logs `SAFE_PASSAGE (first|changed): ...` on each, and says
+`no fresh buoy map` when it is waiting.
+
+The heartbeat rate is `telemetry_bridge.ocs_rxl_heartbeat_hz` in
+`uav_params.yaml` (2.0; `0.0` turns the RXL heartbeat off; max 4.0). It sends
+`geoid_separation_m` and `airborne_alt_m` values pinned to `ocs_client`'s by
+`check_config.py`. A heartbeat whose position, attitude or altitude cannot be
+vouched for goes out with that flag **clear**, and the OCS then refuses it - the
+log says `sent WITHOUT vouching for ...`. Check it on the laptop: `/fleet`
+`ocs.vehicles.UAV1.heartbeat.source` reads `companion`, and the Radio tab shows
+`HEARTBEAT` / `SAFE_PASSAGE` TX rows. About 110 B/s added to the radio.
 
 ---
 

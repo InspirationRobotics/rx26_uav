@@ -103,6 +103,15 @@ PINNED = [
     ]),
     (("shared", "geoid_separation_m"), [
         ("ocs_client", "geoid_separation_m"),
+        # The RXL heartbeat telemetry_bridge sends over the radio computes HAE
+        # from this; the WiFi one from ocs_client's. Two figures would put the
+        # same aircraft at two altitudes depending on which link the OCS heard.
+        ("telemetry_bridge", "geoid_separation_m"),
+    ]),
+    # The flight-phase fallback threshold, for the same reason: the radio and WiFi
+    # heartbeats must call the same height "airborne".
+    (("ocs_client", "airborne_alt_m"), [
+        ("telemetry_bridge", "airborne_alt_m"),
     ]),
     (("shared", "geofence"), [
         ("telemetry_bridge", "geofence"),

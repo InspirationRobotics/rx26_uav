@@ -290,7 +290,7 @@ python3 tools/scripts/check_config.py
 python3 tools/bench/bench_fence.py && python3 tools/bench/bench_heartbeat.py && \npython3 tools/bench/bench_gcs.py && python3 tools/bench/bench_camera.py && \npython3 tools/bench/bench_mjpeg.py
 ```
 
-`7/7`, `24/24`, `15/15`, `OK`. If those pass, the logic is sound and the problem
+`7/7`, `27/27`, `76/76`, `OK`. If those pass, the logic is sound and the problem
 is the host, the device, or the wiring — which is the whole list above.
 
 ## Safety constraints (non-negotiable)

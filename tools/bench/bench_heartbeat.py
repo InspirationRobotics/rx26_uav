@@ -17,6 +17,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
                                 "uav_groundstation"))
+# heartbeat_core takes its task tokens from uav_common.task_core.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
+                                "uav_common"))
 
 from uav_groundstation import heartbeat_core as hc  # noqa: E402
 
@@ -102,7 +105,15 @@ def main():
     hba, _ = build(landed=hc.LANDED_IN_AIR, attitude=None)
     r.append(("stale attitude drops 2 fields, keeps hb",
               hba is not None and "roll_deg" not in hba))
-    for name, ok in r[-7:]:
+    hbt, _ = build(landed=hc.LANDED_IN_AIR, current_task="TASK_SAFE_PASSAGE")
+    r.append(("current_task is the one handed in",
+              hbt["current_task"] == "TASK_SAFE_PASSAGE"))
+    r.append(("...and TASK_NONE when none is",
+              build(landed=hc.LANDED_IN_AIR)[0]["current_task"] == "TASK_NONE"))
+    r.append(("a non-RxTask goes quiet, never out",
+              all(build(landed=hc.LANDED_IN_AIR, current_task=t)[0] is None
+                  for t in ("TASK_UNKNOWN", "", None, "TASK_SAFEPASSAGE"))))
+    for name, ok in r[-10:]:
         print("  %-34s %s" % (name, "PASS" if ok else "FAIL"))
 
     print("\nstate")

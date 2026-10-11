@@ -19,6 +19,9 @@
   <depend>std_srvs</depend>
   <depend>uav_msgs</depend>
   <depend>uav_common</depend>
+  <!-- heartbeat_core: the WiFi heartbeat's rules, shared with the radio
+       heartbeat. Runtime import only (no build order implied). -->
+  <exec_depend>uav_groundstation</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

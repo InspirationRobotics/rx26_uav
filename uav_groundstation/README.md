@@ -173,7 +173,10 @@ so trimming them needs a reboot to take effect.
 `/uav/ocs_command` and **nothing else** — this node never acts.
 
 What it says, and when it must say nothing, lives in **`heartbeat_core.py`**,
-which has no ROS in it. The node's own job is deciding what is *fresh*; the
+which has no ROS in it. `telemetry_bridge` calls the SAME `build_heartbeat` for the
+heartbeat it sends over the radio, so the two links cannot differ. `current_task`
+comes from `/uav/current_task` (`uav_common.task_core`, `TASK_NONE` until
+something publishes one), read by both nodes. The node's own job is deciding what is *fresh*; the
 core's is deciding what is *true*. Staleness needs a clock and a subscription;
 truthfulness does not.
 
@@ -222,7 +225,7 @@ python3 -m uav_groundstation.ocs_link --host 192.168.8.107 --type uav
 
 | You changed | Re-run |
 |---|---|
-| `heartbeat_core.py` | `tools/bench/bench_heartbeat.py` — 24 cases, most of them "must go quiet" |
+| `heartbeat_core.py` | `tools/bench/bench_heartbeat.py` — 27 cases, most of them "must go quiet"; and `tools/bench/bench_rxl_uplink.py`, because `telemetry_bridge` builds its radio heartbeat from the same function |
 | `node_registry.py` | `tools/bench/bench_gcs.py`; it is pure, exercise it directly |
 | `map_origin.py` | `tools/bench/bench_gcs.py` ("where the map centres"), then a cold start: nothing drawn more than 50 km away |
 | a protection or power rule | `curl` the endpoint, not the button — the page is not where the rule lives |
