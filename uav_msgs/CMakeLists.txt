@@ -32,6 +32,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # Crusader's position and what it is doing (Task 1 disruptive).
   "msg/BoatState.msg"
   "msg/RadioFrame.msg"
+  # The ESCs' own temperatures and rpm (telemetry_bridge -> the page header).
+  "msg/EscStatus.msg"
   DEPENDENCIES std_msgs
 )
 

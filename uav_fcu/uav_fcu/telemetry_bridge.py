@@ -13,6 +13,7 @@ MAVLink connection and there may only ever be one:
      /uav/rc_channels    uav_msgs/RcChannels   (RC_CHANNELS)
      /uav/battery        uav_msgs/Battery      (SYS_STATUS + BATTERY_STATUS)
      /uav/gps            uav_msgs/GpsStatus    (GPS_RAW_INT)
+     /uav/esc            uav_msgs/EscStatus    (ESC_TELEMETRY_*, ESCs reporting)
      /uav/fcu_params     uav_msgs/FcuParams    (PARAM_VALUE; latched, on change)
      /uav/autonomy_drop  std_msgs/Bool         (latched, TRANSIENT_LOCAL)
    Other nodes subscribe to these instead of opening their own MAVLink
@@ -145,9 +146,10 @@ from std_srvs.srv import Trigger
 
 from uav_common.param_utils import stale_msgs_message
 try:
-    from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, FcuParams,
-                              FcuStatus, Fence, FlightState, GlobalPos, GpsStatus,
-                              GuidedTarget, RadioFrame, RcChannels, SearchStatus)
+    from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, EscStatus,
+                              FcuParams, FcuStatus, Fence, FlightState, GlobalPos,
+                              GpsStatus, GuidedTarget, RadioFrame, RcChannels,
+                              SearchStatus)
 except ImportError as e:          # see stale_msgs_message
     raise ImportError(stale_msgs_message(e)) from e
 
@@ -307,6 +309,7 @@ class TelemetryBridge(Node):
         self.rc_pub = self.create_publisher(RcChannels, "/uav/rc_channels", 10)
         self.batt_pub = self.create_publisher(Battery, "/uav/battery", 10)
         self.gps_pub = self.create_publisher(GpsStatus, "/uav/gps", 10)
+        self.esc_pub = self.create_publisher(EscStatus, "/uav/esc", 10)
         self.params_pub = self.create_publisher(FcuParams, "/uav/fcu_params",
                                                 latched_qos)
         self.drop_pub = self.create_publisher(Bool, "/uav/autonomy_drop", latched_qos)
@@ -363,6 +366,9 @@ class TelemetryBridge(Node):
         self._batt = StreamCache(t_out)    # (volts, amps, remaining_pct)
         self._consumed = StreamCache(t_out)  # mAh
         self._gps = StreamCache(t_out)     # (fix, sats, hdop, h_acc_m)
+        # One cache per ESC_TELEMETRY block, keyed by its first output, so a
+        # block that goes quiet drops out on its own while the others stay.
+        self._esc = {}                     # first -> [(index, temp_c, rpm)]
         # Read-back autopilot params: {FcuParams field: value}. Values do not go
         # stale -- a parameter keeps its value until changed -- so this is a
         # plain dict, published whenever an entry changes.
@@ -525,6 +531,14 @@ class TelemetryBridge(Node):
                 elif mtype == "BATTERY_STATUS" and msg.id == 0:
                     self._consumed.set(
                         fcu_decode.consumed_mah(msg.current_consumed), t, stamp)
+                elif mtype.startswith("ESC_TELEMETRY_"):
+                    first = fcu_decode.esc_block_first_index(mtype)
+                    if first is not None:
+                        self._esc.setdefault(first, StreamCache(
+                            self._pose.timeout_s)).set(
+                            fcu_decode.esc_from_telemetry(
+                                first, msg.temperature, msg.rpm, msg.count),
+                            t, stamp)
                 elif mtype == "GPS_RAW_INT":
                     self._gps.set(fcu_decode.gps_from_raw(
                         msg.fix_type, msg.eph, msg.satellites_visible,
@@ -580,6 +594,8 @@ class TelemetryBridge(Node):
             batt = self._batt.get(t)
             consumed = self._consumed.get(t)
             gps = self._gps.get(t)
+            esc_blocks = [(c.stamp, c.get(t)) for _, c in sorted(self._esc.items())]
+            esc_blocks = [(st, v) for st, v in esc_blocks if v is not None]
             # one loud line per stream the moment it goes stale — a silent
             # gateway must be diagnosable from the log, and consumers that judge
             # health by arrival need the silence to be real
@@ -590,6 +606,8 @@ class TelemetryBridge(Node):
                                           ("rc_channels", self._rc),
                                           ("battery", self._batt),
                                           ("gps", self._gps))
+                     + tuple(("esc %d-%d" % (first + 1, first + 4), c)
+                             for first, c in self._esc.items())
                      if c.went_stale(t)]
             ext_seen = self._ext_state_seen
             params = dict(self._params) if self._params_dirty else None
@@ -642,6 +660,14 @@ class TelemetryBridge(Node):
             m.voltage, m.current, m.remaining_pct = batt
             m.consumed_mah = consumed if consumed is not None else float("nan")
             self.batt_pub.publish(m)
+        if esc_blocks:
+            m = EscStatus()
+            m.header.stamp = max(esc_blocks, key=lambda b: (b[0].sec, b[0].nanosec))[0]
+            entries = [e for _, v in esc_blocks for e in v]
+            m.index = [e[0] for e in entries]
+            m.temperature_c = [e[1] for e in entries]
+            m.rpm = [e[2] for e in entries]
+            self.esc_pub.publish(m)
         if gps is not None:
             m = GpsStatus()
             m.header.stamp = self._gps.stamp

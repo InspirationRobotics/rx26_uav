@@ -20,6 +20,9 @@ What it covers, and why each is here:
   armed_clock     armed time this power-on: counts only seen armed time, counts a
                   flight only on a seen disarmed->armed edge, resumes after a
                   ground station restart, resets on a new boot.
+  esc_core        the header's ESC temperature: an ESC that never reported is
+                  absent (not 0 C), the trend survives whole-degree rounding, and
+                  a quiet ESC goes blank instead of showing its last reading.
 """
 import math
 import os
@@ -33,8 +36,8 @@ for pkg in ("uav_common", "uav_groundstation", "uav_camera"):
 
 from uav_camera.siyi_client import decode_encoding  # noqa: E402
 from uav_common import camera_frame, fcu_decode  # noqa: E402
-from uav_groundstation import (armed_clock, battery_core, fence_view,  # noqa: E402
-                              preflight_core)
+from uav_groundstation import (armed_clock, battery_core, esc_core,  # noqa: E402
+                              fence_view, preflight_core)
 
 
 def check(name, passed, detail=""):
@@ -394,6 +397,49 @@ def case_armed_clock():
     return r
 
 
+def case_esc():
+    r = []
+    r.append(check("ESC_TELEMETRY_9_TO_12 starts at output index 8",
+                   fcu_decode.esc_block_first_index("ESC_TELEMETRY_9_TO_12") == 8
+                   and fcu_decode.esc_block_first_index("ESC_TELEMETRY_1_TO_4") == 0
+                   and fcu_decode.esc_block_first_index("SYS_STATUS") is None))
+    got = fcu_decode.esc_from_telemetry(8, [31, 0, 29, 0], [7240, 0, 7100, 0],
+                                        [20612, 0, 20611, 0])
+    r.append(check("a slot with no packets is absent, not 0 C",
+                   [e[0] for e in got] == [8, 10] and got[0][1] == 31.0, got))
+    tr = esc_core.EscTracker(3.0)
+    r.append(check("nothing heard -> None", tr.snapshot(0.0) is None))
+    # 13 Oct's hover, roughly: 6 C/min, reported in whole degrees at 5 Hz.
+    for k in range(0, 300):
+        t = k * 0.2
+        c = int(45 + 6.0 * t / 60.0)
+        tr.feed(t, [(8, c, 7240), (9, c - 3, 7280), (10, c - 2, 7250), (11, c - 4, 7380)])
+    snap = tr.snapshot(59.8)
+    r.append(check("hottest is ESC 1 (output 9), and the rest are listed",
+                   snap["hottest"] == 1 and snap["temps"][0]["output"] == 9
+                   and len(snap["temps"]) == 4, snap["temps"]))
+    r.append(check("trend ~6 C/min through whole-degree rounding",
+                   abs(snap["rate_c_min"] - 6.0) < 0.6, snap["rate_c_min"]))
+    states = []
+    for c in (79, 80, 94, 95):
+        e = esc_core.EscTracker(3.0)
+        e.feed(0.0, [(8, c, 0)])
+        states.append(e.snapshot(0.0)["state"])
+    r.append(check("ok below 80, warn from 80, bad from 95",
+                   states == ["ok", "warn", "warn", "bad"], states))
+    r.append(check("no trend from a few seconds of samples",
+                   e.snapshot(0.0)["rate_c_min"] is None))
+    q = esc_core.EscTracker(3.0)
+    q.feed(0.0, [(8, 60, 0)])
+    q.feed(2.0, [(9, 50, 0)])
+    s2 = q.snapshot(4.0)
+    r.append(check("an ESC that goes quiet drops out; the fresh one keeps its number",
+                   s2 is not None and [(x["esc"], x["output"]) for x in s2["temps"]]
+                   == [(2, 10)], s2))
+    r.append(check("all quiet -> None, never the last reading", q.snapshot(9.0) is None))
+    return r
+
+
 def main():
     results = []
     for title, fn in (("fcu_decode", case_decode), ("battery_core", case_battery),
@@ -401,7 +447,8 @@ def main():
                       ("fence_view", case_fence_view),
                       ("camera_frame", case_footprint),
                       ("siyi encoding", case_encoding),
-                      ("armed_clock", case_armed_clock)):
+                      ("armed_clock", case_armed_clock),
+                      ("esc_core", case_esc)):
         print("\n" + title)
         results += fn()
     print("\n%d/%d" % (sum(results), len(results)))

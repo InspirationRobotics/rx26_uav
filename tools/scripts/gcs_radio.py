@@ -49,9 +49,11 @@ from pymavlink import mavutil                                       # noqa: E402
 
 from uav_common import boat_link                                    # noqa: E402
 from uav_common import camera_frame                                 # noqa: E402
+from uav_common import fcu_decode                                   # noqa: E402
 from uav_common import geo                                          # noqa: E402
 from uav_common.stream_cache import StreamCache                     # noqa: E402
 from uav_groundstation import battery_core                          # noqa: E402
+from uav_groundstation import esc_core                              # noqa: E402
 from uav_groundstation import fence_view, map_origin, preflight_core  # noqa: E402
 from uav_groundstation.gcs_page import render                       # noqa: E402
 from uav_groundstation.gcs_server import GcsServer                  # noqa: E402
@@ -185,6 +187,10 @@ class Radio:
         self.vfr = StreamCache(TIMEOUT_S)
         self.flight = StreamCache(TIMEOUT_S)
         self.batt = battery_core.BatteryEstimator()
+        #: The ESCs' temperatures. ESC_TELEMETRY rides the EXTRA1 bundle with
+        #: ATTITUDE, so it is already on the air at the rate that flies; this
+        #: asks for nothing extra.
+        self.esc = esc_core.EscTracker(TIMEOUT_S)
         self.clock = ArmedSince()
         self.rx = boat_link.Receiver()          # POSITIONS + LIGHTS off the air
         self.buoy_seen = 0.0
@@ -289,6 +295,11 @@ class Radio:
                     self.flight.set(msg, t)
                 elif typ == "BATTERY_STATUS" and msg.id == 0:
                     self.consumed = float(msg.current_consumed or 0)
+                elif typ.startswith("ESC_TELEMETRY_"):
+                    first = fcu_decode.esc_block_first_index(typ)
+                    if first is not None:
+                        self.esc.feed(t, fcu_decode.esc_from_telemetry(
+                            first, msg.temperature, msg.rpm, msg.count))
 
     def request_loop(self):
         """Ask for any message in the set above that is NOT arriving.
@@ -540,6 +551,7 @@ class Radio:
             snap = {
                 "groups": (wifi or {}).get("groups", []),
                 "batt": batt, "gps": gps, "gnss": gnss,
+                "esc": self.esc.snapshot(now),
                 "armed_time": self.clock.snapshot(now),
                 "preflight": pre,
                 "tel": {

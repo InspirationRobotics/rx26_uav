@@ -61,6 +61,29 @@ def gps_from_raw(fix_type, eph, satellites_visible, h_acc_mm):
     return int(fix_type or 0), sats, hdop, acc
 
 
+def esc_block_first_index(mtype):
+    """ESC_TELEMETRY_9_TO_12 -> 8, the 0-based output of its first slot.
+
+    None for any other message type. Each block carries four ESCs; ArduPilot
+    sends a block only when one of its outputs has telemetry.
+    """
+    if not mtype.startswith("ESC_TELEMETRY_"):
+        return None
+    head = mtype[len("ESC_TELEMETRY_"):].split("_TO_", 1)[0]
+    return int(head) - 1 if head.isdigit() else None
+
+
+def esc_from_telemetry(first_index, temperature, rpm, count):
+    """One ESC_TELEMETRY_* block -> [(index, temperature_c, rpm), ...].
+
+    A slot whose packet count is 0 has never heard its ESC: its zeros are
+    absence, not a 0 C reading, so the slot is left out entirely.
+    """
+    n = min(len(temperature), len(rpm), len(count))
+    return [(first_index + i, float(temperature[i]), float(rpm[i]))
+            for i in range(n) if count[i]]
+
+
 def param_name(raw):
     """PARAM_VALUE.param_id -> clean str. Arrives NUL-padded, as str or bytes."""
     if isinstance(raw, bytes):

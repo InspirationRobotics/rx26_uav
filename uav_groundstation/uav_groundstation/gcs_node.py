@@ -10,7 +10,7 @@ the way back.
     # then, on the laptop:  http://<JETSON_IP>:8090
 
 Subscribes (read-only): /uav/pose, /uav/attitude, /uav/fcu_status,
-/uav/flight_state, /uav/battery, /uav/gps, /uav/fcu_params, /uav/camera/status,
+/uav/flight_state, /uav/battery, /uav/gps, /uav/esc, /uav/fcu_params, /uav/camera/status,
 /uav/perception/buoy_map, /uav/fence, /uav/search/status. Publishes
 nothing. Its only outward effects are the processes it spawns, the two power
 verbs it can hand to the host helper — both gated, both re-checked server-side —
@@ -65,8 +65,8 @@ from std_srvs.srv import SetBool, Trigger
 from uav_common.param_utils import stale_msgs_message
 try:
     from uav_msgs.msg import (Attitude, Battery, BoatState, BuoyMap, CameraStatus,
-                              FcuParams, FcuStatus, Fence, FlightState, GlobalPos,
-                              GpsStatus, RadioFrame, SearchStatus)
+                              EscStatus, FcuParams, FcuStatus, Fence, FlightState,
+                              GlobalPos, GpsStatus, RadioFrame, SearchStatus)
 except ImportError as e:          # see stale_msgs_message
     raise ImportError(stale_msgs_message(e)) from e
 
@@ -80,7 +80,8 @@ from uav_common.param_utils import declare_from_config, make_set_callback
 from uav_common.stream_cache import StreamCache
 
 from uav_groundstation import (armed_clock, battery_core, detector_models,
-                              fence_view, map_origin, preflight_core, radio_core)
+                              esc_core, fence_view, map_origin, preflight_core,
+                              radio_core)
 from uav_groundstation import node_registry as reg
 from uav_groundstation import power_client, proc_scan, system_info
 from uav_groundstation.gcs_page import render as render_page
@@ -312,6 +313,9 @@ class GroundStation(Node):
         self.create_subscription(Battery, "/uav/battery", self._on_battery, 10)
         self._gps = StreamCache(float(p["status_timeout_s"]))
         self.create_subscription(GpsStatus, "/uav/gps", self._on_gps, 10)
+        # The ESCs' temperatures, for the header: see esc_core for why.
+        self._esc = esc_core.EscTracker(float(p["status_timeout_s"]))
+        self.create_subscription(EscStatus, "/uav/esc", self._on_esc, 10)
         # Autopilot params read back by telemetry_bridge. Latched on that side,
         # so this subscription must be TRANSIENT_LOCAL too or a ground station
         # restarted after the read never hears the values.
@@ -583,6 +587,7 @@ class GroundStation(Node):
             "tel": tel,
             "batt": batt,
             "gps": gps,
+            "esc": self._esc.snapshot(now),
             "armed_time": self._armed_clock.snapshot(now),
             "preflight": preflight_core.checks(self._preflight_inputs(
                 tel, batt, gps, params, cam, running, search)),
@@ -669,6 +674,10 @@ class GroundStation(Node):
         self._battery.feed(time.monotonic(), msg.voltage, msg.current,
                            msg.consumed_mah, int(msg.remaining_pct),
                            known and armed)
+
+    def _on_esc(self, msg):
+        self._esc.feed(time.monotonic(),
+                       zip(msg.index, msg.temperature_c, msg.rpm))
 
     def _on_gps(self, msg):
         fix = int(msg.fix_type)

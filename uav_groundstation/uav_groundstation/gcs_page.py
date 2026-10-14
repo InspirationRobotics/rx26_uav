@@ -104,7 +104,7 @@ header{position:sticky;top:0;z-index:5;background:var(--panel);
    is the verdict; the big number is the reading; the line under it is shown in
    full on up to two lines, and every tile keeps room for both, so a value
    changing length never changes the height of the row. */
-#vitals{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+#vitals{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));
         gap:8px;padding:8px 12px 10px}
 .tile{background:var(--panel2);border:1px solid var(--line);border-left:4px solid var(--line);
       border-radius:8px;padding:5px 10px 6px;min-width:0}
@@ -366,6 +366,7 @@ main.split #mapside,main.split #mapexp,main.split .wide-only,main.split #s-map d
   <div id="vitals">
     <div id="modetile" class="tile"></div>
     <div id="battery" class="tile"></div>
+    <div id="esctile" class="tile hidden"></div>
     <div id="flighttime" class="tile"></div>
     <div id="gpstile" class="tile"></div>
     <div id="alttile" class="tile"></div>
@@ -1411,6 +1412,20 @@ function renderVitals(){
     tile('battery',chipState('batt'),'Battery',fmt(B.voltage,2)+' V',sub,
       frac==null?'':'<div class="gauge"><i style="width:'+Math.round(frac*100)+'%"></i></div>',
       (B.basis||'')+(B.current!=null?' \u00b7 '+fmt(B.current,1)+' A (sensor uncalibrated)':''))}
+  /* The ESCs: the hottest, big, and whether it is still climbing. On 2026-10-13
+     a 4.5 min hover at 5.4 kg took the 4-in-1 to 96 °C with the battery far from
+     empty. Hidden only when the server sends no ESC block at all (an older
+     ground station); blank, never the last reading, when the ESCs go quiet. */
+  var E=S.esc,et=el('esctile');
+  if(!('esc' in S)){et.className='tile hidden'}
+  else if(!E){tile('esctile','','ESC temp','—','no ESC data')}
+  else{
+    var r=E.rate_c_min,trend=r==null?' hottest':' · '+(Math.abs(r)<E.steady_c_min?'steady'
+      :(r>0?'rising ':'cooling ')+fmt(Math.abs(r),0)+' °C/min');
+    tile('esctile',E.state,'ESC temp',fmt(E.max_c,0)+' °C','ESC '+E.hottest+trend,'',
+      E.temps.map(function(e){return 'ESC '+e.esc+' (output '+e.output+'): '
+        +fmt(e.c,0)+' °C, '+fmt(e.rpm,0)+' rpm'}).join('\n')
+      +'\nAmber from '+fmt(E.warn_c,0)+' °C, red from '+fmt(E.bad_c,0)+' °C.')}
   /* Armed time this power-on: Chris's flight-log number, so it survives a
      ground station restart and resets only when the aircraft is powered off. */
   if(!A){tile('flighttime','','Armed time','\u2014','',"",'armed time this power-on')}
